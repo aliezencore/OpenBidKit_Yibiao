@@ -397,6 +397,15 @@ function normalizeSubjectProfileState(state?: Partial<SubjectProfileState> | nul
     aliases: Array.isArray(state.aliases) ? state.aliases.map((item) => String(item)) : [],
     candidates: Array.isArray(state.candidates) ? state.candidates : [],
     preselectIndex: typeof state.preselectIndex === 'number' ? state.preselectIndex : undefined,
+    identificationTarget: state.identificationTarget
+      && (state.identificationTarget.mode === 'single' || state.identificationTarget.mode === 'all')
+      ? {
+          mode: state.identificationTarget.mode,
+          bidDocumentId: typeof state.identificationTarget.bidDocumentId === 'string'
+            ? state.identificationTarget.bidDocumentId
+            : undefined,
+        }
+      : undefined,
     bidSignature: typeof state.bidSignature === 'string' ? state.bidSignature : undefined,
     confirmedAt: typeof state.confirmedAt === 'string' ? state.confirmedAt : undefined,
     error: typeof state.error === 'string' ? state.error : undefined,
@@ -760,8 +769,21 @@ function RejectionCheckPage() {
   const customCheckItemsDraftRef = useRef('');
   const customCheckItemsSaveVersionRef = useRef(0);
   const subjectProfileRef = useRef<SubjectProfileState>(createEmptySubjectProfileState());
-  const subjectBidDocuments: { id: string; fileName: string }[] = [];
-  const resolvedIdentificationTarget: SubjectIdentificationTarget = pendingIdentificationTarget || { mode: 'single' };
+  const subjectBidDocuments = useMemo(
+    () => bidDocuments
+      .filter((document) => String(document.content || '').trim())
+      .map((document) => ({ id: document.id, fileName: document.fileName })),
+    [bidDocuments],
+  );
+  const resolvedIdentificationTarget: SubjectIdentificationTarget = useMemo(() => {
+    const stored = pendingIdentificationTarget || subjectProfile.identificationTarget;
+    if (stored?.mode === 'all') return { mode: 'all' };
+    const selected = stored?.mode === 'single' && stored.bidDocumentId
+      && subjectBidDocuments.some((document) => document.id === stored.bidDocumentId)
+      ? stored.bidDocumentId
+      : subjectBidDocuments[0]?.id;
+    return selected ? { mode: 'single', bidDocumentId: selected } : { mode: 'single' };
+  }, [pendingIdentificationTarget, subjectProfile.identificationTarget, subjectBidDocuments]);
   const { showToast } = useToast();
   const { showDocumentParseNotice } = useDocumentParseNotice();
 
@@ -1374,12 +1396,26 @@ function RejectionCheckPage() {
     return false;
   }
 
-  async function startSubjectIdentification() {
+  function openSubjectDialog() {
+    setPendingIdentificationTarget(null);
+    setSubjectDialogOpen(true);
+  }
+
+  async function startSubjectIdentification(target: SubjectIdentificationTarget = resolvedIdentificationTarget) {
+    const bidDocumentIds = target.mode === 'all'
+      ? subjectBidDocuments.map((document) => document.id)
+      : target.bidDocumentId
+        ? [target.bidDocumentId]
+        : [];
+    if (!bidDocumentIds.length) {
+      showToast('请先导入至少一份投标文件', 'info');
+      return;
+    }
     try {
+      setPendingIdentificationTarget(target);
       setSubjectProfile((prev) => ({ ...prev, status: 'identifying' }));
-      // 返回值是 startManagedTask 的启动确认，不是识别结果；
-      // 候选经 subjectProfile 工作区补丁异步推送，因此先打开 Dialog 显示“识别中”，候选到达后由补丁刷新。
-      await window.yibiao.rejectionCheck.startSubjectIdentification();
+      // 返回值是 startManagedTask 的启动确认；候选经工作区补丁异步推送。
+      await window.yibiao.rejectionCheck.startSubjectIdentification({ bidDocumentIds });
       setSubjectDialogOpen(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : '投标主体识别失败';
@@ -1389,7 +1425,11 @@ function RejectionCheckPage() {
   }
 
   async function handleSubjectConfirm({ officialName, aliases }: { officialName: string; aliases: string[] }) {
-    const result = await window.yibiao.rejectionCheck.confirmSubject({ officialName, aliases });
+    const result = await window.yibiao.rejectionCheck.confirmSubject({
+      officialName,
+      aliases,
+      identificationTarget: resolvedIdentificationTarget,
+    });
     if (!result?.success) {
       showToast(result?.message || '投标主体确认失败', 'error');
       return;
@@ -1398,6 +1438,7 @@ function RejectionCheckPage() {
     subjectProfileRef.current = nextProfile;
     setSubjectProfile(nextProfile);
     setSubjectDialogOpen(false);
+    setPendingIdentificationTarget(null);
     showToast('投标主体已确认', 'success');
     // spec §12.2：确认后直接启动总检查（沿用当前勾选的全部检查项）。
     await startChecks();
@@ -1430,7 +1471,7 @@ function RejectionCheckPage() {
 
     if (runOptions.subjectCheck && subjectProfileRef.current.status !== 'confirmed') {
       showToast('请先确认投标主体', 'info');
-      await startSubjectIdentification();
+      openSubjectDialog();
       return;
     }
 
@@ -2107,10 +2148,10 @@ function RejectionCheckPage() {
           <button
             type="button"
             className="secondary-action"
-            onClick={() => { void startSubjectIdentification(); }}
-            disabled={subjectProfile.status === 'identifying' || checkRunning || extractionRunning || !bidDocuments.length}
+            onClick={openSubjectDialog}
+            disabled={checkRunning || extractionRunning || !bidDocuments.length}
           >
-            {subjectProfile.status === 'identifying' ? '识别中...' : '识别并确认投标主体'}
+            {subjectProfile.status === 'identifying' ? '识别中...' : '确认投标主体'}
           </button>
         </div>
       );
@@ -2181,10 +2222,10 @@ function RejectionCheckPage() {
             <button
               type="button"
               className="text-button"
-              onClick={() => { void startSubjectIdentification(); }}
+              onClick={openSubjectDialog}
               disabled={checkRunning || extractionRunning || !bidDocuments.length}
             >
-              重新识别并确认主体
+              修改投标主体
             </button>
           </div>
         </div>
