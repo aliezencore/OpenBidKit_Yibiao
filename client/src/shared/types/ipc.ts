@@ -713,6 +713,9 @@ export interface YibiaoBridge {
     saveUiState: (payload: Partial<Pick<RejectionCheckWorkspaceState, 'step' | 'activeDocumentTab' | 'activeResultTab' | 'activeCheckResultTab' | 'customCheckItems' | 'checkOptions'>>) => Promise<void>;
     updateState: (partial: RejectionCheckWorkspacePatch) => Promise<void>;
     exportExcel: (request: { rejectionInputSignature: string; bidSignature: string }) => Promise<CheckResultExportResult>;
+    startSubjectIdentification: () => Promise<unknown>;
+    confirmSubject: (payload: { officialName: string; aliases: string[] }) => Promise<{ success: boolean; message: string }>;
+    deleteSubjectFinding: (findingId: string) => Promise<boolean>;
     clear: () => Promise<{ success: boolean; message?: string }>;
   };
   templates: {
@@ -732,6 +735,7 @@ export interface YibiaoBridge {
     pauseContentGeneration: () => Promise<unknown>;
     startRejectionItemsExtraction: (payload: unknown) => Promise<unknown>;
     startRejectionCheck: (payload: unknown) => Promise<unknown>;
+    startBidSubjectIdentification: (payload: { workspaceState?: unknown }) => Promise<unknown>;
     startDuplicateAnalysis: (payload: unknown) => Promise<unknown>;
     startFeasibilityAnalysis: (payload?: unknown) => Promise<unknown>;
     startFeasibilityOutline: (payload?: unknown) => Promise<unknown>;

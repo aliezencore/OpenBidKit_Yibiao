@@ -8,6 +8,9 @@ function registerRejectionCheckIpc({ rejectionCheckStore, taskService, checkResu
   ipcMain.handle('rejection-check:save-ui-state', (_event, payload) => rejectionCheckStore.saveUiState(payload));
   ipcMain.handle('rejection-check:update-state', (_event, partial) => rejectionCheckStore.updateRejectionCheckWithoutReload(partial));
   ipcMain.handle('rejection-check:export-excel', (_event, request) => checkResultExportService.exportRejectionExcel(request));
+  ipcMain.handle('rejection-check:start-subject-identification', () => taskService.startBidSubjectIdentification({}));
+  ipcMain.handle('rejection-check:confirm-subject', (_event, payload) => taskService.confirmBidSubject(payload));
+  ipcMain.handle('rejection-check:delete-subject-finding', (_event, findingId) => taskService.deleteSubjectFinding(findingId));
   ipcMain.handle('rejection-check:clear', () => taskService.resetRejectionCheck());
 }
 

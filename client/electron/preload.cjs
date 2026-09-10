@@ -224,6 +224,9 @@ const bridge = {
     saveUiState: (payload) => ipcRenderer.invoke('rejection-check:save-ui-state', payload),
     updateState: (partial) => ipcRenderer.invoke('rejection-check:update-state', partial),
     exportExcel: (request) => ipcRenderer.invoke('rejection-check:export-excel', request),
+    startSubjectIdentification: () => ipcRenderer.invoke('rejection-check:start-subject-identification'),
+    confirmSubject: (payload) => ipcRenderer.invoke('rejection-check:confirm-subject', payload),
+    deleteSubjectFinding: (findingId) => ipcRenderer.invoke('rejection-check:delete-subject-finding', findingId),
     clear: () => ipcRenderer.invoke('rejection-check:clear'),
   },
   templates: {
@@ -243,6 +246,7 @@ const bridge = {
     pauseContentGeneration: () => ipcRenderer.invoke('tasks:pause-content-generation'),
     startRejectionItemsExtraction: (payload) => ipcRenderer.invoke('tasks:start-rejection-items-extraction', payload),
     startRejectionCheck: (payload) => ipcRenderer.invoke('tasks:start-rejection-check', payload),
+    startBidSubjectIdentification: (payload) => ipcRenderer.invoke('tasks:start-bid-subject-identification', payload),
     startDuplicateAnalysis: (payload) => ipcRenderer.invoke('tasks:start-duplicate-analysis', payload),
     startFeasibilityAnalysis: (payload) => ipcRenderer.invoke('tasks:start-feasibility-analysis', payload),
     startFeasibilityOutline: (payload) => ipcRenderer.invoke('tasks:start-feasibility-outline', payload),
