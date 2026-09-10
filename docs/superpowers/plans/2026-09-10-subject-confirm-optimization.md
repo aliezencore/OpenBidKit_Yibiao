@@ -1190,3 +1190,11 @@ cd C:/workspace/OpenBidKit_Yibiao
 git add docs/superpowers/plans/2026-09-10-subject-confirm-optimization.md
 git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "docs: 补充主体确认优化手动验收清单"
 ```
+
+## 手动验收清单
+
+1. 不点 AI 直接手填名称 + 简称 → 确认后能正常启动检查（零 AI 调用）。
+2. 默认范围 = 第一份；切到其他单份 / 全部后识别范围随之变化。
+3. 确认后重开弹窗，识别范围已回填。
+4. 仅 1 份投标文件时无下拉、直接扫该份。
+5. AI 识别失败时弹窗可重试且手填可用。
