@@ -328,7 +328,12 @@ test('识别范围外的候选会被丢弃', async () => {
   const captured = {};
   await assert.rejects(
     () => runBidSubjectIdentificationTask({
-      aiService: createIdentificationAiStub(captured, { ...IDENTIFICATION_CANDIDATE, bid_document_id: 'bid-2' }),
+      aiService: createIdentificationAiStub(captured, {
+        ...IDENTIFICATION_CANDIDATE,
+        bid_document_id: 'bid-2',
+        // 原文必须能在 bid-2 中定位，否则候选会先因"原文无法定位"被丢弃，测不出范围过滤。
+        original_text: `投标人名称：${SUBJECT_A}`,
+      }),
       checkpointTask: () => {},
       payload: { bidDocumentIds: ['bid-1'], workspaceState: { bidDocuments: BID_DOCUMENTS, bidSignature: 'sig-1' } },
       previousState: {},
