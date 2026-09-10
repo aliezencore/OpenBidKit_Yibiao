@@ -902,7 +902,18 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
     );
     runner({ aiService: runnerAiService, agentService: runnerAgentService, ordinaryAgentService: runnerOrdinaryAgentService, workspaceStore: runnerWorkspaceStore, knowledgeBaseService, openXmlHelperService, updateTask, checkpointTask, payload, taskControl, previousState }).catch((error) => {
       if (!taskControl.signal.aborted) {
-        checkpointTask({ status: 'error', error: error.message || '任务执行失败' });
+        const message = error.message || '任务执行失败';
+        const workspacePartial = type === 'bid-subject-identification'
+          ? {
+              subjectProfile: {
+                ...(rejectionCheckStore.loadRejectionCheck()?.subjectProfile || {}),
+                status: 'error',
+                error: message,
+                updatedAt: now(),
+              },
+            }
+          : {};
+        checkpointTask({ status: 'error', error: message }, workspacePartial);
       }
     }).finally(() => {
       taskControl.dispose();
@@ -1550,6 +1561,7 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
       return rejectionCheckStore.confirmSubject({
         officialName: payload?.officialName,
         aliases: payload?.aliases,
+        identificationTarget: payload?.identificationTarget,
       });
     },
     deleteSubjectFinding(findingId) {

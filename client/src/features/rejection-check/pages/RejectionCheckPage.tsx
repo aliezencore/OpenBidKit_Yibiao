@@ -1434,7 +1434,13 @@ function RejectionCheckPage() {
       showToast(result?.message || '投标主体确认失败', 'error');
       return;
     }
-    const nextProfile: SubjectProfileState = { ...subjectProfileRef.current, status: 'confirmed', officialName, aliases };
+    const nextProfile: SubjectProfileState = {
+      ...subjectProfileRef.current,
+      status: 'confirmed',
+      officialName,
+      aliases,
+      identificationTarget: resolvedIdentificationTarget,
+    };
     subjectProfileRef.current = nextProfile;
     setSubjectProfile(nextProfile);
     setSubjectDialogOpen(false);
@@ -2772,7 +2778,10 @@ function RejectionCheckPage() {
         onIdentificationTargetChange={setPendingIdentificationTarget}
         onIdentify={() => { void startSubjectIdentification(); }}
         onConfirm={handleSubjectConfirm}
-        onCancel={() => setSubjectDialogOpen(false)}
+        onCancel={() => {
+          setSubjectDialogOpen(false);
+          setPendingIdentificationTarget(null);
+        }}
       />
 
       <AppDialog
