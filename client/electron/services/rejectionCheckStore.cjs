@@ -2,6 +2,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { getRejectionCheckDir, getRejectionCheckDocumentMarkdownPath } = require('../utils/paths.cjs');
+const { extractDocxVisualAssets, isDocxFilePath } = require('./docxVisualAssetExtractor.cjs');
+const { getSubjectMediaDir, writeVisualMediaFiles, removeVisualMediaDir } = require('./subjectMediaFiles.cjs');
 const {
   deleteImportedImageBatchesAsync,
   deleteImportedImageBatchesForExactScopeAsync,
@@ -960,6 +962,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     let addedCount = 0;
     let skippedCount = 0;
     let firstAddedBidDocumentId = '';
+    const importWarnings = [];
     if (documentRole === 'tender') {
       await runSerializedTenderRewrite(async () => {
         const existingDocuments = loadTenderSourceDocuments();
@@ -1028,23 +1031,71 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
         await runBeforeCommit(options.beforeCommit);
       }
       await writePreparedDocuments(preparedDocuments);
+
+      // 主体检查视觉材料：DOCX 在 docId 确定后直接写最终目录，事务失败回收（与 Markdown 先写后回收同一模式）。
+      const importedMediaDirs = [];
+      const assetRowsByDocument = new Map();
+      const assetErrors = [];
+      for (const prepared of preparedDocuments) {
+        const documentId = prepared.values.document_id;
+        const sourcePath = String(importedDocuments.find((item) => item.file_name === prepared.values.file_name)?.source_path || '');
+        if (!isDocxFilePath(sourcePath)) continue;
+        try {
+          const { occurrences, mediaFiles } = await extractDocxVisualAssets(sourcePath);
+          const mediaDir = getSubjectMediaDir(rejectionCheckDir, documentId);
+          const relativePathByName = writeVisualMediaFiles({ mediaDir, mediaFiles });
+          importedMediaDirs.push(mediaDir);
+          const rows = occurrences.map((occurrence, index) => ({
+            id: `${documentId}-asset-${index + 1}`,
+            mediaName: occurrence.mediaName,
+            contentHash: mediaFiles.find((media) => media.mediaName === occurrence.mediaName)?.contentHash || '',
+            relativePath: relativePathByName.get(occurrence.mediaName) || '',
+            mimeType: mediaFiles.find((media) => media.mediaName === occurrence.mediaName)?.mimeType || 'application/octet-stream',
+            width: occurrence.width,
+            height: occurrence.height,
+            placement: occurrence.placement,
+            assetKind: occurrence.assetKind,
+            locationHint: occurrence.locationHint,
+            nearbyText: occurrence.nearbyText,
+            sectionTitle: occurrence.sectionTitle,
+          })).filter((row) => row.relativePath && row.contentHash);
+          assetRowsByDocument.set(documentId, rows);
+        } catch (error) {
+          // 单份 DOCX 媒体损坏不阻塞导入（spec §13），记录后继续其他资产和正文。
+          assetErrors.push(`${prepared.values.file_name}：图片提取失败（${error.message}）`);
+        }
+      }
+
       const transaction = db.transaction(() => {
         preparedDocuments.forEach(savePreparedDocument);
+        for (const [documentId, rows] of assetRowsByDocument.entries()) {
+          saveVisualAssets(documentId, rows);
+        }
         if (preparedDocuments.length) {
           clearCheckResults();
+          resetSubjectProfile();
           updateMeta({ active_document_tab: firstAddedBidDocumentId || 'tender' });
         }
       });
       try {
         transaction();
       } catch (error) {
-        await Promise.all(preparedDocuments.map((prepared) => runCleanup(
-          `回收未提交 Markdown 失败：${prepared.absolutePath}`,
-          () => fs.promises.rm(prepared.absolutePath, { force: true }),
-        )));
+        await Promise.all([
+          ...preparedDocuments.map((prepared) => runCleanup(
+            `回收未提交 Markdown 失败：${prepared.absolutePath}`,
+            () => fs.promises.rm(prepared.absolutePath, { force: true }),
+          )),
+          ...importedMediaDirs.map((mediaDir) => runCleanup(
+            `回收未提交图片失败：${mediaDir}`,
+            () => removeVisualMediaDir(mediaDir),
+          )),
+        ]);
         throw error;
       }
       addedCount = preparedDocuments.length;
+      if (assetErrors.length) {
+        importWarnings.push(...assetErrors);
+      }
     }
     const fallbackToLocal = importedDocuments.some((item) => item?.fallback_to_local) || String(result?.message || '').includes('自动使用本地解析');
     if (addedCount === 0) {
@@ -1059,6 +1110,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     if (fallbackToLocal) messageParts.push('当前格式已自动使用本地解析');
     if (skippedCount > 0) messageParts.push(`跳过 ${skippedCount} 份重复文件`);
     appendImportFailureParts(messageParts, result?.errors);
+    if (importWarnings.length) messageParts.push(importWarnings.join('；'));
     return { success: true, message: messageParts.join('，') };
   }
 
@@ -1163,11 +1215,18 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       await runCleanup('清理招标文件图片失败', () => deleteImportedImageBatchesAsync(app, 'rejection-check-tender'));
     } else if (documentId) {
       await runCleanup(`清理投标文件图片失败：${documentId}`, () => deleteImportedImageBatchesAsync(app, `rejection-check-bid-${documentId}`));
+      // 主体检查视觉材料随文档删除（spec §6.3）。
+      clearVisualAssets(documentId);
+      await runCleanup('清理投标文件视觉材料失败', () => removeVisualMediaDir(getSubjectMediaDir(rejectionCheckDir, documentId)));
+      resetSubjectProfile('投标文件已更新，请重新确认投标主体');
       if (documentId === 'bid-1') {
         await runCleanup('清理旧投标文件图片失败', () => deleteImportedImageBatchesForExactScopeAsync(app, 'rejection-check-bid'));
       }
     } else {
       await runCleanup('清理投标文件图片失败', () => deleteImportedImageBatchesAsync(app, 'rejection-check-bid'));
+      clearVisualAssets();
+      await runCleanup('清理投标文件视觉材料失败', () => removeVisualMediaDir(path.join(rejectionCheckDir, 'subject-media')));
+      resetSubjectProfile('投标文件已更新，请重新确认投标主体');
     }
   }
 

@@ -1619,7 +1619,7 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
       return rejectionCheckStore.importDocument(role, filePaths, {
         beforeCommit: () => cancelRejectionCheckTasks(
           documentRole === 'bid' ? '投标文件已更新，后台任务已取消' : '招标文件已更新，后台任务已取消',
-          documentRole === 'bid' ? ['rejection-check-run'] : undefined,
+          documentRole === 'bid' ? ['rejection-check-run', 'bid-subject-identification'] : undefined,
         ),
       });
     },
@@ -1633,7 +1633,7 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
       return rejectionCheckStore.removeDocument(role, documentId, {
         beforeCommit: () => cancelRejectionCheckTasks(
           documentRole === 'bid' ? '投标文件已更新，后台任务已取消' : '招标文件已更新，后台任务已取消',
-          documentRole === 'bid' ? ['rejection-check-run'] : undefined,
+          documentRole === 'bid' ? ['rejection-check-run', 'bid-subject-identification'] : undefined,
         ),
       });
     },

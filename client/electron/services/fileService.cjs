@@ -727,6 +727,7 @@ const config = configStore ? configStore.load() : { components: { file_parser: {
         parsedDocuments.push({
           file_content: fileContent,
           file_name: path.basename(filePath),
+          source_path: filePath,
           parser_provider: parser.provider,
           parser_label: parserLabels[parser.provider] || '本地解析',
           fallback_to_local: Boolean(parser.fallbackToLocal),
