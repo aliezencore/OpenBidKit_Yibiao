@@ -54,3 +54,27 @@ test('旧签名结果和仅错误空结果不能启用导出', () => {
     bidSignature: 'bid-current',
   }), false);
 });
+
+test('仅主体一致性结果匹配当前签名时允许导出', () => {
+  assert.equal(hasExportableRejectionResults({
+    rejectionCheckResult: result('idle', ''),
+    typoCheckResult: result('idle', 'bid-current'),
+    logicCheckResult: result('idle', 'bid-current'),
+    subjectCheckResult: result('success', 'subject-current'),
+    rejectionInputSignature: 'rejection-current',
+    bidSignature: 'bid-current',
+    subjectInputSignature: 'subject-current',
+  }), true);
+});
+
+test('主体一致性结果签名过期时不能启用导出', () => {
+  assert.equal(hasExportableRejectionResults({
+    rejectionCheckResult: result('idle', ''),
+    typoCheckResult: result('idle', 'bid-current'),
+    logicCheckResult: result('idle', 'bid-current'),
+    subjectCheckResult: result('success', 'subject-old'),
+    rejectionInputSignature: 'rejection-current',
+    bidSignature: 'bid-current',
+    subjectInputSignature: 'subject-current',
+  }), false);
+});

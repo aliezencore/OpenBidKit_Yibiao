@@ -458,6 +458,74 @@ function createSubjectCheckInputSignature({
   ].join('\n---yibiao-subject-signature---\n');
 }
 
+const subjectVisionStatusText: Record<string, string> = {
+  disabled: '未启用印章检查',
+  pending: '等待印章检查',
+  running: '正在检查印章',
+  success: '印章检查已完成',
+  partial: '印章检查部分完成',
+  unavailable: '当前文本模型未开启多模态支持，未执行印章检查',
+  error: '印章检查失败',
+};
+
+const subjectLocationKindText: Record<string, string> = {
+  body: '正文',
+  table: '表格',
+  signature: '签署/落款',
+  'standalone-image': '独立图片',
+  'scanned-page': '整页扫描件',
+};
+
+// 与 electron/services/subjectMediaFiles.cjs 的 buildAssetPreviewUrl 保持一致。
+function buildSubjectAssetUrl(bidDocumentId: string, relativePath: string) {
+  const documentPart = encodeURIComponent(String(bidDocumentId || ''));
+  const pathPart = String(relativePath || '').split('/').map(encodeURIComponent).join('/');
+  return `yibiao-asset://rejection-check-media/${documentPart}/${pathPart}`;
+}
+
+function SubjectFindingItem({
+  finding,
+  documentName,
+  onDelete,
+}: {
+  finding: SubjectCheckFinding;
+  documentName: string;
+  onDelete: (findingId: string) => void;
+}) {
+  const isConfirmed = finding.level === 'confirmed-mismatch';
+  return (
+    <article className={`subject-finding subject-finding--${isConfirmed ? 'confirmed' : 'review'}`}>
+      <header className="subject-finding__header">
+        <span className={`subject-finding__level subject-finding__level--${isConfirmed ? 'confirmed' : 'review'}`}>
+          {isConfirmed ? '明确不一致' : '需人工复核'}
+        </span>
+        <span className="subject-finding__source">{finding.source === 'seal' ? '印章' : '正文'}</span>
+        <span className="subject-finding__file">{documentName}</span>
+        <span className="subject-finding__confidence">置信度 {(finding.confidence * 100).toFixed(0)}%</span>
+        <button type="button" className="text-button" onClick={() => onDelete(finding.id)}>删除</button>
+      </header>
+      <h4 className="subject-finding__title">{finding.title}</h4>
+      <dl className="subject-finding__meta">
+        <div><dt>正确主体</dt><dd>{finding.expectedSubject}</dd></div>
+        <div><dt>检测主体</dt><dd>{finding.detectedSubject}</dd></div>
+        <div><dt>位置</dt><dd>{finding.locationHint || '未识别位置'}</dd></div>
+        <div><dt>位置类型</dt><dd>{subjectLocationKindText[finding.locationKind] || finding.locationKind}</dd></div>
+      </dl>
+      {finding.originalText && <blockquote className="subject-finding__quote">{finding.originalText}</blockquote>}
+      {finding.assetRelativePath && (
+        <img
+          className="subject-finding__preview"
+          src={buildSubjectAssetUrl(finding.bidDocumentId, finding.assetRelativePath)}
+          alt="印章位置预览"
+        />
+      )}
+      <p className="subject-finding__reason"><strong>角色判断：</strong>{finding.roleReason || '—'}</p>
+      <p className="subject-finding__reason"><strong>不一致原因：</strong>{finding.mismatchReason || '—'}</p>
+      <p className="subject-finding__suggestion"><strong>建议：</strong>{finding.suggestion || '—'}</p>
+    </article>
+  );
+}
+
 function stripTripleQuoteWrapper(content: string) {
   const trimmed = content.trim();
   if (trimmed.startsWith("'''") && trimmed.endsWith("'''")) {
@@ -810,6 +878,13 @@ function RejectionCheckPage() {
     && logicCheckResult.inputSignature
     && logicCheckResult.inputSignature !== bidSignature
     && (logicCheckResult.findings.length || logicCheckResult.status !== 'idle'),
+  );
+  const hasStaleSubjectCheckResult = Boolean(
+    subjectProfile.status === 'confirmed'
+    && subjectCheckResult.inputSignature
+    && subjectInputSignature
+    && subjectCheckResult.inputSignature !== subjectInputSignature
+    && (subjectCheckResult.findings.length || subjectCheckResult.status !== 'idle'),
   );
 
   // 确认主体后立刻调用 startChecks，此时 React 尚未把 setSubjectProfile 落到闭包里，
@@ -1701,6 +1776,20 @@ function RejectionCheckPage() {
     }
   }
 
+  async function handleDeleteSubjectFinding(findingId: string) {
+    try {
+      const removed = await window.yibiao.rejectionCheck.deleteSubjectFinding(findingId);
+      if (!removed) {
+        showToast('删除失败，该结果可能已被清理', 'error');
+        return;
+      }
+      setSubjectCheckResult((prev) => ({ ...prev, findings: prev.findings.filter((item) => item.id !== findingId) }));
+      showToast('已删除该条主体检查结果', 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '删除主体检查结果失败', 'error');
+    }
+  }
+
   async function openExportedExcelFile() {
     if (!exportedExcelPath) return;
     try {
@@ -2001,6 +2090,135 @@ function RejectionCheckPage() {
     );
   }
 
+  function renderSubjectCheckContent() {
+    if (!checkOptions.subjectCheck) {
+      return renderDisabledCheckContent('主体一致性检查');
+    }
+
+    if (subjectProfile.status !== 'confirmed') {
+      return (
+        <div className="markdown-empty-state rejection-finding-empty">
+          <strong>{subjectProfile.status === 'identifying' ? '正在识别投标主体' : '尚未确认投标主体'}</strong>
+          <p>{subjectProfile.error || '主体一致性检查需要先确认正式投标主体和允许简称。'}</p>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => { void startSubjectIdentification(); }}
+            disabled={subjectProfile.status === 'identifying' || checkRunning || extractionRunning || !bidDocuments.length}
+          >
+            {subjectProfile.status === 'identifying' ? '识别中...' : '识别并确认投标主体'}
+          </button>
+        </div>
+      );
+    }
+
+    const confirmedMismatchCount = visibleSubjectFindings.filter((item) => item.level === 'confirmed-mismatch').length;
+    const needsReviewCount = visibleSubjectFindings.filter((item) => item.level === 'needs-review').length;
+    const visionStatus = subjectCheckResult.stats?.visionStatus || 'disabled';
+    const visionStats = subjectCheckResult.stats?.visionStats;
+
+    return (
+      <>
+        <div className="rejection-finding-summary">
+          <div>
+            <span className="section-kicker">主体一致性检查</span>
+            <h3>{visibleSubjectCheckStatus === 'running' ? '正在检查投标主体一致性' : '主体一致性检查结果'}</h3>
+            <p>
+              {visibleSubjectCheckStatus === 'running'
+                ? subjectCheckResult.progressMessage || '正在检查投标方身份、承诺与盖章位置。'
+                : visibleSubjectCheckStatus === 'error'
+                  ? subjectCheckResult.error || '主体一致性检查失败，请重新检查。'
+                  : visibleSubjectCheckStatus === 'success'
+                    ? visibleSubjectFindings.length
+                      ? `发现 ${confirmedMismatchCount} 项明确不一致、${needsReviewCount} 项需人工复核。`
+                      : '暂未发现投标主体不一致问题。'
+                    : hasStaleSubjectCheckResult
+                      ? '确认主体或投标文件已变化，请重新检查以刷新结果。'
+                      : '点击开始检查后展示投标主体检查结果。'}
+            </p>
+          </div>
+          <div className={`rejection-result-status is-${visibleSubjectCheckStatus}`}>
+            <span>{checkRunStatusLabels[visibleSubjectCheckStatus]}</span>
+            <small>{visibleSubjectCheckStatus === 'success' ? `${visibleSubjectFindings.length} 个主体问题` : subjectCheckResult.progressMessage || '等待执行'}</small>
+          </div>
+        </div>
+
+        <div className="subject-summary">
+          <div className="subject-summary__item">
+            <span className="subject-summary__label">当前确认主体</span>
+            <span className="subject-summary__value">{subjectProfile.officialName || '未确认'}</span>
+          </div>
+          <div className="subject-summary__item">
+            <span className="subject-summary__label">允许简称</span>
+            <span className="subject-summary__value">{subjectProfile.aliases.length ? subjectProfile.aliases.join('、') : '无'}</span>
+          </div>
+          <div className="subject-summary__item">
+            <span className="subject-summary__label">明确不一致</span>
+            <span className="subject-summary__value">{confirmedMismatchCount}</span>
+          </div>
+          <div className="subject-summary__item">
+            <span className="subject-summary__label">需人工复核</span>
+            <span className="subject-summary__value">{needsReviewCount}</span>
+          </div>
+          <div className="subject-summary__item">
+            <span className="subject-summary__label">印章检查</span>
+            <span className="subject-summary__value">
+              {subjectVisionStatusText[visionStatus] || '未执行'}
+              {visionStats
+                ? `（已检查 ${visionStats.inspectedAssets}/${visionStats.totalAssets} 张，印章 ${visionStats.sealAssets} 张，跳过 ${visionStats.skippedAssets} 张，失败 ${visionStats.failedAssets} 张）`
+                : ''}
+            </span>
+            {subjectCheckResult.stats?.visionMessage ? (
+              <span className="subject-summary__label">{subjectCheckResult.stats.visionMessage}</span>
+            ) : null}
+          </div>
+          <div className="subject-summary__item">
+            <span className="subject-summary__label">主体设置</span>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => { void startSubjectIdentification(); }}
+              disabled={checkRunning || extractionRunning || !bidDocuments.length}
+            >
+              重新识别并确认主体
+            </button>
+          </div>
+        </div>
+
+        {renderBidResultFilter(visibleSubjectFindings)}
+
+        {visibleSubjectCheckStatus === 'running' ? (
+          <div className="markdown-empty-state rejection-finding-empty">
+            <strong>AI 正在检查投标主体一致性</strong>
+            <p>{subjectCheckResult.progressMessage || '正在检查投标方身份、承诺、签署与盖章位置。'}</p>
+          </div>
+        ) : visibleSubjectCheckStatus === 'error' ? (
+          <div className="markdown-empty-state rejection-finding-empty is-error">
+            <strong>{subjectCheckResult.error || '主体一致性检查失败'}</strong>
+            <p>请确认模型配置可用，或重新检查当前投标文件。</p>
+            <button type="button" className="secondary-action" onClick={() => retrySingleCheck('subject')} disabled={checkRunning || extractionRunning || !bidDocuments.length}>
+              重新检查主体一致性
+            </button>
+          </div>
+        ) : filterFindingsByActiveBid(visibleSubjectFindings).length ? (
+          filterFindingsByActiveBid(visibleSubjectFindings).map((finding) => (
+            <SubjectFindingItem
+              key={finding.id}
+              finding={finding}
+              documentName={getBidDocumentLabel(bidDocuments, finding.bidDocumentId)}
+              onDelete={handleDeleteSubjectFinding}
+            />
+          ))
+        ) : (
+          <div className="markdown-empty-state rejection-finding-empty">
+            <strong>{visibleSubjectCheckStatus === 'success' ? '暂未发现主体不一致' : hasStaleSubjectCheckResult ? '确认主体或投标文件已变化' : '等待主体一致性检查'}</strong>
+            <p>{hasStaleSubjectCheckResult ? '请重新检查以刷新主体一致性结果。' : '检查投标方身份、承诺与盖章位置是否被其他主体替代。'}</p>
+          </div>
+        )}
+      </>
+    );
+  }
+
   const toolbarGroups: FloatingToolbarGroup[] = [
     ...(step === 'results' ? [{
       id: 'rejection-check-export',
@@ -2014,7 +2232,7 @@ function RejectionCheckPage() {
           ? '请等待当前检查结束后再导出'
           : !hasExportableCurrentResult
             ? '没有当前检查输入对应的可导出结果'
-            : '导出当前废标项、错别字和逻辑问题',
+            : '导出当前废标项、错别字、逻辑问题与主体一致性结果',
         onClick: () => { void exportCheckResultsExcel(); },
       }],
     }] : []),
@@ -2407,7 +2625,7 @@ function RejectionCheckPage() {
                     </div>
                   )}
                 </>
-              ) : activeCheckResult.id === 'typo' ? renderTypoCheckContent() : renderLogicCheckContent()}
+              ) : activeCheckResult.id === 'typo' ? renderTypoCheckContent() : activeCheckResult.id === 'logic' ? renderLogicCheckContent() : renderSubjectCheckContent()}
             </div>
           </section>
 
