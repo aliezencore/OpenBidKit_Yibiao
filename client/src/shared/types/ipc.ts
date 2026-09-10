@@ -712,7 +712,13 @@ export interface YibiaoBridge {
     removeDocument: (role: RejectionDocumentRole, documentId?: string) => Promise<void>;
     saveUiState: (payload: Partial<Pick<RejectionCheckWorkspaceState, 'step' | 'activeDocumentTab' | 'activeResultTab' | 'activeCheckResultTab' | 'customCheckItems' | 'checkOptions'>>) => Promise<void>;
     updateState: (partial: RejectionCheckWorkspacePatch) => Promise<void>;
-    exportExcel: (request: { rejectionInputSignature: string; bidSignature: string }) => Promise<CheckResultExportResult>;
+    exportExcel: (request: {
+      rejectionInputSignature: string;
+      bidSignature: string;
+      subjectInputSignature?: string;
+      subjectOfficialName?: string;
+      subjectAliases?: string[];
+    }) => Promise<CheckResultExportResult>;
     startSubjectIdentification: () => Promise<unknown>;
     confirmSubject: (payload: { officialName: string; aliases: string[] }) => Promise<{ success: boolean; message: string }>;
     deleteSubjectFinding: (findingId: string) => Promise<boolean>;

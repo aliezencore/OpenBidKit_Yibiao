@@ -4,6 +4,7 @@ import { trackPageView } from '../../../shared/analytics/analytics';
 import { AppDialog, AppSwitch, FloatingToolbar, isLibreOfficeRequiredMessage, MarkdownEditor, MarkdownFullscreenViewer, MarkdownRenderer, ProgressBar, ToolbarArrowLeftIcon, ToolbarArrowRightIcon, ToolbarDocumentIcon, UploadBoard, UploadEmpty, UploadFilePill, UploadRow, useDocumentParseNotice, useToast } from '../../../shared/ui';
 import type { FloatingToolbarGroup } from '../../../shared/ui';
 import { hasExportableRejectionResults } from '../exportState';
+import { SubjectConfirmDialog } from '../components/SubjectConfirmDialog';
 import type {
   LogicCheckFinding,
   LogicCheckResultState,
@@ -22,6 +23,9 @@ import type {
   RejectionDocumentTabId,
   RejectionExtractionState,
   RejectionResultTab,
+  SubjectCheckFinding,
+  SubjectCheckResultState,
+  SubjectProfileState,
   TypoCheckFinding,
   TypoCheckResultState,
 } from '../types';
@@ -43,12 +47,15 @@ const checkResultTabs: Array<{ id: RejectionCheckResultTab; label: string; descr
   { id: 'rejection', label: '废标项检查', description: '根据无效与废标项检查投标文件响应风险' },
   { id: 'typo', label: '错别字检查', description: '检查投标文件中的错别字和明显文字错误' },
   { id: 'logic', label: '逻辑谬误检查', description: '检查前后矛盾、逻辑不一致和表达漏洞' },
+  { id: 'subject', label: '主体一致性检查', description: '检查投标方身份、承诺与盖章位置是否被其他主体替代' },
 ];
 
 const defaultCheckOptions: RejectionCheckOptions = {
   rejectionCheck: true,
   typoCheck: true,
   logicCheck: true,
+  subjectCheck: true,
+  subjectSealCheck: true,
 };
 
 const documentLabels: Record<RejectionDocumentRole, string> = {
@@ -109,9 +116,19 @@ function createEmptyLogicCheckResultState(): LogicCheckResultState {
   return { status: 'idle', findings: [] };
 }
 
+function createEmptySubjectCheckResultState(): SubjectCheckResultState {
+  return { status: 'idle', findings: [] };
+}
+
+function createEmptySubjectProfileState(): SubjectProfileState {
+  return { status: 'idle', officialName: '', aliases: [], candidates: [] };
+}
+
 function normalizeBackgroundTaskState(state?: Partial<RejectionBackgroundTaskState> | null): RejectionBackgroundTaskState | undefined {
   if (!state || typeof state !== 'object') return undefined;
-  const type = state.type === 'rejection-items-extraction' || state.type === 'rejection-check-run' ? state.type : undefined;
+  const type = state.type === 'rejection-items-extraction' || state.type === 'rejection-check-run' || state.type === 'bid-subject-identification'
+    ? state.type
+    : undefined;
   const status = state.status === 'running' || state.status === 'success' || state.status === 'error' ? state.status : undefined;
   if (!type || !status || typeof state.task_id !== 'string') return undefined;
 
@@ -128,16 +145,21 @@ function normalizeBackgroundTaskState(state?: Partial<RejectionBackgroundTaskSta
 }
 
 function normalizeCheckOptions(options?: Partial<RejectionCheckOptions> | null): RejectionCheckOptions {
+  // 与 Main 侧 rejectionCheckStore.normalizeCheckOptions 保持一致：主体检查与印章检查均默认开启（spec §12.1）。
+  const subjectCheck = options?.subjectCheck !== false;
   return {
     rejectionCheck: true,
     typoCheck: options?.typoCheck !== false,
     logicCheck: options?.logicCheck !== false,
+    subjectCheck,
+    subjectSealCheck: subjectCheck && options?.subjectSealCheck !== false,
   };
 }
 
 function isCheckResultTabEnabled(tabId: RejectionCheckResultTab, options: RejectionCheckOptions) {
   if (tabId === 'rejection') return options.rejectionCheck;
   if (tabId === 'typo') return options.typoCheck;
+  if (tabId === 'subject') return options.subjectCheck;
   return options.logicCheck;
 }
 
@@ -363,6 +385,79 @@ function createBidDocumentsSignature(bidDocuments: RejectionDocumentContent[]) {
   return bidDocuments.map(createDocumentSignature).filter(Boolean).join('\n---yibiao-rejection-bid-signature---\n');
 }
 
+function normalizeSubjectProfileState(state?: Partial<SubjectProfileState> | null): SubjectProfileState {
+  if (!state || typeof state !== 'object') return createEmptySubjectProfileState();
+  const status = ['idle', 'identifying', 'pending-confirmation', 'confirmed', 'error'].includes(state.status || '')
+    ? state.status as SubjectProfileState['status']
+    : 'idle';
+  return {
+    status,
+    officialName: typeof state.officialName === 'string' ? state.officialName : '',
+    aliases: Array.isArray(state.aliases) ? state.aliases.map((item) => String(item)) : [],
+    candidates: Array.isArray(state.candidates) ? state.candidates : [],
+    preselectIndex: typeof state.preselectIndex === 'number' ? state.preselectIndex : undefined,
+    bidSignature: typeof state.bidSignature === 'string' ? state.bidSignature : undefined,
+    confirmedAt: typeof state.confirmedAt === 'string' ? state.confirmedAt : undefined,
+    error: typeof state.error === 'string' ? state.error : undefined,
+    updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : undefined,
+  };
+}
+
+function normalizeSubjectCheckResultState(state?: Partial<SubjectCheckResultState> | null): SubjectCheckResultState {
+  if (!state || typeof state !== 'object') return createEmptySubjectCheckResultState();
+  const status = ['idle', 'running', 'success', 'error'].includes(state.status || '')
+    ? state.status as RejectionCheckRunStatus
+    : 'idle';
+  return {
+    ...state,
+    status,
+    findings: Array.isArray(state.findings) ? state.findings : [],
+  };
+}
+
+// 与 electron/services/subjectNameUtils.cjs 的 normalizeSubjectName / createSubjectCheckInputSignature 保持一致，
+// 仅用于判断渲染层拿到的结果是否对应当前已确认主体；Main 侧仍是签名的权威计算方。
+const SUBJECT_CHECK_PROTOCOL_VERSION = 1;
+
+function normalizeSubjectName(value: string) {
+  return String(value || '')
+    .replace(/\s+/g, '')
+    .replace(/（/g, '(')
+    .replace(/）/g, ')')
+    .replace(/【/g, '[')
+    .replace(/】/g, ']')
+    .replace(/，/g, ',')
+    .replace(/：/g, ':')
+    .trim()
+    .toLowerCase();
+}
+
+function createSubjectCheckInputSignature({
+  bidSignature,
+  officialName,
+  aliases,
+  subjectSealCheck,
+}: {
+  bidSignature: string;
+  officialName: string;
+  aliases: string[];
+  subjectSealCheck: boolean;
+}) {
+  const sortedAliases = (Array.isArray(aliases) ? aliases : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .sort()
+    .map(normalizeSubjectName)
+    .join('|');
+  return [
+    `yibiao-subject-check-v${SUBJECT_CHECK_PROTOCOL_VERSION}`,
+    String(bidSignature || ''),
+    normalizeSubjectName(officialName),
+    sortedAliases,
+    subjectSealCheck ? 'seal-on' : 'seal-off',
+  ].join('\n---yibiao-subject-signature---\n');
+}
+
 function stripTripleQuoteWrapper(content: string) {
   const trimmed = content.trim();
   if (trimmed.startsWith("'''") && trimmed.endsWith("'''")) {
@@ -571,8 +666,13 @@ function RejectionCheckPage() {
   const [rejectionCheckResult, setRejectionCheckResult] = useState<RejectionCheckResultState>(() => createEmptyRejectionCheckResultState());
   const [typoCheckResult, setTypoCheckResult] = useState<TypoCheckResultState>(() => createEmptyTypoCheckResultState());
   const [logicCheckResult, setLogicCheckResult] = useState<LogicCheckResultState>(() => createEmptyLogicCheckResultState());
+  const [subjectProfile, setSubjectProfile] = useState<SubjectProfileState>(() => createEmptySubjectProfileState());
+  const [subjectCheckResult, setSubjectCheckResult] = useState<SubjectCheckResultState>(() => createEmptySubjectCheckResultState());
   const [extractionTask, setExtractionTask] = useState<RejectionBackgroundTaskState | undefined>();
   const [checkTask, setCheckTask] = useState<RejectionBackgroundTaskState | undefined>();
+  const [subjectIdentificationTask, setSubjectIdentificationTask] = useState<RejectionBackgroundTaskState | undefined>();
+  const [subjectDialogOpen, setSubjectDialogOpen] = useState(false);
+  const [subjectSealAvailable, setSubjectSealAvailable] = useState(false);
   const [customCheckItems, setCustomCheckItems] = useState('');
   const [customCheckItemsDraft, setCustomCheckItemsDraft] = useState('');
   const [customCheckItemsSaving, setCustomCheckItemsSaving] = useState(false);
@@ -589,6 +689,7 @@ function RejectionCheckPage() {
   const customCheckItemsRef = useRef('');
   const customCheckItemsDraftRef = useRef('');
   const customCheckItemsSaveVersionRef = useRef(0);
+  const subjectProfileRef = useRef<SubjectProfileState>(createEmptySubjectProfileState());
   const { showToast } = useToast();
   const { showDocumentParseNotice } = useDocumentParseNotice();
 
@@ -599,7 +700,9 @@ function RejectionCheckPage() {
   const bidSignature = useMemo(() => createBidDocumentsSignature(bidDocuments), [bidDocuments]);
   const hasAnyDocument = Boolean(tenderDocument || bidDocuments.length);
   const checkOptionsChanged = checkOptions.typoCheck !== defaultCheckOptions.typoCheck
-    || checkOptions.logicCheck !== defaultCheckOptions.logicCheck;
+    || checkOptions.logicCheck !== defaultCheckOptions.logicCheck
+    || checkOptions.subjectCheck !== defaultCheckOptions.subjectCheck
+    || checkOptions.subjectSealCheck !== defaultCheckOptions.subjectSealCheck;
   const hasAnyWorkspaceData = Boolean(
     hasAnyDocument
     || invalidBidAndRejectionItems.content.trim()
@@ -609,8 +712,12 @@ function RejectionCheckPage() {
     || typoCheckResult.findings.length
     || logicCheckResult.status !== 'idle'
     || logicCheckResult.findings.length
+    || subjectCheckResult.status !== 'idle'
+    || subjectCheckResult.findings.length
+    || subjectProfile.status !== 'idle'
     || extractionTask
     || checkTask
+    || subjectIdentificationTask
     || customCheckItemsDraft.trim()
     || checkOptionsChanged,
   );
@@ -653,11 +760,29 @@ function RejectionCheckPage() {
   const visibleTypoFindings = typoCheckMatchesInput ? typoCheckResult.findings : [];
   const visibleLogicCheckStatus: RejectionCheckRunStatus = logicCheckMatchesInput ? logicCheckResult.status : 'idle';
   const visibleLogicFindings = logicCheckMatchesInput ? logicCheckResult.findings : [];
+  // 主体检查结果以 Main 写入的运行态签名为准；主体或简称变更、投标文件变动后主进程会清空结果。
+  const subjectInputSignature = useMemo(
+    () => createSubjectCheckInputSignature({
+      bidSignature,
+      officialName: subjectProfile.officialName,
+      aliases: subjectProfile.aliases,
+      subjectSealCheck: Boolean(checkOptions.subjectSealCheck),
+    }),
+    [bidSignature, subjectProfile.officialName, subjectProfile.aliases, checkOptions.subjectSealCheck],
+  );
+  const subjectCheckMatchesInput = Boolean(
+    subjectProfile.status === 'confirmed'
+    && subjectInputSignature
+    && subjectCheckResult.inputSignature === subjectInputSignature,
+  );
+  const visibleSubjectCheckStatus: RejectionCheckRunStatus = subjectCheckMatchesInput ? subjectCheckResult.status : 'idle';
+  const visibleSubjectFindings = subjectCheckMatchesInput ? subjectCheckResult.findings : [];
   const rejectionCheckRunning = rejectionCheckResult.status === 'running';
   const typoCheckRunning = typoCheckResult.status === 'running';
   const logicCheckRunning = logicCheckResult.status === 'running';
+  const subjectCheckRunning = subjectCheckResult.status === 'running';
   const backgroundCheckRunning = checkTask?.status === 'running';
-  const checkRunning = rejectionCheckRunning || typoCheckRunning || logicCheckRunning || backgroundCheckRunning;
+  const checkRunning = rejectionCheckRunning || typoCheckRunning || logicCheckRunning || subjectCheckRunning || backgroundCheckRunning;
   const hasExportableCurrentResult = hasExportableRejectionResults({
     rejectionCheckResult,
     typoCheckResult,
@@ -686,6 +811,26 @@ function RejectionCheckPage() {
     && logicCheckResult.inputSignature !== bidSignature
     && (logicCheckResult.findings.length || logicCheckResult.status !== 'idle'),
   );
+
+  // 确认主体后立刻调用 startChecks，此时 React 尚未把 setSubjectProfile 落到闭包里，
+  // 用 ref 让前置校验读到最新确认态，避免刚确认完又触发一次识别。
+  useEffect(() => {
+    subjectProfileRef.current = subjectProfile;
+  }, [subjectProfile]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const config = await window.yibiao.config.load();
+        if (cancelled) return;
+        setSubjectSealAvailable(Boolean(config?.multimodal_enabled));
+      } catch {
+        if (!cancelled) setSubjectSealAvailable(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!analyticsReady) return;
@@ -739,8 +884,11 @@ function RejectionCheckPage() {
     setRejectionCheckResult(normalizeRejectionCheckResultState(state.rejectionCheckResult));
     setTypoCheckResult(normalizeTypoCheckResultState(state.typoCheckResult));
     setLogicCheckResult(normalizeLogicCheckResultState(state.logicCheckResult));
+    setSubjectProfile(normalizeSubjectProfileState(state.subjectProfile));
+    setSubjectCheckResult(normalizeSubjectCheckResultState(state.subjectCheckResult));
     setExtractionTask(normalizeBackgroundTaskState(state.extractionTask));
     setCheckTask(normalizeBackgroundTaskState(state.checkTask));
+    setSubjectIdentificationTask(normalizeBackgroundTaskState(state.subjectIdentificationTask));
     syncCustomCheckItemsFromWorkspace(state.customCheckItems);
     const nextOptions = normalizeCheckOptions(state.checkOptions);
     setCheckOptions(nextOptions);
@@ -775,6 +923,13 @@ function RejectionCheckPage() {
     }
     if (has('extractionTask')) setExtractionTask(normalizeBackgroundTaskState(patch.extractionTask));
     if (has('checkTask')) setCheckTask(normalizeBackgroundTaskState(patch.checkTask));
+    if (has('subjectProfile')) setSubjectProfile(normalizeSubjectProfileState(patch.subjectProfile));
+    if (has('subjectCheckResult')) {
+      setSubjectCheckResult((prev) => patch.subjectCheckResult === undefined
+        ? createEmptySubjectCheckResultState()
+        : normalizeSubjectCheckResultState({ ...prev, ...patch.subjectCheckResult }));
+    }
+    if (has('subjectIdentificationTask')) setSubjectIdentificationTask(normalizeBackgroundTaskState(patch.subjectIdentificationTask));
     if (has('customCheckItems')) syncCustomCheckItemsFromWorkspace(patch.customCheckItems);
     if (has('checkOptions')) {
       const nextOptions = normalizeCheckOptions(patch.checkOptions);
@@ -1140,6 +1295,35 @@ function RejectionCheckPage() {
     return false;
   }
 
+  async function startSubjectIdentification() {
+    try {
+      setSubjectProfile((prev) => ({ ...prev, status: 'identifying' }));
+      // 返回值是 startManagedTask 的启动确认，不是识别结果；
+      // 候选经 subjectProfile 工作区补丁异步推送，因此先打开 Dialog 显示“识别中”，候选到达后由补丁刷新。
+      await window.yibiao.rejectionCheck.startSubjectIdentification();
+      setSubjectDialogOpen(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '投标主体识别失败';
+      setSubjectProfile((prev) => ({ ...prev, status: 'error', error: message }));
+      showToast(message, 'error');
+    }
+  }
+
+  async function handleSubjectConfirm({ officialName, aliases }: { officialName: string; aliases: string[] }) {
+    const result = await window.yibiao.rejectionCheck.confirmSubject({ officialName, aliases });
+    if (!result?.success) {
+      showToast(result?.message || '投标主体确认失败', 'error');
+      return;
+    }
+    const nextProfile: SubjectProfileState = { ...subjectProfileRef.current, status: 'confirmed', officialName, aliases };
+    subjectProfileRef.current = nextProfile;
+    setSubjectProfile(nextProfile);
+    setSubjectDialogOpen(false);
+    showToast('投标主体已确认', 'success');
+    // spec §12.2：确认后直接启动总检查（沿用当前勾选的全部检查项）。
+    await startChecks();
+  }
+
   async function startChecks(options: RejectionCheckOptions = checkOptions, runOptions: RejectionCheckOptions = options) {
     if (checkRunning) {
       return;
@@ -1165,12 +1349,24 @@ function RejectionCheckPage() {
       return;
     }
 
-    if (!runOptions.rejectionCheck && !runOptions.typoCheck && !runOptions.logicCheck) {
+    if (runOptions.subjectCheck && subjectProfileRef.current.status !== 'confirmed') {
+      showToast('请先确认投标主体', 'info');
+      await startSubjectIdentification();
+      return;
+    }
+
+    if (!runOptions.rejectionCheck && !runOptions.typoCheck && !runOptions.logicCheck && !runOptions.subjectCheck) {
       showToast('请至少启用一种检查', 'info');
       return;
     }
 
-    const nextActiveCheckResultTab: RejectionCheckResultTab = runOptions.rejectionCheck ? 'rejection' : runOptions.typoCheck ? 'typo' : 'logic';
+    const nextActiveCheckResultTab: RejectionCheckResultTab = runOptions.rejectionCheck
+      ? 'rejection'
+      : runOptions.typoCheck
+        ? 'typo'
+        : runOptions.logicCheck
+          ? 'logic'
+          : 'subject';
     setActiveCheckResultTab(nextActiveCheckResultTab);
     setActiveResultBidDocumentId('all');
     const startedAt = new Date().toISOString();
@@ -1201,6 +1397,23 @@ function RejectionCheckPage() {
           updatedAt: startedAt,
         }
       : logicCheckResult;
+    // 主体检查的本地乐观状态必须带上与 Main 一致的输入签名，否则页签会先显示为“待检查”。
+    const nextSubjectInputSignature = createSubjectCheckInputSignature({
+      bidSignature,
+      officialName: subjectProfileRef.current.officialName,
+      aliases: subjectProfileRef.current.aliases,
+      subjectSealCheck: Boolean(runOptions.subjectSealCheck),
+    });
+    const nextSubjectCheckResult: SubjectCheckResultState = runOptions.subjectCheck
+      ? {
+          status: 'running',
+          findings: [],
+          inputSignature: nextSubjectInputSignature,
+          progressMessage: '正在检查投标主体一致性。',
+          stats: { visionStatus: runOptions.subjectSealCheck && subjectSealAvailable ? 'pending' : 'disabled' },
+          updatedAt: startedAt,
+        }
+      : subjectCheckResult;
     const nextCheckTask: RejectionBackgroundTaskState = {
       task_id: `local-${Date.now()}`,
       type: 'rejection-check-run',
@@ -1221,6 +1434,10 @@ function RejectionCheckPage() {
 
     if (runOptions.logicCheck) {
       setLogicCheckResult(nextLogicCheckResult);
+    }
+
+    if (runOptions.subjectCheck) {
+      setSubjectCheckResult(nextSubjectCheckResult);
     }
 
     setCheckTask(nextCheckTask);
@@ -1259,6 +1476,11 @@ function RejectionCheckPage() {
           ? { ...prev, status: 'error', error: message, progressMessage: message, updatedAt: new Date().toISOString() }
           : prev);
       }
+      if (runOptions.subjectCheck) {
+        setSubjectCheckResult((prev) => prev.inputSignature === nextSubjectInputSignature
+          ? { ...prev, status: 'error', error: message, progressMessage: message, updatedAt: new Date().toISOString() }
+          : prev);
+      }
       setCheckTask((prev) => prev ? { ...prev, status: 'error', error: message, progress: 100, updated_at: new Date().toISOString() } : prev);
       showToast(message, 'error');
     }
@@ -1276,6 +1498,8 @@ function RejectionCheckPage() {
       rejectionCheck: tabId === 'rejection',
       typoCheck: tabId === 'typo',
       logicCheck: tabId === 'logic',
+      subjectCheck: tabId === 'subject',
+      subjectSealCheck: tabId === 'subject' && checkOptions.subjectSealCheck,
     });
   }
 
@@ -1459,6 +1683,9 @@ function RejectionCheckPage() {
       const result = await window.yibiao.rejectionCheck.exportExcel({
         rejectionInputSignature: currentRejectionCheckInputSignature,
         bidSignature,
+        subjectInputSignature: subjectCheckResult.inputSignature || '',
+        subjectOfficialName: subjectProfile.officialName || '',
+        subjectAliases: subjectProfile.aliases || [],
       });
       if (result.canceled) return;
       if (!result.success || !result.path) {
@@ -1507,7 +1734,9 @@ function RejectionCheckPage() {
     || visibleTypoCheckStatus === 'success'
     || visibleTypoCheckStatus === 'error'
     || visibleLogicCheckStatus === 'success'
-    || visibleLogicCheckStatus === 'error';
+    || visibleLogicCheckStatus === 'error'
+    || visibleSubjectCheckStatus === 'success'
+    || visibleSubjectCheckStatus === 'error';
   const checkActionLabel = checkRunning
     ? '检查中...'
     : hasVisibleCheckResult
@@ -2103,12 +2332,16 @@ function RejectionCheckPage() {
                     ? visibleRejectionCheckStatus
                     : tab.id === 'typo'
                       ? visibleTypoCheckStatus
-                      : visibleLogicCheckStatus;
+                      : tab.id === 'logic'
+                        ? visibleLogicCheckStatus
+                        : visibleSubjectCheckStatus;
                 const progressMessage = tab.id === 'rejection'
                   ? rejectionCheckResult.progressMessage
                   : tab.id === 'typo'
                     ? typoCheckResult.progressMessage
-                    : logicCheckResult.progressMessage;
+                    : tab.id === 'logic'
+                      ? logicCheckResult.progressMessage
+                      : subjectCheckResult.progressMessage;
                 const progress = getCheckResultTabProgress(status, progressMessage);
                 return (
                   <button
@@ -2215,6 +2448,35 @@ function RejectionCheckPage() {
                       onCheckedChange={(checked) => setDraftCheckOptions((prev) => ({ ...prev, logicCheck: checked }))}
                       aria-label="逻辑谬误检查" />
                   </label>
+                  <label className="content-generation-config-row">
+                    <span>
+                      <strong>主体一致性检查</strong>
+                      <small>确认投标主体后，检查投标方身份、承诺与盖章位置是否被其他主体替代。</small>
+                    </span>
+                    <AppSwitch
+                      checked={draftCheckOptions.subjectCheck}
+                      onCheckedChange={(checked) => setDraftCheckOptions((prev) => ({
+                        ...prev,
+                        subjectCheck: checked,
+                        subjectSealCheck: checked && prev.subjectSealCheck,
+                      }))}
+                      aria-label="主体一致性检查" />
+                  </label>
+                  <label className="content-generation-config-row">
+                    <span>
+                      <strong>在线印章检查</strong>
+                      <small>
+                        {subjectSealAvailable
+                          ? '可选增强：将筛选出的投标文件图片发送到当前配置的多模态模型检查印章。'
+                          : '当前文本模型未开启多模态支持，请到设置页的文本模型中开启“支持多模态”。'}
+                      </small>
+                    </span>
+                    <AppSwitch
+                      checked={draftCheckOptions.subjectCheck && draftCheckOptions.subjectSealCheck && subjectSealAvailable}
+                      disabled={!draftCheckOptions.subjectCheck || !subjectSealAvailable}
+                      onCheckedChange={(checked) => setDraftCheckOptions((prev) => ({ ...prev, subjectSealCheck: checked }))}
+                      aria-label="在线印章检查" />
+                  </label>
                 </div>
 
                 <div className="content-regenerate-actions">
@@ -2231,6 +2493,21 @@ function RejectionCheckPage() {
           </Dialog.Root>
         </>
       )}
+
+      <SubjectConfirmDialog
+        open={subjectDialogOpen}
+        candidates={subjectProfile.candidates || []}
+        preselectIndex={subjectProfile.preselectIndex}
+        defaultOfficialName={subjectProfile.officialName || ''}
+        defaultAliases={subjectProfile.aliases || []}
+        sealEnabled={checkOptions.subjectSealCheck}
+        sealAvailable={subjectSealAvailable}
+        identifying={subjectProfile.status === 'identifying'}
+        onSealEnabledChange={(enabled) => setCheckOptions((prev) => ({ ...prev, subjectSealCheck: enabled }))}
+        onConfirm={handleSubjectConfirm}
+        onReidentify={startSubjectIdentification}
+        onCancel={() => setSubjectDialogOpen(false)}
+      />
 
       <AppDialog
         open={Boolean(exportedExcelPath)}

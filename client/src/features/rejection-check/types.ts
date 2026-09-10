@@ -8,7 +8,7 @@ export type RejectionCheckStep = 'documents' | 'items' | 'results';
 
 export type RejectionResultTab = 'analysis' | 'custom';
 
-export type RejectionCheckResultTab = 'rejection' | 'typo' | 'logic';
+export type RejectionCheckResultTab = 'rejection' | 'typo' | 'logic' | 'subject';
 
 export type RejectionExtractionStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -20,7 +20,7 @@ export type RejectionFindingType = 'invalidBid' | 'rejectionItem';
 
 export type RejectionFindingSeverity = 'high' | 'medium' | 'low';
 
-export type RejectionBackgroundTaskType = 'rejection-items-extraction' | 'rejection-check-run';
+export type RejectionBackgroundTaskType = 'rejection-items-extraction' | 'rejection-check-run' | 'bid-subject-identification';
 
 export type RejectionBackgroundTaskStatus = 'running' | 'success' | 'error';
 
@@ -59,21 +59,27 @@ export interface RejectionCheckWorkspaceState {
   rejectionCheckResult?: RejectionCheckResultState;
   typoCheckResult?: TypoCheckResultState;
   logicCheckResult?: LogicCheckResultState;
+  subjectCheckResult?: SubjectCheckResultState;
+  subjectProfile?: SubjectProfileState;
   extractionTask?: RejectionBackgroundTaskState;
   checkTask?: RejectionBackgroundTaskState;
+  subjectIdentificationTask?: RejectionBackgroundTaskState;
 }
 
 export type RejectionCheckWorkspacePatch = Omit<Partial<RejectionCheckWorkspaceState>,
-  'rejectionCheckResult' | 'typoCheckResult' | 'logicCheckResult'> & {
+  'rejectionCheckResult' | 'typoCheckResult' | 'logicCheckResult' | 'subjectCheckResult'> & {
   rejectionCheckResult?: Partial<RejectionCheckResultState>;
   typoCheckResult?: Partial<TypoCheckResultState>;
   logicCheckResult?: Partial<LogicCheckResultState>;
+  subjectCheckResult?: Partial<SubjectCheckResultState>;
 };
 
 export interface RejectionCheckOptions {
   rejectionCheck: boolean;
   typoCheck: boolean;
   logicCheck: boolean;
+  subjectCheck: boolean;
+  subjectSealCheck: boolean;
 }
 
 export interface RejectionExtractionState {
@@ -159,4 +165,84 @@ export interface RejectionRiskItem {
 export interface RejectionCheckReport {
   passed: boolean;
   risks: RejectionRiskItem[];
+}
+
+export type SubjectProfileStatus = 'idle' | 'identifying' | 'pending-confirmation' | 'confirmed' | 'error';
+
+export type SubjectFindingLevel = 'confirmed-mismatch' | 'needs-review';
+
+export type SubjectFindingSource = 'text' | 'seal';
+
+export type SubjectLocationKind = 'body' | 'table' | 'signature' | 'standalone-image' | 'scanned-page';
+
+export type SubjectVisionStatus = 'disabled' | 'pending' | 'running' | 'success' | 'partial' | 'unavailable' | 'error';
+
+export interface SubjectVisionStats {
+  totalAssets: number;
+  candidateAssets: number;
+  inspectedAssets: number;
+  sealAssets: number;
+  skippedAssets: number;
+  reviewAssets: number;
+  failedAssets: number;
+}
+
+export interface SubjectCandidate {
+  bidDocumentId: string;
+  name: string;
+  confidence: number;
+  locationHint: string;
+  originalText: string;
+  roleEvidence: string;
+  aliases: string[];
+}
+
+export interface SubjectProfileState {
+  status: SubjectProfileStatus;
+  officialName: string;
+  aliases: string[];
+  candidates: SubjectCandidate[];
+  preselectIndex?: number;
+  bidSignature?: string;
+  confirmedAt?: string;
+  error?: string;
+  updatedAt?: string;
+}
+
+export interface SubjectCheckFinding {
+  id: string;
+  bidDocumentId: string;
+  level: SubjectFindingLevel;
+  source: SubjectFindingSource;
+  expectedSubject: string;
+  detectedSubject: string;
+  locationKind: SubjectLocationKind;
+  title: string;
+  summary: string;
+  locationHint: string;
+  originalText: string;
+  roleReason: string;
+  mismatchReason: string;
+  suggestion: string;
+  confidence: number;
+  visualAssetId?: string;
+  assetRelativePath?: string;
+  sealCropRelativePath?: string;
+}
+
+export interface SubjectCheckResultState {
+  status: RejectionCheckRunStatus;
+  findings: SubjectCheckFinding[];
+  inputSignature?: string;
+  activeFindingId?: string;
+  progressMessage?: string;
+  updatedAt?: string;
+  error?: string;
+  stats?: {
+    visionStatus: SubjectVisionStatus;
+    visionStats?: SubjectVisionStats;
+    visionMessage?: string;
+    confirmedMismatchCount?: number;
+    needsReviewCount?: number;
+  };
 }
