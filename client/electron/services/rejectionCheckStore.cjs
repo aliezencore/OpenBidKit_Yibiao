@@ -857,6 +857,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     for (const [field, type] of Object.entries(taskFieldTypes)) {
       if (hasOwn(partial, field)) saveTask(type, partial[field]);
     }
+    if (hasOwn(partial, 'subjectProfile')) saveSubjectProfile(partial.subjectProfile);
   });
 
   function loadRejectionCheck() {
@@ -1230,6 +1231,16 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     }
   }
 
+  function normalizeIdentificationTarget(target) {
+    if (!target || typeof target !== 'object') return undefined;
+    if (target.mode === 'all') return { mode: 'all' };
+    if (target.mode !== 'single') return undefined;
+    const bidDocumentId = typeof target.bidDocumentId === 'string' && target.bidDocumentId
+      ? target.bidDocumentId
+      : undefined;
+    return bidDocumentId ? { mode: 'single', bidDocumentId } : undefined;
+  }
+
   function loadSubjectProfile() {
     const row = db.prepare('SELECT * FROM rejection_check_subject_profile WHERE id = 1').get();
     if (!row) return { ...initialState.subjectProfile };
@@ -1241,6 +1252,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       aliases: safeJsonParse(row.aliases_json, []) || [],
       candidates: items,
       preselectIndex: Number.isInteger(candidatesPayload.preselectIndex) ? candidatesPayload.preselectIndex : undefined,
+      identificationTarget: normalizeIdentificationTarget(candidatesPayload.identificationTarget),
       bidSignature: row.bid_signature || undefined,
       confirmedAt: row.confirmed_at || undefined,
       error: row.error || undefined,
@@ -1249,6 +1261,10 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
   }
 
   function saveSubjectProfile(profile) {
+    // 未显式携带 identificationTarget 时保留旧值，避免任务 checkpoint 把它冲掉。
+    const identificationTarget = hasOwn(profile || {}, 'identificationTarget')
+      ? profile.identificationTarget
+      : loadSubjectProfile().identificationTarget;
     const normalized = {
       status: normalizeStatus(profile?.status, ['idle', 'identifying', 'pending-confirmation', 'confirmed', 'error'], 'idle'),
       official_name: String(profile?.officialName || ''),
@@ -1256,6 +1272,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       candidates_json: jsonOrNull({
         items: Array.isArray(profile?.candidates) ? profile.candidates : [],
         preselectIndex: Number.isInteger(profile?.preselectIndex) ? profile.preselectIndex : -1,
+        identificationTarget: identificationTarget || null,
       }),
       bid_signature: profile?.bidSignature ? String(profile.bidSignature) : null,
       confirmed_at: profile?.confirmedAt ? String(profile.confirmedAt) : null,
@@ -1279,7 +1296,14 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
   }
 
   function resetSubjectProfile(reason) {
-    return saveSubjectProfile({ status: 'idle', officialName: '', aliases: [], candidates: [], error: reason || undefined });
+    return saveSubjectProfile({
+      status: 'idle',
+      officialName: '',
+      aliases: [],
+      candidates: [],
+      identificationTarget: null,
+      error: reason || undefined,
+    });
   }
 
   function getCurrentBidSignature() {
@@ -1294,14 +1318,14 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     return path.join(rejectionCheckDir, 'subject-media');
   }
 
-  function confirmSubject({ officialName, aliases } = {}) {
+  function confirmSubject({ officialName, aliases, identificationTarget } = {}) {
     const name = String(officialName || '').trim();
     if (!name) return { success: false, message: '请填写正式投标主体名称' };
     const normalizedAliases = (Array.isArray(aliases) ? aliases : [])
       .map((item) => String(item || '').trim())
       .filter(Boolean);
     const previous = loadSubjectProfile();
-    const profile = saveSubjectProfile({
+    const profilePatch = {
       status: 'confirmed',
       officialName: name,
       aliases: normalizedAliases,
@@ -1309,7 +1333,11 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       preselectIndex: previous.preselectIndex,
       bidSignature: getCurrentBidSignature(),
       confirmedAt: now(),
-    });
+    };
+    if (identificationTarget !== undefined) {
+      profilePatch.identificationTarget = identificationTarget;
+    }
+    const profile = saveSubjectProfile(profilePatch);
     // 修改正式主体或简称都会让旧主体结果失效（spec §11.4）。
     saveResult('subject', { status: 'idle', findings: [], inputSignature: null, activeFindingId: null, progressMessage: null, error: null, stats: null, updatedAt: now() });
     clearFindingRows('subject');
