@@ -190,3 +190,83 @@ test('滚动状态机累积候选并在定稿时按位置去重', () => {
   assert.strictEqual(candidates.length, 1);
   assert.strictEqual(candidates[0].detectedSubject, SUBJECT_B);
 });
+
+const {
+  classifySealFinding,
+  createEmptyVisionStats,
+} = require('./subjectCheckTask.cjs');
+
+const ASSET_BASE = {
+  id: 'asset-1',
+  bidDocumentId: 'bid-1',
+  relativePath: 'hash-1/hash-1.png',
+  assetKind: 'standalone',
+  locationHint: '正文',
+  nearbyText: '投标人：（盖章）',
+  sectionTitle: '投标函',
+};
+
+const SEAL_CONTEXT = { officialName: SUBJECT_A, aliases: ['北方长风'] };
+
+test('createEmptyVisionStats 返回规格定义的统计字段', () => {
+  assert.deepStrictEqual(createEmptyVisionStats(), {
+    totalAssets: 0,
+    candidateAssets: 0,
+    inspectedAssets: 0,
+    sealAssets: 0,
+    skippedAssets: 0,
+    reviewAssets: 0,
+    failedAssets: 0,
+  });
+});
+
+test('classifySealFinding 投标方位置出现其他公司清晰印章判为明确不一致', () => {
+  const finding = classifySealFinding(ASSET_BASE, {
+    status: 'inspected',
+    hasSeal: true,
+    sealText: SUBJECT_B,
+    detectedSubject: SUBJECT_B,
+    pageRole: 'bidder',
+    sealRole: 'bidder',
+    nameConfidence: 0.93,
+    roleConfidence: 0.91,
+    reason: '投标函盖章处',
+  }, SEAL_CONTEXT);
+  assert.strictEqual(finding.level, 'confirmed-mismatch');
+  assert.strictEqual(finding.source, 'seal');
+  assert.strictEqual(finding.locationKind, 'standalone-image');
+  assert.strictEqual(finding.visualAssetId, 'asset-1');
+  assert.strictEqual(finding.assetRelativePath, 'hash-1/hash-1.png');
+});
+
+test('classifySealFinding 合法第三方印章不报警', () => {
+  const finding = classifySealFinding(ASSET_BASE, {
+    status: 'inspected',
+    hasSeal: true,
+    sealText: '某某认证中心',
+    detectedSubject: '某某认证中心',
+    pageRole: 'third-party',
+    sealRole: 'third-party',
+    nameConfidence: 0.95,
+    roleConfidence: 0.95,
+  }, SEAL_CONTEXT);
+  assert.strictEqual(finding, null);
+});
+
+test('classifySealFinding 投标方自身印章不报警，模糊印章降级为需人工复核', () => {
+  assert.strictEqual(classifySealFinding(ASSET_BASE, {
+    status: 'inspected', hasSeal: true, sealText: SUBJECT_A, detectedSubject: SUBJECT_A,
+    pageRole: 'bidder', sealRole: 'bidder', nameConfidence: 0.95, roleConfidence: 0.95,
+  }, SEAL_CONTEXT), null);
+
+  const fuzzy = classifySealFinding(ASSET_BASE, {
+    status: 'inspected', hasSeal: true, sealText: '南屿云图数据服务有限', detectedSubject: '南屿云图数据服务有限',
+    pageRole: 'bidder', sealRole: 'bidder', nameConfidence: 0.6, roleConfidence: 0.6,
+  }, SEAL_CONTEXT);
+  assert.strictEqual(fuzzy.level, 'needs-review');
+});
+
+test('classifySealFinding 跳过与失败资产不生成结果', () => {
+  assert.strictEqual(classifySealFinding(ASSET_BASE, { status: 'skipped', skipReason: '产品截图', hasSeal: false }, SEAL_CONTEXT), null);
+  assert.strictEqual(classifySealFinding(ASSET_BASE, { status: 'failed', skipReason: '识别失败', hasSeal: false }, SEAL_CONTEXT), null);
+});

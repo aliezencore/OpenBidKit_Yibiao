@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('node:path');
 const {
   SEMANTIC_PRONOUNS,
   normalizeSubjectName,
@@ -7,6 +8,8 @@ const {
   matchesAllowedSubject,
   looksLikeCompanyName,
 } = require('./subjectNameUtils.cjs');
+const { resolveVisualAssetAbsolutePath } = require('./subjectMediaFiles.cjs');
+const { createOnlineVlmProvider } = require('./subjectVisionProvider.cjs');
 
 const IDENTIFICATION_SEGMENT_CHARS = 12000;
 const BID_DOCUMENT_MARKER = '\n---yibiao-subject-bid-document---\n';
@@ -408,6 +411,139 @@ async function runSubjectBodyCheck(aiService, { bidDocuments, officialName, alia
   });
 }
 
+function createEmptyVisionStats() {
+  return {
+    totalAssets: 0,
+    candidateAssets: 0,
+    inspectedAssets: 0,
+    sealAssets: 0,
+    skippedAssets: 0,
+    reviewAssets: 0,
+    failedAssets: 0,
+  };
+}
+
+// 单资产分级（spec §10.2）：名称与角色置信度均 ≥0.85 才算明确印章不一致。
+function classifySealFinding(asset, providerAsset, { officialName, aliases }) {
+  if (!providerAsset || providerAsset.status !== 'inspected' || !providerAsset.hasSeal) return null;
+  const detected = String(providerAsset.detectedSubject || providerAsset.sealText || '').trim();
+  if (!detected) return null;
+  if (matchesAllowedSubject(detected, officialName, aliases)) return null; // 投标方自身印章
+  if (providerAsset.sealRole === 'third-party' || providerAsset.pageRole === 'third-party') return null; // 合法第三方印章
+  if (providerAsset.pageRole === 'unclear' && providerAsset.sealRole === 'unclear') return null; // 角色不清且无投标方要求证据
+  const nameConfidence = Number(providerAsset.nameConfidence || 0);
+  const roleConfidence = Number(providerAsset.roleConfidence || 0);
+  const level = nameConfidence >= 0.85 && roleConfidence >= 0.85 ? 'confirmed-mismatch' : 'needs-review';
+  const isScan = asset.assetKind === 'page-scan';
+  return {
+    id: `subject-seal-${asset.id}`,
+    bidDocumentId: asset.bidDocumentId,
+    level,
+    source: 'seal',
+    expectedSubject: officialName,
+    detectedSubject: detected,
+    locationKind: isScan ? 'scanned-page' : 'standalone-image',
+    title: isScan ? '整页扫描件印章主体异常' : '图片印章主体异常',
+    summary: `${asset.sectionTitle || asset.locationHint || '图片位置'}处的印章识别为“${detected}”`,
+    locationHint: [asset.sectionTitle, asset.locationHint].filter(Boolean).join(' / '),
+    originalText: String(providerAsset.sealText || detected),
+    roleReason: String(providerAsset.reason || ''),
+    mismatchReason: `印章主体与正式投标主体“${officialName}”不一致`,
+    suggestion: '请核对该位置是否应为投标方盖章，必要时替换为投标方公章',
+    confidence: Math.min(nameConfidence, roleConfidence),
+    visualAssetId: asset.id,
+    assetRelativePath: asset.relativePath,
+  };
+}
+
+async function runSubjectSealCheck(aiService, {
+  bidDocuments = [],
+  visualAssets = [],
+  officialName,
+  aliases = [],
+  subjectSealCheck = true,
+  mediaRootDir,
+}, onProgress) {
+  const stats = createEmptyVisionStats();
+  stats.totalAssets = visualAssets.length;
+
+  if (!subjectSealCheck) {
+    return { findings: [], visionStatus: 'disabled', visionStats: stats };
+  }
+
+  const provider = createOnlineVlmProvider({ aiService });
+  const config = typeof aiService.getConfig === 'function' ? aiService.getConfig() : {};
+  if (!config?.multimodal_enabled) {
+    onProgress('当前文本模型未开启多模态支持，已跳过印章检查。');
+    return { findings: [], visionStatus: 'unavailable', visionStats: stats };
+  }
+  if (!visualAssets.length) {
+    return { findings: [], visionStatus: 'success', visionStats: stats };
+  }
+
+  onProgress(`正在检查 ${visualAssets.length} 张投标文件图片的印章主体。`);
+  const providerAssets = visualAssets.map((asset) => ({
+    assetId: asset.id,
+    bidDocumentId: asset.bidDocumentId,
+    absolutePath: resolveVisualAssetAbsolutePath({
+      mediaRootDir,
+      bidDocumentId: asset.bidDocumentId,
+      relativePath: asset.relativePath,
+    }),
+    contentHash: asset.contentHash,
+    assetKind: asset.assetKind,
+    mimeType: asset.mimeType,
+    sectionTitle: asset.sectionTitle,
+    nearbyText: asset.nearbyText,
+  }));
+  stats.candidateAssets = providerAssets.length;
+
+  let response;
+  try {
+    response = await provider.inspect({
+      protocolVersion: 1,
+      officialName,
+      aliases,
+      assets: providerAssets,
+    });
+  } catch (error) {
+    return { findings: [], visionStatus: 'error', visionStats: stats, error: error.message };
+  }
+
+  if (response.providerStatus === 'unavailable') {
+    return { findings: [], visionStatus: 'unavailable', visionStats: stats, error: response.message };
+  }
+
+  const findings = [];
+  for (const asset of visualAssets) {
+    const providerAsset = response.assets.find((item) => item.assetId === asset.id);
+    if (!providerAsset) {
+      stats.failedAssets += 1;
+      continue;
+    }
+    if (providerAsset.status === 'skipped') {
+      stats.skippedAssets += 1;
+      continue;
+    }
+    if (providerAsset.status === 'failed') {
+      stats.failedAssets += 1;
+      continue;
+    }
+    stats.inspectedAssets += 1;
+    if (providerAsset.hasSeal) stats.sealAssets += 1;
+    const finding = classifySealFinding(asset, providerAsset, { officialName, aliases });
+    if (finding) {
+      if (finding.level === 'needs-review') stats.reviewAssets += 1;
+      findings.push(finding);
+    }
+  }
+
+  // 全部资产失败（含 Provider 整体 error）时为 error，部分失败为 partial（spec §13）。
+  const allFailed = stats.failedAssets > 0 && stats.inspectedAssets + stats.skippedAssets === 0;
+  const visionStatus = response.providerStatus === 'error' || allFailed ? 'error' : stats.failedAssets > 0 ? 'partial' : 'success';
+  return { findings, visionStatus, visionStats: stats };
+}
+
 async function runBidSubjectIdentificationTask({ aiService, checkpointTask, payload, previousState }) {
   const state = { ...(previousState || {}), ...(payload?.workspaceState || {}) };
   const bidDocuments = (Array.isArray(state.bidDocuments) ? state.bidDocuments : [])
@@ -469,4 +605,7 @@ module.exports = {
   createEmptySubjectBodyState,
   applySubjectBodyPatch,
   createSubjectBodyFinalCandidates,
+  runSubjectSealCheck,
+  classifySealFinding,
+  createEmptyVisionStats,
 };
