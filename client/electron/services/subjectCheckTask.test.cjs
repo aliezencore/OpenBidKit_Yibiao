@@ -6,6 +6,7 @@ const {
   buildSubjectIdentificationMessages,
   normalizeSubjectCandidates,
   parseAliasesFromCandidates,
+  runBidSubjectIdentificationTask,
 } = require('./subjectCheckTask.cjs');
 
 const SUBJECT_A = '北方长风智能科技有限公司';
@@ -15,6 +16,25 @@ const BID_DOCUMENTS = [
   { id: 'bid-1', fileName: '投标文件一.docx', content: `投标函\n致：某某招标代理公司\n投标人：${SUBJECT_A}（盖章）\n我公司郑重承诺遵守招标文件全部条款。` },
   { id: 'bid-2', fileName: '报价表.docx', content: `报价一览表\n投标人名称：${SUBJECT_A}\n含税总价：1234567.89 元` },
 ];
+
+const IDENTIFICATION_CANDIDATE = {
+  bid_document_id: 'bid-1',
+  name: SUBJECT_A,
+  confidence: 0.93,
+  location_hint: '投标函落款',
+  original_text: `投标人：${SUBJECT_A}（盖章）`,
+  role_evidence: '投标函落款处标注为投标人',
+  aliases: [],
+};
+
+function createIdentificationAiStub(captured, candidate = IDENTIFICATION_CANDIDATE) {
+  return {
+    collectJsonResponse: async ({ messages }) => {
+      captured.messages = messages;
+      return { candidates: [candidate] };
+    },
+  };
+}
 
 test('识别提示词包含语义代称说明与有效 bidDocumentId 列表', () => {
   const messages = buildSubjectIdentificationMessages({ bidDocuments: BID_DOCUMENTS });
@@ -269,4 +289,50 @@ test('classifySealFinding 投标方自身印章不报警，模糊印章降级为
 test('classifySealFinding 跳过与失败资产不生成结果', () => {
   assert.strictEqual(classifySealFinding(ASSET_BASE, { status: 'skipped', skipReason: '产品截图', hasSeal: false }, SEAL_CONTEXT), null);
   assert.strictEqual(classifySealFinding(ASSET_BASE, { status: 'failed', skipReason: '识别失败', hasSeal: false }, SEAL_CONTEXT), null);
+});
+
+test('识别范围收窄时只把指定文档发给模型', async () => {
+  const captured = {};
+  await runBidSubjectIdentificationTask({
+    aiService: createIdentificationAiStub(captured),
+    checkpointTask: () => {},
+    payload: { bidDocumentIds: ['bid-1'], workspaceState: { bidDocuments: BID_DOCUMENTS, bidSignature: 'sig-1' } },
+    previousState: {},
+  });
+  const text = captured.messages.map((message) => message.content).join('\n');
+  assert.ok(text.includes('投标文件一.docx'), '应包含选中的文档');
+  assert.ok(!text.includes('报价表.docx'), '不应包含范围外的文档');
+});
+
+test('未指定识别范围时仍扫描全部投标文件', async () => {
+  const captured = {};
+  await runBidSubjectIdentificationTask({
+    aiService: createIdentificationAiStub(captured),
+    checkpointTask: () => {},
+    payload: { workspaceState: { bidDocuments: BID_DOCUMENTS, bidSignature: 'sig-1' } },
+    previousState: {},
+  });
+  const text = captured.messages.map((message) => message.content).join('\n');
+  assert.ok(text.includes('投标文件一.docx'));
+  assert.ok(text.includes('报价表.docx'));
+});
+
+test('识别提示词不再声明扫描全部投标文件', () => {
+  const messages = buildSubjectIdentificationMessages({ bidDocuments: BID_DOCUMENTS });
+  const text = messages.map((message) => message.content).join('\n');
+  assert.ok(text.includes('请扫描以下投标文件'));
+  assert.ok(!text.includes('请扫描全部投标文件'));
+});
+
+test('识别范围外的候选会被丢弃', async () => {
+  const captured = {};
+  await assert.rejects(
+    () => runBidSubjectIdentificationTask({
+      aiService: createIdentificationAiStub(captured, { ...IDENTIFICATION_CANDIDATE, bid_document_id: 'bid-2' }),
+      checkpointTask: () => {},
+      payload: { bidDocumentIds: ['bid-1'], workspaceState: { bidDocuments: BID_DOCUMENTS, bidSignature: 'sig-1' } },
+      previousState: {},
+    }),
+    /未能从投标文件中识别出投标主体/,
+  );
 });
