@@ -719,8 +719,12 @@ export interface YibiaoBridge {
       subjectOfficialName?: string;
       subjectAliases?: string[];
     }) => Promise<CheckResultExportResult>;
-    startSubjectIdentification: () => Promise<unknown>;
-    confirmSubject: (payload: { officialName: string; aliases: string[] }) => Promise<{ success: boolean; message: string }>;
+    startSubjectIdentification: (payload?: { bidDocumentIds?: string[] }) => Promise<unknown>;
+    confirmSubject: (payload: {
+      officialName: string;
+      aliases: string[];
+      identificationTarget?: { mode: 'single' | 'all'; bidDocumentId?: string } | null;
+    }) => Promise<{ success: boolean; message?: string }>;
     deleteSubjectFinding: (findingId: string) => Promise<boolean>;
     clear: () => Promise<{ success: boolean; message?: string }>;
   };
