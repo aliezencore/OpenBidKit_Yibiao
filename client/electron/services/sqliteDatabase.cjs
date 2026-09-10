@@ -3,7 +3,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { getWorkspaceDatabasePath } = require('../utils/paths.cjs');
 
-const schemaVersion = 23;
+const schemaVersion = 24;
 
 function createInitialSchema(db) {
   db.exec(`
@@ -702,6 +702,77 @@ function createRejectionCheckSchema(db) {
   `);
 }
 
+function createBidSubjectCheckSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rejection_check_subject_profile (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL DEFAULT 'idle',
+      official_name TEXT NOT NULL DEFAULT '',
+      aliases_json TEXT,
+      candidates_json TEXT,
+      bid_signature TEXT,
+      confirmed_at TEXT,
+      error TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rejection_check_visual_assets (
+      asset_id TEXT PRIMARY KEY,
+      bid_document_id TEXT NOT NULL,
+      media_name TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      width INTEGER NOT NULL DEFAULT 0,
+      height INTEGER NOT NULL DEFAULT 0,
+      placement TEXT NOT NULL DEFAULT 'unknown',
+      asset_kind TEXT NOT NULL DEFAULT 'unknown',
+      location_hint TEXT NOT NULL DEFAULT '',
+      nearby_text TEXT NOT NULL DEFAULT '',
+      section_title TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_visual_assets_document
+    ON rejection_check_visual_assets(bid_document_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_visual_assets_hash
+    ON rejection_check_visual_assets(content_hash);
+
+    CREATE TABLE IF NOT EXISTS rejection_check_subject_findings (
+      finding_id TEXT PRIMARY KEY,
+      bid_document_id TEXT,
+      level TEXT NOT NULL,
+      source TEXT NOT NULL,
+      expected_subject TEXT NOT NULL,
+      detected_subject TEXT NOT NULL,
+      location_kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      location_hint TEXT NOT NULL,
+      original_text TEXT NOT NULL,
+      role_reason TEXT NOT NULL,
+      mismatch_reason TEXT NOT NULL,
+      suggestion TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 0,
+      visual_asset_id TEXT,
+      asset_relative_path TEXT,
+      seal_crop_relative_path TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_subject_findings_order
+    ON rejection_check_subject_findings(sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_subject_findings_level
+    ON rejection_check_subject_findings(level);
+  `);
+  addColumnIfMissing(db, 'rejection_check_results', 'stats_json', 'TEXT');
+}
+
 function addColumnIfMissing(db, tableName, columnName, columnType) {
   if (!getExistingTables(db).has(tableName)) return;
   const columns = getExistingColumns(db, tableName);
@@ -1119,6 +1190,11 @@ const schemaHealthTableGroups = [
     tables: ['feasibility_report_meta', 'feasibility_report_tasks', 'feasibility_report_outline_nodes'],
     repair: createFeasibilityReportSchema,
   },
+  {
+    version: 24,
+    tables: ['rejection_check_subject_profile', 'rejection_check_visual_assets', 'rejection_check_subject_findings'],
+    repair: createBidSubjectCheckSchema,
+  },
 ];
 
 function removeKnowledgeMigrationMeta(db) {
@@ -1280,6 +1356,11 @@ const schemaHealthColumnGroups = [
       content_mode: 'TEXT',
       content_mode_note: 'TEXT',
     },
+  },
+  {
+    version: 24,
+    table: 'rejection_check_results',
+    columns: { stats_json: 'TEXT' },
   },
 ];
 
@@ -1459,6 +1540,11 @@ const migrations = [
     version: 23,
     description: '新增可行性研究报告工作区表结构',
     up: createFeasibilityReportSchema,
+  },
+  {
+    version: 24,
+    description: '新增投标主体一致性检查表结构',
+    up: createBidSubjectCheckSchema,
   },
 ];
 

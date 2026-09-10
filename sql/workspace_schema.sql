@@ -14,7 +14,7 @@ PRAGMA busy_timeout = 5000;
 
 -- 目标完整结构版本。
 -- 运行时代码应通过 PRAGMA user_version 判断是否需要自动升级。
-PRAGMA user_version = 23;
+PRAGMA user_version = 24;
 
 -- ============================================================================
 -- 技术方案 technical_plan_*（v1 已落地）
@@ -568,6 +568,7 @@ CREATE TABLE IF NOT EXISTS rejection_check_results (
   active_finding_id TEXT,
   progress_message TEXT,
   error TEXT,
+  stats_json TEXT,
   updated_at TEXT
 );
 
@@ -903,3 +904,76 @@ ON feasibility_report_outline_nodes(parent_node_id, sort_order);
 
 CREATE INDEX IF NOT EXISTS idx_feasibility_report_outline_level
 ON feasibility_report_outline_nodes(level);
+
+-- ============================================================================
+-- v24: 投标主体一致性检查
+-- ============================================================================
+
+-- 投标主体确认档案（单行，id=1）。
+CREATE TABLE IF NOT EXISTS rejection_check_subject_profile (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL DEFAULT 'idle',
+  official_name TEXT NOT NULL DEFAULT '',
+  aliases_json TEXT,
+  candidates_json TEXT,
+  bid_signature TEXT,
+  confirmed_at TEXT,
+  error TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- DOCX 视觉材料（图片）元数据；不保存图片二进制，只存相对路径与元数据。
+CREATE TABLE IF NOT EXISTS rejection_check_visual_assets (
+  asset_id TEXT PRIMARY KEY,
+  bid_document_id TEXT NOT NULL,
+  media_name TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  placement TEXT NOT NULL DEFAULT 'unknown',
+  asset_kind TEXT NOT NULL DEFAULT 'unknown',
+  location_hint TEXT NOT NULL DEFAULT '',
+  nearby_text TEXT NOT NULL DEFAULT '',
+  section_title TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejection_check_visual_assets_document
+ON rejection_check_visual_assets(bid_document_id, sort_order);
+
+CREATE INDEX IF NOT EXISTS idx_rejection_check_visual_assets_hash
+ON rejection_check_visual_assets(content_hash);
+
+-- 投标主体一致性检查发现项。
+CREATE TABLE IF NOT EXISTS rejection_check_subject_findings (
+  finding_id TEXT PRIMARY KEY,
+  bid_document_id TEXT,
+  level TEXT NOT NULL,
+  source TEXT NOT NULL,
+  expected_subject TEXT NOT NULL,
+  detected_subject TEXT NOT NULL,
+  location_kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  location_hint TEXT NOT NULL,
+  original_text TEXT NOT NULL,
+  role_reason TEXT NOT NULL,
+  mismatch_reason TEXT NOT NULL,
+  suggestion TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  visual_asset_id TEXT,
+  asset_relative_path TEXT,
+  seal_crop_relative_path TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejection_check_subject_findings_order
+ON rejection_check_subject_findings(sort_order);
+
+CREATE INDEX IF NOT EXISTS idx_rejection_check_subject_findings_level
+ON rejection_check_subject_findings(level);
