@@ -648,6 +648,28 @@
 .subject-confirm-dialog__confidence { margin-left: 12px; color: var(--yb-text-soft); font-size: 12px; }
 .subject-confirm-dialog__evidence { margin: 6px 0 0; color: var(--yb-text-soft); font-size: 13px; }
 .subject-confirm-dialog__quote { margin: 6px 0 0; padding: 6px 10px; border-left: 3px solid var(--yb-border-soft); color: var(--yb-text-soft); font-size: 13px; }
+
+.subject-confirm-dialog__identify {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.subject-confirm-dialog__identify select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--yb-border-soft);
+  border-radius: 6px;
+  background: var(--yb-surface);
+  color: inherit;
+}
+
+.subject-confirm-dialog__identify button {
+  flex: 0 0 auto;
+}
 .subject-confirm-dialog__aliases { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .subject-confirm-dialog__alias { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; background: var(--yb-surface); font-size: 13px; }
 .subject-confirm-dialog__alias-input { display: flex; gap: 8px; }

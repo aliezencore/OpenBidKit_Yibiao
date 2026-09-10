@@ -26,6 +26,7 @@ import type {
   SubjectCheckFinding,
   SubjectCheckResultState,
   SubjectProfileState,
+  SubjectIdentificationTarget,
   TypoCheckFinding,
   TypoCheckResultState,
 } from '../types';
@@ -740,6 +741,7 @@ function RejectionCheckPage() {
   const [checkTask, setCheckTask] = useState<RejectionBackgroundTaskState | undefined>();
   const [subjectIdentificationTask, setSubjectIdentificationTask] = useState<RejectionBackgroundTaskState | undefined>();
   const [subjectDialogOpen, setSubjectDialogOpen] = useState(false);
+  const [pendingIdentificationTarget, setPendingIdentificationTarget] = useState<SubjectIdentificationTarget | null>(null);
   const [subjectSealAvailable, setSubjectSealAvailable] = useState(false);
   const [customCheckItems, setCustomCheckItems] = useState('');
   const [customCheckItemsDraft, setCustomCheckItemsDraft] = useState('');
@@ -758,6 +760,8 @@ function RejectionCheckPage() {
   const customCheckItemsDraftRef = useRef('');
   const customCheckItemsSaveVersionRef = useRef(0);
   const subjectProfileRef = useRef<SubjectProfileState>(createEmptySubjectProfileState());
+  const subjectBidDocuments: { id: string; fileName: string }[] = [];
+  const resolvedIdentificationTarget: SubjectIdentificationTarget = pendingIdentificationTarget || { mode: 'single' };
   const { showToast } = useToast();
   const { showDocumentParseNotice } = useDocumentParseNotice();
 
@@ -2718,12 +2722,15 @@ function RejectionCheckPage() {
         preselectIndex={subjectProfile.preselectIndex}
         defaultOfficialName={subjectProfile.officialName || ''}
         defaultAliases={subjectProfile.aliases || []}
+        identificationTarget={resolvedIdentificationTarget}
+        bidDocuments={subjectBidDocuments}
         sealEnabled={checkOptions.subjectSealCheck}
         sealAvailable={subjectSealAvailable}
         identifying={subjectProfile.status === 'identifying'}
         onSealEnabledChange={(enabled) => setCheckOptions((prev) => ({ ...prev, subjectSealCheck: enabled }))}
+        onIdentificationTargetChange={setPendingIdentificationTarget}
+        onIdentify={() => { void startSubjectIdentification(); }}
         onConfirm={handleSubjectConfirm}
-        onReidentify={startSubjectIdentification}
         onCancel={() => setSubjectDialogOpen(false)}
       />
 

@@ -169,6 +169,11 @@ export interface RejectionCheckReport {
 
 export type SubjectProfileStatus = 'idle' | 'identifying' | 'pending-confirmation' | 'confirmed' | 'error';
 
+export interface SubjectIdentificationTarget {
+  mode: 'single' | 'all';
+  bidDocumentId?: string;
+}
+
 export type SubjectFindingLevel = 'confirmed-mismatch' | 'needs-review';
 
 export type SubjectFindingSource = 'text' | 'seal';
@@ -203,6 +208,7 @@ export interface SubjectProfileState {
   aliases: string[];
   candidates: SubjectCandidate[];
   preselectIndex?: number;
+  identificationTarget?: SubjectIdentificationTarget;
   bidSignature?: string;
   confirmedAt?: string;
   error?: string;
