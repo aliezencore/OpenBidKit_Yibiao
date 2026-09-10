@@ -20,6 +20,7 @@
 - 改动 `.cjs` 后先 `node --check <file>`；改 Renderer 后 `cd client; npm run build`。
 - `npm run build` 中既有 chunk 体积警告不算失败。
 - 本仓库直接在 `main` 上按任务提交，不建 worktree；提交身份用 `-c user.name="InsCode" -c user.email="noreply@inscode.net"`，且**不推送**。
+- 涉及 `better-sqlite3`（Electron ABI 原生模块）的测试**不能用普通 `node --test`**，必须用 ABI 匹配的 Electron 以 Node 模式运行：`cd client && ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test <file>`。纯 JS 的测试仍用普通 `node --test`。
 
 ---
 
@@ -258,8 +259,10 @@ const { createRejectionCheckStore } = require('./rejectionCheckStore.cjs');
 
 function withStore(run) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-subject-store-'));
-  const app = { getPath: () => dir };
-  const db = createSqliteDatabase(app);
+  // createSqliteDatabase 会调用 app.once('will-quit', ...)，并返回 { db, close, ... } 包装对象；
+  // store 需要的是包装对象里的原生 better-sqlite3 实例。
+  const app = { getPath: () => dir, once: () => {} };
+  const db = createSqliteDatabase(app).db;
   try {
     const store = createRejectionCheckStore({
       app,
@@ -369,8 +372,10 @@ test('confirmSubject 未显式传值时保留既有 identificationTarget', () =>
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd client && node --test electron/services/rejectionCheckStore.subject.test.cjs`
+Run: `cd client && ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test electron/services/rejectionCheckStore.subject.test.cjs`
 Expected: FAIL —— 第 1 个用例 `status` 为 `idle`（补丁被丢弃）；`identificationTarget` 相关用例得到 `undefined`。
+
+**注意**：这个测试涉及 Electron ABI 的原生模块 `better-sqlite3`，**不能用普通 `node --test` 运行**（会报 `ERR_DLOPEN_FAILED`），必须走上面的 Electron-as-Node 命令。
 
 - [ ] **Step 3: 事务落库 subjectProfile**
 
@@ -497,7 +502,7 @@ Expected: FAIL —— 第 1 个用例 `status` 为 `idle`（补丁被丢弃）�
 
 - [ ] **Step 8: 运行测试确认通过**
 
-Run: `cd client && node --check electron/services/rejectionCheckStore.cjs && node --test electron/services/rejectionCheckStore.subject.test.cjs`
+Run: `cd client && node --check electron/services/rejectionCheckStore.cjs && ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test electron/services/rejectionCheckStore.subject.test.cjs`
 Expected: PASS（5 个用例全绿）
 
 - [ ] **Step 9: 提交**
@@ -1150,10 +1155,11 @@ Run:
 
 ```bash
 cd client
-node --test electron/services/subjectCheckTask.test.cjs electron/services/rejectionCheckStore.subject.test.cjs electron/services/checkResultExportService.subject.test.cjs src/features/rejection-check/exportState.test.cjs
+node --test electron/services/subjectCheckTask.test.cjs electron/services/checkResultExportService.subject.test.cjs src/features/rejection-check/exportState.test.cjs
+ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test electron/services/rejectionCheckStore.subject.test.cjs
 ```
 
-Expected: 全部 PASS
+Expected: 全部 PASS（Store 主体测试必须走第二条 Electron-as-Node 命令，普通 node 会 `ERR_DLOPEN_FAILED`）
 
 - [ ] **Step 3: native 冒烟与构建**
 
