@@ -17,10 +17,13 @@ const initialState = {
   activeCheckResultTab: 'rejection',
   invalidBidAndRejectionItems: { status: 'idle', content: '' },
   customCheckItems: '',
-  checkOptions: { rejectionCheck: true, typoCheck: true, logicCheck: true },
+  checkOptions: { rejectionCheck: true, typoCheck: true, logicCheck: true, subjectCheck: true, subjectSealCheck: true },
   rejectionCheckResult: { status: 'idle', findings: [] },
   typoCheckResult: { status: 'idle', findings: [] },
   logicCheckResult: { status: 'idle', findings: [] },
+  subjectCheckResult: { status: 'idle', findings: [], stats: undefined },
+  subjectProfile: { status: 'idle', officialName: '', aliases: [], candidates: [] },
+  subjectIdentificationTask: undefined,
   extractionTask: undefined,
   checkTask: undefined,
 };
@@ -28,6 +31,7 @@ const initialState = {
 const taskFieldTypes = {
   extractionTask: 'rejection-items-extraction',
   checkTask: 'rejection-check-run',
+  subjectIdentificationTask: 'bid-subject-identification',
 };
 
 const taskTypeFields = Object.fromEntries(Object.entries(taskFieldTypes).map(([field, type]) => [type, field]));
@@ -36,6 +40,7 @@ const resultFieldTypes = {
   rejectionCheckResult: 'rejection',
   typoCheckResult: 'typo',
   logicCheckResult: 'logic',
+  subjectCheckResult: 'subject',
 };
 
 const resultTypeFields = Object.fromEntries(Object.entries(resultFieldTypes).map(([field, type]) => [type, field]));
@@ -98,14 +103,17 @@ function normalizeResultTab(value) {
 }
 
 function normalizeCheckResultTab(value) {
-  return ['rejection', 'typo', 'logic'].includes(value) ? value : 'rejection';
+  return ['rejection', 'typo', 'logic', 'subject'].includes(value) ? value : 'rejection';
 }
 
 function normalizeCheckOptions(options) {
+  const subjectCheck = options?.subjectCheck !== false;
   return {
     rejectionCheck: true,
     typoCheck: options?.typoCheck !== false,
     logicCheck: options?.logicCheck !== false,
+    subjectCheck,
+    subjectSealCheck: subjectCheck && options?.subjectSealCheck !== false,
   };
 }
 
@@ -586,14 +594,15 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     const existing = db.prepare('SELECT * FROM rejection_check_results WHERE result_type = ?').get(resultType);
     const timestamp = now();
     db.prepare(`
-      INSERT INTO rejection_check_results (result_type, status, input_signature, active_finding_id, progress_message, error, updated_at)
-      VALUES (@result_type, @status, @input_signature, @active_finding_id, @progress_message, @error, @updated_at)
+      INSERT INTO rejection_check_results (result_type, status, input_signature, active_finding_id, progress_message, error, stats_json, updated_at)
+      VALUES (@result_type, @status, @input_signature, @active_finding_id, @progress_message, @error, @stats_json, @updated_at)
       ON CONFLICT(result_type) DO UPDATE SET
         status = excluded.status,
         input_signature = excluded.input_signature,
         active_finding_id = excluded.active_finding_id,
         progress_message = excluded.progress_message,
         error = excluded.error,
+        stats_json = excluded.stats_json,
         updated_at = excluded.updated_at
     `).run({
       result_type: resultType,
@@ -612,6 +621,9 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       error: hasOwn(result, 'error')
         ? result.error ? String(result.error) : null
         : existing?.error || null,
+      stats_json: hasOwn(result, 'stats')
+        ? jsonOrNull(result.stats)
+        : existing?.stats_json || null,
       updated_at: result.updatedAt || timestamp,
     });
     if (hasOwn(result, 'findings')) {
@@ -624,6 +636,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     if (resultType === 'rejection') db.prepare('DELETE FROM rejection_check_risk_findings').run();
     if (resultType === 'typo') db.prepare('DELETE FROM rejection_check_typo_findings').run();
     if (resultType === 'logic') db.prepare('DELETE FROM rejection_check_logic_findings').run();
+    if (resultType === 'subject') db.prepare('DELETE FROM rejection_check_subject_findings').run();
   }
 
   function saveFindingRows(resultType, findings) {
@@ -694,6 +707,38 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
         updated_at: timestamp,
       }));
     }
+    if (resultType === 'subject') {
+      const insert = db.prepare(`
+        INSERT INTO rejection_check_subject_findings (
+          finding_id, bid_document_id, level, source, expected_subject, detected_subject, location_kind, title, summary, location_hint, original_text, role_reason, mismatch_reason, suggestion, confidence, visual_asset_id, asset_relative_path, seal_crop_relative_path, sort_order, created_at, updated_at
+        ) VALUES (
+          @finding_id, @bid_document_id, @level, @source, @expected_subject, @detected_subject, @location_kind, @title, @summary, @location_hint, @original_text, @role_reason, @mismatch_reason, @suggestion, @confidence, @visual_asset_id, @asset_relative_path, @seal_crop_relative_path, @sort_order, @created_at, @updated_at
+        )
+      `);
+      findings.forEach((item, index) => insert.run({
+        finding_id: String(item.id || `subject-finding-${index + 1}`),
+        bid_document_id: item.bidDocumentId ? String(item.bidDocumentId) : null,
+        level: item.level === 'confirmed-mismatch' ? 'confirmed-mismatch' : 'needs-review',
+        source: item.source === 'seal' ? 'seal' : 'text',
+        expected_subject: String(item.expectedSubject || ''),
+        detected_subject: String(item.detectedSubject || ''),
+        location_kind: ['body', 'table', 'signature', 'standalone-image', 'scanned-page'].includes(item.locationKind) ? item.locationKind : 'body',
+        title: String(item.title || ''),
+        summary: String(item.summary || ''),
+        location_hint: String(item.locationHint || ''),
+        original_text: String(item.originalText || ''),
+        role_reason: String(item.roleReason || ''),
+        mismatch_reason: String(item.mismatchReason || ''),
+        suggestion: String(item.suggestion || ''),
+        confidence: Math.max(0, Math.min(1, Number(item.confidence || 0))),
+        visual_asset_id: item.visualAssetId ? String(item.visualAssetId) : null,
+        asset_relative_path: item.assetRelativePath ? String(item.assetRelativePath) : null,
+        seal_crop_relative_path: item.sealCropRelativePath ? String(item.sealCropRelativePath) : null,
+        sort_order: index,
+        created_at: timestamp,
+        updated_at: timestamp,
+      }));
+    }
   }
 
   function loadResult(resultType) {
@@ -701,6 +746,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     const base = {
       status: 'idle',
       findings: [],
+      stats: undefined,
     };
     if (!row) return base;
     return {
@@ -710,6 +756,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       activeFindingId: row.active_finding_id || undefined,
       progressMessage: row.progress_message || undefined,
       error: row.error || undefined,
+      stats: safeJsonParse(row.stats_json, undefined),
       updatedAt: row.updated_at || undefined,
     };
   }
@@ -741,6 +788,28 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
         locationHint: item.location_hint || undefined,
       }));
     }
+    if (resultType === 'subject') {
+      return db.prepare('SELECT * FROM rejection_check_subject_findings ORDER BY sort_order ASC').all().map((item) => ({
+        id: item.finding_id,
+        bidDocumentId: item.bid_document_id || fallbackBidDocumentId,
+        level: item.level,
+        source: item.source,
+        expectedSubject: item.expected_subject,
+        detectedSubject: item.detected_subject,
+        locationKind: item.location_kind,
+        title: item.title,
+        summary: item.summary,
+        locationHint: item.location_hint,
+        originalText: item.original_text,
+        roleReason: item.role_reason,
+        mismatchReason: item.mismatch_reason,
+        suggestion: item.suggestion,
+        confidence: Number(item.confidence || 0),
+        visualAssetId: item.visual_asset_id || undefined,
+        assetRelativePath: item.asset_relative_path || undefined,
+        sealCropRelativePath: item.seal_crop_relative_path || undefined,
+      }));
+    }
     return db.prepare('SELECT * FROM rejection_check_logic_findings ORDER BY sort_order ASC').all().map((item) => ({
       id: item.finding_id,
       bidDocumentId: item.bid_document_id || fallbackBidDocumentId,
@@ -757,6 +826,7 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     db.prepare('DELETE FROM rejection_check_risk_findings').run();
     db.prepare('DELETE FROM rejection_check_typo_findings').run();
     db.prepare('DELETE FROM rejection_check_logic_findings').run();
+    db.prepare('DELETE FROM rejection_check_subject_findings').run();
     db.prepare("DELETE FROM rejection_check_tasks WHERE type = 'rejection-check-run'").run();
   }
 
@@ -819,6 +889,8 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       rejectionCheckResult: loadResult('rejection'),
       typoCheckResult: loadResult('typo'),
       logicCheckResult: loadResult('logic'),
+      subjectCheckResult: loadResult('subject'),
+      subjectProfile: loadSubjectProfile(),
       ...tasks,
     };
   }
@@ -1099,6 +1171,156 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     }
   }
 
+  function loadSubjectProfile() {
+    const row = db.prepare('SELECT * FROM rejection_check_subject_profile WHERE id = 1').get();
+    if (!row) return { ...initialState.subjectProfile };
+    const candidatesPayload = safeJsonParse(row.candidates_json, {}) || {};
+    const items = Array.isArray(candidatesPayload.items) ? candidatesPayload.items : (Array.isArray(candidatesPayload) ? candidatesPayload : []);
+    return {
+      status: normalizeStatus(row.status, ['idle', 'identifying', 'pending-confirmation', 'confirmed', 'error'], 'idle'),
+      officialName: row.official_name || '',
+      aliases: safeJsonParse(row.aliases_json, []) || [],
+      candidates: items,
+      preselectIndex: Number.isInteger(candidatesPayload.preselectIndex) ? candidatesPayload.preselectIndex : undefined,
+      bidSignature: row.bid_signature || undefined,
+      confirmedAt: row.confirmed_at || undefined,
+      error: row.error || undefined,
+      updatedAt: row.updated_at || undefined,
+    };
+  }
+
+  function saveSubjectProfile(profile) {
+    const normalized = {
+      status: normalizeStatus(profile?.status, ['idle', 'identifying', 'pending-confirmation', 'confirmed', 'error'], 'idle'),
+      official_name: String(profile?.officialName || ''),
+      aliases_json: jsonOrNull(Array.isArray(profile?.aliases) ? profile.aliases : []),
+      candidates_json: jsonOrNull({
+        items: Array.isArray(profile?.candidates) ? profile.candidates : [],
+        preselectIndex: Number.isInteger(profile?.preselectIndex) ? profile.preselectIndex : -1,
+      }),
+      bid_signature: profile?.bidSignature ? String(profile.bidSignature) : null,
+      confirmed_at: profile?.confirmedAt ? String(profile.confirmedAt) : null,
+      error: profile?.error ? String(profile.error) : null,
+      updated_at: now(),
+    };
+    db.prepare(`
+      INSERT INTO rejection_check_subject_profile (id, status, official_name, aliases_json, candidates_json, bid_signature, confirmed_at, error, updated_at)
+      VALUES (1, @status, @official_name, @aliases_json, @candidates_json, @bid_signature, @confirmed_at, @error, @updated_at)
+      ON CONFLICT(id) DO UPDATE SET
+        status = excluded.status,
+        official_name = excluded.official_name,
+        aliases_json = excluded.aliases_json,
+        candidates_json = excluded.candidates_json,
+        bid_signature = excluded.bid_signature,
+        confirmed_at = excluded.confirmed_at,
+        error = excluded.error,
+        updated_at = excluded.updated_at
+    `).run(normalized);
+    return loadSubjectProfile();
+  }
+
+  function resetSubjectProfile(reason) {
+    return saveSubjectProfile({ status: 'idle', officialName: '', aliases: [], candidates: [], error: reason || undefined });
+  }
+
+  function getCurrentBidSignature() {
+    const rows = db.prepare("SELECT * FROM rejection_check_documents WHERE role = 'bid' ORDER BY sort_order ASC, imported_at ASC").all();
+    return rows.map(documentFromRow).filter(Boolean)
+      .map((document) => createDocumentSignature(document))
+      .filter(Boolean)
+      .join('\n---yibiao-rejection-bid-signature---\n');
+  }
+
+  function getSubjectMediaRootDir() {
+    return path.join(rejectionCheckDir, 'subject-media');
+  }
+
+  function confirmSubject({ officialName, aliases } = {}) {
+    const name = String(officialName || '').trim();
+    if (!name) return { success: false, message: '请填写正式投标主体名称' };
+    const normalizedAliases = (Array.isArray(aliases) ? aliases : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    const previous = loadSubjectProfile();
+    const profile = saveSubjectProfile({
+      status: 'confirmed',
+      officialName: name,
+      aliases: normalizedAliases,
+      candidates: previous.candidates,
+      preselectIndex: previous.preselectIndex,
+      bidSignature: getCurrentBidSignature(),
+      confirmedAt: now(),
+    });
+    // 修改正式主体或简称都会让旧主体结果失效（spec §11.4）。
+    saveResult('subject', { status: 'idle', findings: [], inputSignature: null, activeFindingId: null, progressMessage: null, error: null, stats: null, updatedAt: now() });
+    clearFindingRows('subject');
+    return { success: true, message: '投标主体已确认', profile };
+  }
+
+  function listVisualAssets(bidDocumentId) {
+    const rows = bidDocumentId
+      ? db.prepare('SELECT * FROM rejection_check_visual_assets WHERE bid_document_id = ? ORDER BY sort_order ASC').all(String(bidDocumentId))
+      : db.prepare('SELECT * FROM rejection_check_visual_assets ORDER BY bid_document_id ASC, sort_order ASC').all();
+    return rows.map((row) => ({
+      id: row.asset_id,
+      bidDocumentId: row.bid_document_id,
+      mediaName: row.media_name,
+      contentHash: row.content_hash,
+      relativePath: row.relative_path,
+      mimeType: row.mime_type,
+      width: Number(row.width || 0),
+      height: Number(row.height || 0),
+      placement: row.placement,
+      assetKind: row.asset_kind,
+      locationHint: row.location_hint,
+      nearbyText: row.nearby_text,
+      sectionTitle: row.section_title || undefined,
+    }));
+  }
+
+  function saveVisualAssets(bidDocumentId, assets = []) {
+    const documentId = String(bidDocumentId || '');
+    db.prepare('DELETE FROM rejection_check_visual_assets WHERE bid_document_id = ?').run(documentId);
+    const timestamp = now();
+    const insert = db.prepare(`
+      INSERT INTO rejection_check_visual_assets (
+        asset_id, bid_document_id, media_name, content_hash, relative_path, mime_type, width, height, placement, asset_kind, location_hint, nearby_text, section_title, sort_order, created_at
+      ) VALUES (
+        @asset_id, @bid_document_id, @media_name, @content_hash, @relative_path, @mime_type, @width, @height, @placement, @asset_kind, @location_hint, @nearby_text, @section_title, @sort_order, @created_at
+      )
+    `);
+    (Array.isArray(assets) ? assets : []).forEach((asset, index) => insert.run({
+      asset_id: String(asset.id || `${documentId}-asset-${index + 1}`),
+      bid_document_id: documentId,
+      media_name: String(asset.mediaName || ''),
+      content_hash: String(asset.contentHash || ''),
+      relative_path: String(asset.relativePath || ''),
+      mime_type: String(asset.mimeType || 'application/octet-stream'),
+      width: Math.max(0, Math.round(Number(asset.width || 0))),
+      height: Math.max(0, Math.round(Number(asset.height || 0))),
+      placement: asset.placement === 'anchor' ? 'anchor' : asset.placement === 'inline' ? 'inline' : 'unknown',
+      asset_kind: ['standalone', 'page-scan', 'unknown'].includes(asset.assetKind) ? asset.assetKind : 'unknown',
+      location_hint: String(asset.locationHint || ''),
+      nearby_text: String(asset.nearbyText || ''),
+      section_title: asset.sectionTitle ? String(asset.sectionTitle) : null,
+      sort_order: index,
+      created_at: timestamp,
+    }));
+  }
+
+  function clearVisualAssets(bidDocumentId) {
+    if (bidDocumentId) {
+      db.prepare('DELETE FROM rejection_check_visual_assets WHERE bid_document_id = ?').run(String(bidDocumentId));
+      return;
+    }
+    db.prepare('DELETE FROM rejection_check_visual_assets').run();
+  }
+
+  function deleteSubjectFinding(findingId) {
+    const result = db.prepare('DELETE FROM rejection_check_subject_findings WHERE finding_id = ?').run(String(findingId || ''));
+    return result.changes > 0;
+  }
+
   function saveUiState(partial = {}) {
     const uiState = {};
     for (const field of ['step', 'activeDocumentTab', 'activeResultTab', 'activeCheckResultTab', 'customCheckItems', 'checkOptions']) {
@@ -1117,6 +1339,9 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
       db.prepare('DELETE FROM rejection_check_risk_findings').run();
       db.prepare('DELETE FROM rejection_check_typo_findings').run();
       db.prepare('DELETE FROM rejection_check_logic_findings').run();
+      db.prepare('DELETE FROM rejection_check_subject_profile').run();
+      db.prepare('DELETE FROM rejection_check_visual_assets').run();
+      db.prepare('DELETE FROM rejection_check_subject_findings').run();
       db.prepare('DELETE FROM rejection_check_documents').run();
       db.prepare('DELETE FROM rejection_check_meta').run();
       ensureMetaRow();
@@ -1143,6 +1368,16 @@ function createRejectionCheckStore({ app, db, fileService, technicalPlanStore, t
     createDocumentSignature,
     createRejectionCheckInputSignature,
     saveUiState,
+    loadSubjectProfile,
+    saveSubjectProfile,
+    resetSubjectProfile,
+    confirmSubject,
+    getCurrentBidSignature,
+    getSubjectMediaRootDir,
+    listVisualAssets,
+    saveVisualAssets,
+    clearVisualAssets,
+    deleteSubjectFinding,
   };
 }
 
