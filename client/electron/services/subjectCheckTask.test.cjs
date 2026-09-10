@@ -67,3 +67,126 @@ test('parseAliasesFromCandidates 汇总去重简称并剔除与正式名相同�
   ]);
   assert.deepStrictEqual(aliases.sort(), ['北方长风', '南屿云图', '长风智能'].sort());
 });
+
+const {
+  normalizeSubjectBodyFindings,
+  createEmptySubjectBodyState,
+  applySubjectBodyPatch,
+  createSubjectBodyFinalCandidates,
+} = require('./subjectCheckTask.cjs');
+
+const BODY_CONTEXT = {
+  bidDocuments: BID_DOCUMENTS,
+  officialName: SUBJECT_A,
+  aliases: ['北方长风'],
+};
+
+test('normalizeSubjectBodyFindings 保留 bidder 明确不一致并丢弃第三方', () => {
+  // 自洽夹具：该投标正文包含 SUBJECT_B，使两条 finding 的 original_text 均可在文件中定位（spec §8.4-2）。
+  const bodyContextWithB = {
+    bidDocuments: [{ id: 'bid-1', fileName: '投标文件一.docx', content: `投标函\n致：${SUBJECT_B}（招标代理）\n投标人：${SUBJECT_B}（盖章）\n我公司郑重承诺遵守招标文件全部条款。` }],
+    officialName: SUBJECT_A,
+    aliases: ['北方长风'],
+  };
+  const payload = {
+    findings: [
+      {
+        bid_document_id: 'bid-1', role: 'bidder', detected_subject: SUBJECT_B, location_kind: 'signature',
+        title: '落款主体错误', summary: '投标函落款为其他公司', location_hint: '投标函落款',
+        original_text: `投标人：${SUBJECT_B}（盖章）`, role_reason: '投标函落款处应由投标方签署',
+        mismatch_reason: '落款主体与正式投标主体不一致', suggestion: '改为投标方名称并加盖投标方公章',
+        name_confidence: 0.93, role_confidence: 0.92,
+      },
+      {
+        bid_document_id: 'bid-1', role: 'third-party', detected_subject: SUBJECT_B, location_kind: 'body',
+        title: '第三方出现', summary: '第三方', location_hint: '正文',
+        original_text: `致：${SUBJECT_B}（招标代理）`, role_reason: '招标人',
+        mismatch_reason: '不适用', suggestion: '无需修改', name_confidence: 0.95, role_confidence: 0.95,
+      },
+    ],
+  };
+  const findings = normalizeSubjectBodyFindings(payload, bodyContextWithB);
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].level, 'confirmed-mismatch');
+  assert.strictEqual(findings[0].source, 'text');
+  assert.strictEqual(findings[0].detectedSubject, SUBJECT_B);
+});
+
+test('normalizeSubjectBodyFindings 丢弃无法定位的原文（幻觉）与允许主体', () => {
+  const payload = {
+    findings: [
+      {
+        bid_document_id: 'bid-1', role: 'bidder', detected_subject: SUBJECT_B, location_kind: 'body',
+        title: 'x', summary: 'x', location_hint: 'x', original_text: '这段文字不存在于文件中',
+        role_reason: 'x', mismatch_reason: 'x', suggestion: 'x', name_confidence: 0.9, role_confidence: 0.9,
+      },
+      {
+        bid_document_id: 'bid-1', role: 'bidder', detected_subject: SUBJECT_A, location_kind: 'body',
+        title: 'y', summary: 'y', location_hint: 'y', original_text: `投标人：${SUBJECT_A}（盖章）`,
+        role_reason: 'y', mismatch_reason: 'y', suggestion: 'y', name_confidence: 0.9, role_confidence: 0.9,
+      },
+      {
+        bid_document_id: 'bid-1', role: 'bidder', detected_subject: '北方长风', location_kind: 'body',
+        title: 'z', summary: 'z', location_hint: 'z', original_text: '北方长风出现在承诺函中',
+        role_reason: 'z', mismatch_reason: 'z', suggestion: 'z', name_confidence: 0.9, role_confidence: 0.9,
+      },
+    ],
+  };
+  assert.deepStrictEqual(normalizeSubjectBodyFindings(payload, BODY_CONTEXT), []);
+});
+
+test('normalizeSubjectBodyFindings 置信度不足降级为 needs-review', () => {
+  const payload = {
+    findings: [{
+      bid_document_id: 'bid-1', role: 'bidder', detected_subject: SUBJECT_B, location_kind: 'body',
+      title: 't', summary: 's', location_hint: 'l', original_text: `投标人名称：${SUBJECT_B}`,
+      role_reason: 'r', mismatch_reason: 'm', suggestion: 'g', name_confidence: 0.6, role_confidence: 0.9,
+    }],
+  };
+  const findings = normalizeSubjectBodyFindings(payload, {
+    ...BODY_CONTEXT,
+    bidDocuments: [{ id: 'bid-1', fileName: '投标文件一.docx', content: `投标人名称：${SUBJECT_B}` }],
+  });
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].level, 'needs-review');
+});
+
+test('normalizeSubjectBodyFindings 角色 unclear 且出现其他具名公司时进入 needs-review', () => {
+  const findings = normalizeSubjectBodyFindings({
+    findings: [{
+      bid_document_id: 'bid-1', role: 'unclear', detected_subject: SUBJECT_B, location_kind: 'body',
+      title: 't', summary: 's', location_hint: 'l', original_text: `合作单位：${SUBJECT_B}`,
+      role_reason: 'r', mismatch_reason: 'm', suggestion: 'g', name_confidence: 0.9, role_confidence: 0.9,
+    }],
+  }, {
+    ...BODY_CONTEXT,
+    bidDocuments: [{ id: 'bid-1', fileName: '投标文件一.docx', content: `合作单位：${SUBJECT_B}` }],
+  });
+  assert.strictEqual(findings.length, 1);
+  assert.strictEqual(findings[0].level, 'needs-review');
+});
+
+test('滚动状态机累积候选并在定稿时按位置去重', () => {
+  let state = createEmptySubjectBodyState();
+  state = applySubjectBodyPatch(state, {
+    subject_summary: [`投标方：${SUBJECT_A}`],
+    role_summary: ['bidder=投标函'],
+    candidates: [{
+      bid_document_id: 'bid-1', role: 'bidder', detected_subject: SUBJECT_B, location_kind: 'signature',
+      title: 't', summary: 's', location_hint: 'l', original_text: `投标人：${SUBJECT_B}`,
+      role_reason: 'r', mismatch_reason: 'm', suggestion: 'g', name_confidence: 0.9, role_confidence: 0.9,
+    }],
+  });
+  state = applySubjectBodyPatch(state, {
+    subject_summary: [],
+    role_summary: [],
+    candidates: [{
+      bid_document_id: 'bid-1', role: 'bidder', detected_subject: SUBJECT_B, location_kind: 'signature',
+      title: 't2', summary: 's2', location_hint: 'l', original_text: `投标人：${SUBJECT_B}`,
+      role_reason: 'r', mismatch_reason: 'm', suggestion: 'g', name_confidence: 0.9, role_confidence: 0.9,
+    }],
+  });
+  const candidates = createSubjectBodyFinalCandidates(state);
+  assert.strictEqual(candidates.length, 1);
+  assert.strictEqual(candidates[0].detectedSubject, SUBJECT_B);
+});
