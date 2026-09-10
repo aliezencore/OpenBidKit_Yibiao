@@ -2,6 +2,11 @@ const crypto = require('node:crypto');
 const { compactLogError, createNoopDeveloperLogger, textMetrics } = require('../utils/developerLog.cjs');
 const { splitUserTextByContextLimit } = require('../utils/userTextSplitter.cjs');
 const { runInvalidBidAndRejectionItemsExtraction } = require('./bidAnalysisTask.cjs');
+const {
+  runSubjectBodyCheck,
+  runSubjectSealCheck,
+} = require('./subjectCheckTask.cjs');
+const { createSubjectCheckInputSignature } = require('./subjectNameUtils.cjs');
 
 const checkRunStatus = ['idle', 'running', 'success', 'error'];
 const typoExcerptRadius = 8;
@@ -1617,6 +1622,7 @@ async function runRejectionCheckTask({ aiService, workspaceStore, updateTask, ch
     runOptions.rejectionCheck ? 'rejection' : '',
     runOptions.typoCheck ? 'typo' : '',
     runOptions.logicCheck ? 'logic' : '',
+    runOptions.subjectCheck ? 'subject' : '',
   ].filter(Boolean);
   if (!enabledTasks.length) throw new Error('请至少启用一种检查');
   if (runOptions.rejectionCheck && (!invalidBidAndRejectionItems.trim() || !rejectionInputSignature)) {
@@ -1644,6 +1650,29 @@ async function runRejectionCheckTask({ aiService, workspaceStore, updateTask, ch
   if (runOptions.rejectionCheck) initialPartial.rejectionCheckResult = { ...createRunningResult(rejectionInputSignature, '第一轮：正在分析检查范围。'), findings: [], activeFindingId: undefined };
   if (runOptions.typoCheck) initialPartial.typoCheckResult = { ...createRunningResult(bidSignature, '正在识别错别字候选。'), findings: [], activeFindingId: undefined };
   if (runOptions.logicCheck) initialPartial.logicCheckResult = { ...createRunningResult(bidSignature, '正在检查逻辑谬误。'), findings: [], activeFindingId: undefined };
+
+  const subjectProfile = typeof workspaceStore.loadSubjectProfile === 'function' ? workspaceStore.loadSubjectProfile() : undefined;
+  const subjectVisualAssets = typeof workspaceStore.listVisualAssets === 'function' ? workspaceStore.listVisualAssets() : [];
+  const subjectInputSignature = subjectProfile?.status === 'confirmed'
+    ? createSubjectCheckInputSignature({
+      bidSignature,
+      officialName: subjectProfile.officialName,
+      aliases: subjectProfile.aliases,
+      subjectSealCheck: Boolean(runOptions.subjectSealCheck),
+    })
+    : '';
+  if (runOptions.subjectCheck && (!subjectProfile?.officialName || !subjectInputSignature)) {
+    throw new Error('请先确认投标主体后再开始主体一致性检查');
+  }
+  if (runOptions.subjectCheck) {
+    initialPartial.subjectCheckResult = {
+      ...createRunningResult(subjectInputSignature, '正在检查投标主体一致性。'),
+      findings: [],
+      activeFindingId: undefined,
+      stats: { visionStatus: runOptions.subjectSealCheck ? 'pending' : 'disabled', visionStats: undefined },
+    };
+  }
+
   updateCheckWorkspace(updateTask, checkpointTask, { status: 'running', progress: 5, logs }, initialPartial, true);
 
   function updateOverall(label, partial, persist = false) {
@@ -1658,9 +1687,11 @@ async function runRejectionCheckTask({ aiService, workspaceStore, updateTask, ch
       input_signature: inputSignature,
     });
     try {
-      const findings = await runner((message) => {
+      const runnerResult = await runner((message) => {
         updateOverall(`${label}：${message}`, { [resultKey]: createRunningResult(inputSignature, message) });
       });
+      const findings = Array.isArray(runnerResult) ? runnerResult : (runnerResult?.findings || []);
+      const stats = Array.isArray(runnerResult) ? undefined : runnerResult?.stats;
       completed += 1;
       developerLogger.write('rejection.check.stage.completed', {
         kind,
@@ -1675,6 +1706,7 @@ async function runRejectionCheckTask({ aiService, workspaceStore, updateTask, ch
           inputSignature,
           activeFindingId: findings[0]?.id,
           progressMessage: findings.length ? `${label}发现 ${findings.length} 项` : `${label}未发现问题`,
+          ...(stats ? { stats } : {}),
           updatedAt: now(),
         },
       }, true);
@@ -1704,6 +1736,51 @@ async function runRejectionCheckTask({ aiService, workspaceStore, updateTask, ch
   }
   if (runOptions.logicCheck) {
     tasks.push(runOne('logic', '逻辑谬误检查', (onProgress) => runLogicCheck(aiService, { bidDocuments: currentBidDocuments }, onProgress), 'logicCheckResult', bidSignature));
+  }
+  if (runOptions.subjectCheck) {
+    tasks.push(runOne('subject', '主体一致性检查', async (onProgress) => {
+      const bodyFindings = await runSubjectBodyCheck(aiService, {
+        bidDocuments: currentBidDocuments,
+        officialName: subjectProfile.officialName,
+        aliases: subjectProfile.aliases,
+      }, onProgress);
+
+      // 视觉检查是可选增强：失败不影响正文结果（spec §9.1）。
+      let sealResult = { findings: [], visionStatus: runOptions.subjectSealCheck ? 'error' : 'disabled', visionStats: undefined };
+      if (runOptions.subjectSealCheck) {
+        onProgress('正在检查投标文件图片印章。');
+        try {
+          sealResult = await runSubjectSealCheck(aiService, {
+            bidDocuments: currentBidDocuments,
+            visualAssets: subjectVisualAssets,
+            officialName: subjectProfile.officialName,
+            aliases: subjectProfile.aliases,
+            subjectSealCheck: true,
+            mediaRootDir: workspaceStore.getSubjectMediaRootDir(),
+          }, onProgress);
+        } catch (error) {
+          sealResult = { findings: [], visionStatus: 'error', visionStats: undefined, error: error.message };
+        }
+      }
+
+      const findings = [...bodyFindings, ...sealResult.findings];
+      // 排序规则（spec §12.3）：明确不一致优先，再按投标文件和原文位置。
+      findings.sort((a, b) => {
+        if (a.level !== b.level) return a.level === 'confirmed-mismatch' ? -1 : 1;
+        if (a.bidDocumentId !== b.bidDocumentId) return String(a.bidDocumentId).localeCompare(String(b.bidDocumentId));
+        return String(a.locationHint || '').localeCompare(String(b.locationHint || ''));
+      });
+      return {
+        findings,
+        stats: {
+          visionStatus: sealResult.visionStatus,
+          visionStats: sealResult.visionStats,
+          visionMessage: sealResult.error || undefined,
+          confirmedMismatchCount: findings.filter((item) => item.level === 'confirmed-mismatch').length,
+          needsReviewCount: findings.filter((item) => item.level === 'needs-review').length,
+        },
+      };
+    }, 'subjectCheckResult', subjectInputSignature));
   }
 
   const results = await Promise.all(tasks);

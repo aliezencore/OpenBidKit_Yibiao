@@ -13,6 +13,7 @@ const {
 const { GLOBAL_FACTS_AGENT_TASK_KEY } = require('./globalFactsAgentV2Config.cjs');
 const { FEASIBILITY_OUTLINE_AGENT_TASK_KEY } = require('./feasibilityOutlineAgentConfig.cjs');
 const { runRejectionCheckTask, runRejectionItemsExtractionTask } = require('./rejectionCheckTask.cjs');
+const { runBidSubjectIdentificationTask } = require('./subjectCheckTask.cjs');
 const { originalPlanDownstreamTaskTypes } = require('./technicalPlanStore.cjs');
 const {
   clearContent,
@@ -88,6 +89,15 @@ const taskDefinitions = {
     lockPolicy: 'group-exclusive',
     stateKey: 'technicalPlan',
     field: 'contentGenerationTask',
+  },
+  'bid-subject-identification': {
+    label: '投标主体识别',
+    group: 'rejection-check',
+    groupLabel: '废标项检查',
+    step: 2,
+    lockPolicy: 'group-exclusive',
+    stateKey: 'rejectionCheck',
+    field: 'subjectIdentificationTask',
   },
   'rejection-items-extraction': {
     label: '无效与废标项解析',
@@ -1260,6 +1270,7 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
       partial.rejectionCheckResult = markResult(state.rejectionCheckResult);
       partial.typoCheckResult = markResult(state.typoCheckResult);
       partial.logicCheckResult = markResult(state.logicCheckResult);
+      partial.subjectCheckResult = markResult(state.subjectCheckResult);
       partial.checkTask = {
         ...state.checkTask,
         status: 'error',
@@ -1267,6 +1278,24 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
         error: staleCheckMessage,
         logs: [staleCheckMessage],
         updated_at: now(),
+      };
+    }
+
+    const staleSubjectMessage = '上次投标主体识别未完成，请重新识别';
+    if (!activeTasks.has('bid-subject-identification') && state.subjectIdentificationTask?.status === 'running') {
+      partial.subjectIdentificationTask = {
+        ...state.subjectIdentificationTask,
+        status: 'error',
+        progress: 100,
+        error: staleSubjectMessage,
+        logs: [staleSubjectMessage],
+        updated_at: now(),
+      };
+      partial.subjectProfile = {
+        ...(state.subjectProfile || {}),
+        status: 'error',
+        error: staleSubjectMessage,
+        updatedAt: now(),
       };
     }
 
@@ -1507,6 +1536,24 @@ function createTaskService({ aiService, agentService, autoConfirmationService, t
     },
     startRejectionItemsExtraction(payload) {
       return startManagedTask('rejection-items-extraction', payload, runRejectionItemsExtractionTask, payload?.workspaceState || {});
+    },
+    startBidSubjectIdentification(payload) {
+      // runner 读取 payload.workspaceState.bidSignature，因此注入必须写进 payload 本身，
+      // 同时作为 startManagedTask 第 4 参（initialPartial）保持与现有调用形态一致。
+      const workspaceState = {
+        ...(payload?.workspaceState || {}),
+        bidSignature: rejectionCheckStore.getCurrentBidSignature(),
+      };
+      return startManagedTask('bid-subject-identification', { ...payload, workspaceState }, runBidSubjectIdentificationTask, workspaceState);
+    },
+    confirmBidSubject(payload) {
+      return rejectionCheckStore.confirmSubject({
+        officialName: payload?.officialName,
+        aliases: payload?.aliases,
+      });
+    },
+    deleteSubjectFinding(findingId) {
+      return rejectionCheckStore.deleteSubjectFinding(findingId);
     },
     startRejectionCheck(payload) {
       return startManagedTask('rejection-check-run', payload, runRejectionCheckTask, payload?.workspaceState || {});
