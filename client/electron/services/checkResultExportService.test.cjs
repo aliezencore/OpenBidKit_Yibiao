@@ -156,17 +156,23 @@ function createDuplicateState() {
   };
 }
 
-test('废标检查工作簿固定生成四张工作表并完整映射三类结果', () => {
+test('废标检查工作簿固定生成五张工作表并完整映射四类结果', () => {
   const workbook = roundTripWorkbook(__test__.buildRejectionWorkbook(
     createRejectionState(),
     { rejectionInputSignature: 'rejection-current', bidSignature: 'bid-current' },
     { exportedAt: new Date('2026-09-01T08:09:10.000Z') },
   ));
-  assert.deepEqual(workbook.SheetNames, ['检查概览', '废标项', '错别字', '逻辑问题']);
+  assert.deepEqual(workbook.SheetNames, ['检查概览', '废标项', '错别字', '逻辑问题', '投标主体']);
 
   const overview = sheetRows(workbook, '检查概览');
   assert.deepEqual(overview[2], ['检查类型', '状态', '问题数量', '更新时间', '检查对象', '说明']);
   assert.deepEqual(overview[3].slice(0, 5), ['废标项检查', '已完成', 1, '2026-08-31T01:02:03.000Z', '甲公司投标文件.docx；乙公司投标文件.docx']);
+  assert.equal(overview[6][0], '主体一致性检查');
+  assert.equal(overview.flat().includes('印章检查状态'), true);
+
+  const subject = sheetRows(workbook, '投标主体');
+  assert.deepEqual(subject[0], ['序号', '投标文件序号', '投标文件名', '来源', '正确主体', '检测主体', '级别', '位置类型', '位置', '原文或印章文字', '角色依据', '不一致原因', '置信度', '建议']);
+  assert.equal(subject.length, 1);
 
   const rejection = sheetRows(workbook, '废标项');
   assert.deepEqual(rejection[1], [1, 2, '乙公司投标文件.docx', '无效标', '高风险', '签字缺失', '法定代表人未签字', '必须签字', '签字栏为空', '可能被认定为无效标', '补充签字']);

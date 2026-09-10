@@ -6,8 +6,26 @@ const EXCEL_TEXT_LIMIT = 32767;
 const EXCEL_TEXT_PREFIX_LIMIT = 32750;
 const EXCEL_TEXT_TRUNCATION_SUFFIX = '……（内容过长，已截断）';
 
-const rejectionSheetNames = ['检查概览', '废标项', '错别字', '逻辑问题'];
+const rejectionSheetNames = ['检查概览', '废标项', '错别字', '逻辑问题', '投标主体'];
 const duplicateSheetNames = ['查重概览', '元数据', '目录重复', '文件相似度', '重复句子', '重复图片'];
+
+const subjectVisionStatusLabels = {
+  disabled: '未启用印章检查',
+  pending: '等待印章检查',
+  running: '正在检查印章',
+  success: '印章检查已完成',
+  partial: '印章检查部分完成',
+  unavailable: '当前文本模型未开启多模态支持，未执行印章检查',
+  error: '印章检查失败',
+};
+
+const subjectLocationKindLabels = {
+  body: '正文',
+  table: '表格',
+  signature: '签署/落款',
+  'standalone-image': '独立图片',
+  'scanned-page': '整页扫描件',
+};
 
 function normalizeCellText(value) {
   if (value === null || value === undefined) return '';
@@ -82,8 +100,17 @@ function selectCurrentRejectionResults(state, request) {
     ),
     typoCheckResult: getRejectionResultDescriptor(workspace.typoCheckResult, request?.bidSignature),
     logicCheckResult: getRejectionResultDescriptor(workspace.logicCheckResult, request?.bidSignature),
+    subjectCheckResult: getRejectionResultDescriptor(
+      workspace.subjectCheckResult,
+      request?.subjectInputSignature,
+    ),
   };
-  const results = [selected.rejectionCheckResult, selected.typoCheckResult, selected.logicCheckResult];
+  const results = [
+    selected.rejectionCheckResult,
+    selected.typoCheckResult,
+    selected.logicCheckResult,
+    selected.subjectCheckResult,
+  ];
   selected.exportable = results.some((result) => result.valid
     && (result.status === 'success' || result.findings.length > 0));
   return selected;
@@ -179,7 +206,9 @@ function buildRejectionWorkbook(state, request, options = {}) {
     ['废标项检查', selected.rejectionCheckResult],
     ['错别字检查', selected.typoCheckResult],
     ['逻辑问题检查', selected.logicCheckResult],
+    ['主体一致性检查', selected.subjectCheckResult],
   ];
+  const subjectVisionStats = selected.subjectCheckResult.stats?.visionStats;
   const overviewRows = [
     ['导出时间', formatDisplayTime(exportedAt)],
     [],
@@ -192,6 +221,15 @@ function buildRejectionWorkbook(state, request, options = {}) {
       bidNames,
       getResultMessage(result, result.findings.length, '检查已完成，未发现问题'),
     ]),
+    [],
+    ['主体检查统计项', '数值'],
+    ['当前确认主体', request?.subjectOfficialName || ''],
+    ['允许简称', Array.isArray(request?.subjectAliases) ? request.subjectAliases.join('、') : ''],
+    ['主体结果数量', selected.subjectCheckResult.valid ? selected.subjectCheckResult.findings.length : 0],
+    ['印章检查状态', subjectVisionStatusLabels[selected.subjectCheckResult.stats?.visionStatus] || '未执行'],
+    ['视觉覆盖', subjectVisionStats
+      ? `已检查 ${subjectVisionStats.inspectedAssets}/${subjectVisionStats.totalAssets}，印章 ${subjectVisionStats.sealAssets}，跳过 ${subjectVisionStats.skippedAssets}，失败 ${subjectVisionStats.failedAssets}`
+      : ''],
   ];
   appendWorksheet(workbook, rejectionSheetNames[0], overviewRows, [16, 14, 12, 22, 32, 42]);
 
@@ -240,6 +278,26 @@ function buildRejectionWorkbook(state, request, options = {}) {
     ]),
   ];
   appendWorksheet(workbook, rejectionSheetNames[3], logicRows, [8, 14, 28, 24, 28, 48, 42, 42], 0);
+
+  const subjectRows = [
+    ['序号', '投标文件序号', '投标文件名', '来源', '正确主体', '检测主体', '级别', '位置类型', '位置', '原文或印章文字', '角色依据', '不一致原因', '置信度', '建议'],
+    ...selected.subjectCheckResult.findings.map((finding, index) => [
+      index + 1,
+      ...getDocumentColumns(documentLookup, finding.bidDocumentId),
+      finding.source === 'seal' ? '印章' : '正文',
+      finding.expectedSubject,
+      finding.detectedSubject,
+      finding.level === 'confirmed-mismatch' ? '明确不一致' : '需人工复核',
+      subjectLocationKindLabels[finding.locationKind] || finding.locationKind,
+      finding.locationHint,
+      finding.originalText,
+      finding.roleReason,
+      finding.mismatchReason,
+      Number(finding.confidence || 0),
+      finding.suggestion,
+    ]),
+  ];
+  appendWorksheet(workbook, rejectionSheetNames[4], subjectRows, [8, 14, 28, 10, 32, 32, 14, 14, 28, 48, 42, 42, 12, 42], 0);
   return workbook;
 }
 
