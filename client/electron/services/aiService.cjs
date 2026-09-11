@@ -25,10 +25,14 @@ const {
 } = require('../utils/aiLog.cjs');
 const textTokenStatsStore = require('./textTokenStatsStore.cjs');
 const { normalizeTokenUsage } = textTokenStatsStore;
+const { resolveImagePlan } = require('../utils/imageFormat.cjs');
+const { getSharedTranscoder } = require('./offscreenImageTranscoder.cjs');
 
 const AI_REQUEST_TIMEOUT_MS = 600000;
 const MULTIMODAL_IMAGE_MAX_EDGE = 2048;
 const MULTIMODAL_IMAGE_JPEG_QUALITY = 85;
+// 透传不做缩放，用体积上限兜底，避免超大文件撑爆请求体。
+const MULTIMODAL_PASSTHROUGH_MAX_BYTES = 2 * 1024 * 1024;
 
 // 金龙中转站废弃模型映射：使用这些模型时自动切换到替代模型
 const JINLONG_DEPRECATED_MODEL_MAP = {
@@ -156,15 +160,50 @@ function normalizeTextRequestMode(config) {
   return config?.request_mode === 'normal' ? 'normal' : 'stream';
 }
 
-// 读取本地图片，按原比例缩小最长边并编码为 JPEG Base64 Data URL。
+function wrapLocalImageError(filePath, reason, code, cause) {
+  const error = new Error(`图片读取或压缩失败（${path.basename(filePath)}）：${reason}`);
+  error.code = code;
+  error.filePath = filePath;
+  if (cause) error.cause = cause;
+  return error;
+}
+
 async function compressLocalImageToDataUrl(filePath) {
   const normalizedPath = String(filePath || '').trim();
   if (!normalizedPath) {
     throw new Error('本地图片路径不能为空');
   }
 
+  let sourceBuffer;
   try {
-    const sourceBuffer = await fs.promises.readFile(normalizedPath);
+    sourceBuffer = await fs.promises.readFile(normalizedPath);
+  } catch (error) {
+    throw wrapLocalImageError(normalizedPath, '图片文件不可读', 'IMAGE_READ_FAILED', error);
+  }
+
+  const plan = resolveImagePlan(sourceBuffer, { maxPassthroughBytes: MULTIMODAL_PASSTHROUGH_MAX_BYTES });
+
+  // GIF：解码器不支持，但模型能识别，原字节直接透传。
+  if (plan.action === 'passthrough') {
+    return `data:${plan.mime};base64,${sourceBuffer.toString('base64')}`;
+  }
+
+  // BMP/WebP：nativeImage 解不了、Chromium 能解，交给离屏窗口转成 JPEG。
+  if (plan.action === 'transcode') {
+    return getSharedTranscoder().convertToJpegDataUrl(normalizedPath, {
+      maxEdge: MULTIMODAL_IMAGE_MAX_EDGE,
+      quality: MULTIMODAL_IMAGE_JPEG_QUALITY / 100,
+      mime: plan.mime,
+    });
+  }
+
+  // TIFF/EMF/WMF/未知格式，以及超限的 GIF。
+  if (plan.action === 'skip') {
+    throw wrapLocalImageError(normalizedPath, plan.reason, plan.code);
+  }
+
+  // PNG/JPEG：维持既有行为（解码 → 必要时缩放 → JPEG）。
+  try {
     const sourceImage = nativeImage.createFromBuffer(sourceBuffer);
     if (sourceImage.isEmpty()) {
       throw new Error('图片格式不受支持或文件已损坏');
@@ -184,8 +223,42 @@ async function compressLocalImageToDataUrl(filePath) {
 
     return `data:image/jpeg;base64,${compressedBuffer.toString('base64')}`;
   } catch (error) {
-    throw new Error(`图片读取或压缩失败（${path.basename(normalizedPath)}）：${error.message}`);
+    throw wrapLocalImageError(normalizedPath, error.message, 'IMAGE_DECODE_FAILED', error);
   }
+}
+
+// 供印章检查预检：判断这张图是否可能被送给模型（不做实际转码/上传）。
+async function inspectLocalImageFile(filePath) {
+  const normalizedPath = String(filePath || '').trim();
+  if (!normalizedPath) {
+    return { readable: false, format: 'unknown', label: '未知格式', reason: '图片文件不可读' };
+  }
+
+  let sourceBuffer;
+  try {
+    sourceBuffer = await fs.promises.readFile(normalizedPath);
+  } catch {
+    return { readable: false, format: 'unknown', label: '未知格式', reason: '图片文件不可读' };
+  }
+
+  const plan = resolveImagePlan(sourceBuffer, { maxPassthroughBytes: MULTIMODAL_PASSTHROUGH_MAX_BYTES });
+  if (plan.action === 'skip') {
+    return { readable: false, format: plan.format, label: plan.label, reason: plan.reason };
+  }
+  if (plan.action === 'passthrough' || plan.action === 'transcode') {
+    // 不预演转码：失败已被逐张隔离兜住，预演会让成本翻倍。
+    return { readable: true, format: plan.format, label: plan.label };
+  }
+
+  try {
+    const image = nativeImage.createFromBuffer(sourceBuffer);
+    if (image.isEmpty()) {
+      return { readable: false, format: plan.format, label: plan.label, reason: '图片无法解析' };
+    }
+  } catch {
+    return { readable: false, format: plan.format, label: plan.label, reason: '图片无法解析' };
+  }
+  return { readable: true, format: plan.format, label: plan.label };
 }
 
 // 未启用多模态时阻止包含图片的文本模型请求。
@@ -2496,6 +2569,15 @@ function createAiService({ app, configStore }) {
       return configStore.load();
     },
 
+    inspectLocalImage(filePath) {
+      return inspectLocalImageFile(filePath);
+    },
+
+    __test__: {
+      compressLocalImageToDataUrl,
+      inspectLocalImage: inspectLocalImageFile,
+    },
+
     async chat(request) {
       return enqueueTextRequest(request, () => {
         const config = configStore.load();
@@ -2739,4 +2821,8 @@ function createAiService({ app, configStore }) {
 
 module.exports = {
   createAiService,
+  __test__: {
+    compressLocalImageToDataUrl,
+    inspectLocalImage: inspectLocalImageFile,
+  },
 };
