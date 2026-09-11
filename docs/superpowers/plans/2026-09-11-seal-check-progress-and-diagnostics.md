@@ -1396,9 +1396,8 @@ function createFakeAiServiceWithPrecheck({ multimodalEnabled = true, responses =
 }
 ```
 
-（需在文件顶部补 `const path = require('node:path');` 与
-`const { logAiFailure } = require('../utils/aiLog.cjs');` 之外的引入——`logAiFailure` 不需要引入，
-provider 内部直接调用）
+（需在测试文件顶部补一行 `const path = require('node:path');`。
+`logAiFailure` 由 provider 内部调用，**测试文件不需要引入它**。）
 
 ```js
 test('不可读的格式被跳过且不进批次', async () => {
