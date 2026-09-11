@@ -19,6 +19,7 @@ const {
   createAiRequestId: createRequestId,
   getAiErrorLogError,
   getAiErrorLogResponse,
+  logAiFailure,
   resolveAiLogTitle,
   writeAiLog,
 } = require('../utils/aiLog.cjs');
@@ -225,6 +226,38 @@ async function prepareMultimodalMessages(config, messages) {
     preparedMessages.push({ ...message, content });
   }
   return preparedMessages;
+}
+
+// 图片准备失败发生在 writeAiLog 之前，若不单独记录就完全静默。
+function logPrepareFailure(app, config, { request, logTitle, error }) {
+  const errorDetail = {
+    code: error?.code || '',
+    message: error?.message || String(error || ''),
+    file_path: error?.filePath || '',
+    image_format: error?.imageFormat || '',
+  };
+  try {
+    writeAiLog(app, config, {
+      request_id: createRequestId(),
+      log_title: logTitle,
+      type: 'request-prepare-error',
+      url: `${trimBaseUrl(config.base_url)}/chat/completions`,
+      status: 'error',
+      error: errorDetail.message,
+      error_code: errorDetail.code,
+      error_detail: errorDetail,
+      created_at: new Date().toISOString(),
+    });
+  } catch {
+    // 诊断日志不能影响主流程。
+  }
+  logAiFailure('ai.prepare', {
+    log_title: logTitle,
+    code: errorDetail.code,
+    file: errorDetail.file_path ? path.basename(errorDetail.file_path) : '',
+    image_format: errorDetail.image_format,
+    message: errorDetail.message,
+  });
 }
 
 function normalizeImageRequestMode(imageConfig) {
@@ -723,6 +756,18 @@ function formatJsonIssues(error) {
   return [error?.message || String(error || '字段校验失败')];
 }
 
+// 用户可见的 message 保持不变，但把底层原因挂上去，供日志与诊断使用。
+function attachFailureDetail(failureMessage, cause) {
+  const wrapped = new Error(failureMessage);
+  wrapped.code = 'AI_JSON_INVALID';
+  wrapped.detail = {
+    cause: cause?.message || String(cause || ''),
+    issues: formatJsonIssues(cause),
+  };
+  wrapped.cause = cause;
+  return wrapped;
+}
+
 function buildJsonRepairMessages(invalidContent, issues, targetDescription) {
   const issueLines = (issues || []).map((item, index) => `${index + 1}. ${item}`).join('\n');
   return [
@@ -803,14 +848,13 @@ async function parseOrRepairJsonResponseWithConfig(app, config, request, content
         request.signal,
       );
       return normalizeJsonPayload(request, parseJsonContent(repairedContent));
-    } catch {
-      throw new Error(failureMessage);
+    } catch (repairError) {
+      throw attachFailureDetail(failureMessage, repairError);
     }
   }
 }
 
 async function collectJsonResponseWithConfig(app, config, request) {
-  const preparedMessages = await prepareMultimodalMessages(config, request.messages);
   const maxRetries = request.max_retries ?? 2;
   const totalAttempts = maxRetries + 1;
   const responseFormat = request.response_format || { type: 'json_object' };
@@ -818,6 +862,14 @@ async function collectJsonResponseWithConfig(app, config, request) {
   const failureMessage = request.failureMessage || '模型返回的 JSON 数据格式无效';
   const logTitle = resolveAiLogTitle(request, progressLabel);
   let lastError = null;
+
+  let preparedMessages;
+  try {
+    preparedMessages = await prepareMultimodalMessages(config, request.messages);
+  } catch (error) {
+    logPrepareFailure(app, config, { request, logTitle, error });
+    throw error;
+  }
 
   for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
     const content = await chatWithConfig(app, config, {
@@ -856,7 +908,7 @@ async function collectJsonResponseWithConfig(app, config, request) {
 
         if (attempt === maxRetries) {
           await emitProgress(request.progressCallback, `${progressLabel}连续 ${totalAttempts} 次校验失败。`);
-          throw new Error(failureMessage);
+          throw attachFailureDetail(failureMessage, lastError);
         }
 
         await emitProgress(request.progressCallback, `${progressLabel}第 ${attempt + 1}/${totalAttempts} 次校验失败，正在重试。`);
@@ -864,7 +916,7 @@ async function collectJsonResponseWithConfig(app, config, request) {
     }
   }
 
-  throw new Error(lastError?.message || failureMessage);
+  throw attachFailureDetail(failureMessage, lastError);
 }
 
 function createChatRequestBody(config, request, options = {}) {
@@ -1359,10 +1411,16 @@ async function chatWithConfig(app, config, request) {
 
   requireBaseUrl(config.base_url, '请先在设置中配置文本模型 Base URL');
 
-  const preparedRequest = {
-    ...request,
-    messages: await prepareMultimodalMessages(config, request.messages),
-  };
+  let preparedRequest = null;
+  try {
+    preparedRequest = {
+      ...request,
+      messages: await prepareMultimodalMessages(config, request.messages),
+    };
+  } catch (error) {
+    logPrepareFailure(app, config, { request, logTitle: resolveAiLogTitle(request, '文本请求'), error });
+    throw error;
+  }
   const requestId = createRequestId();
   const logTitle = resolveAiLogTitle(request, '文本请求');
   const requestMode = normalizeTextRequestMode(config);

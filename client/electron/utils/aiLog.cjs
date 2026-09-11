@@ -2,6 +2,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { getAiLogsDir } = require('./paths.cjs');
 const { enqueueJsonReplace } = require('./silentFileLog.cjs');
+const { logError } = require('./logger.cjs');
 
 const MAX_AI_LOG_TITLE_LENGTH = 64;
 
@@ -93,11 +94,50 @@ function getAiErrorLogError(error, fallbackMessage) {
   return rawResponse === undefined || rawResponse === '' ? fallbackMessage : rawResponse;
 }
 
+const MAX_AI_FAILURE_VALUE_LENGTH = 500;
+
+// 值可能是对象、含空格、超长甚至循环引用——统一归一化成单行片段。
+function formatAiFailureValue(value) {
+  let text;
+  if (typeof value === 'string') {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+  const normalized = String(text === undefined || text === null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  return normalized.length > MAX_AI_FAILURE_VALUE_LENGTH
+    ? `${normalized.slice(0, MAX_AI_FAILURE_VALUE_LENGTH)}…`
+    : normalized;
+}
+
+// 始终打印的失败诊断：不受 developer_mode 控制，单行 key=value，绝不抛错。
+function logAiFailure(scope, payload = {}) {
+  try {
+    const parts = [];
+    const scopeValue = formatAiFailureValue(scope);
+    if (scopeValue) parts.push(`scope=${scopeValue}`);
+    for (const [key, value] of Object.entries(payload || {})) {
+      const formatted = formatAiFailureValue(value);
+      if (!formatted) continue;
+      parts.push(`${key}=${/\s/.test(formatted) ? `"${formatted}"` : formatted}`);
+    }
+    logError(`ai-failure ${parts.join(' ')}`);
+  } catch {
+    // 诊断日志不能影响主流程。
+  }
+}
+
 module.exports = {
   buildAiLogFileName,
   createAiRequestId,
   getAiErrorLogError,
   getAiErrorLogResponse,
+  logAiFailure,
   resolveAiLogTitle,
   sanitizeAiLogTitle,
   writeAiLog,
