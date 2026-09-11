@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { logAiFailure } = require('../utils/aiLog.cjs');
 
 const STANDALONE_BATCH_SIZE = 4;
 const ROLE_BATCH_SIZE = 8;
@@ -53,6 +54,24 @@ ${JSON.stringify(positionText, null, 2)}
 JSON 格式：{"positions":[{"page_role":"bidder","seal_role":"bidder","detected_subject":"","name_confidence":0.9,"role_confidence":0.9,"reason":"判断原因"}]}`;
 }
 
+// 把模型返回的单条角色判断归一化（原实现内联在循环里，抽出来便于逐张重试复用）。
+function normalizeRoleItem(item) {
+  const source = item || {};
+  const pageRole = source.page_role !== undefined ? source.page_role : source.pageRole;
+  const sealRole = source.seal_role !== undefined ? source.seal_role : source.sealRole;
+  const detectedSubject = source.detected_subject !== undefined ? source.detected_subject : source.detectedSubject;
+  const nameConfidence = source.name_confidence !== undefined ? source.name_confidence : source.nameConfidence;
+  const roleConfidence = source.role_confidence !== undefined ? source.role_confidence : source.roleConfidence;
+  return {
+    pageRole: ['bidder', 'third-party', 'unclear'].includes(pageRole) ? pageRole : 'unclear',
+    sealRole: ['bidder', 'third-party', 'unclear'].includes(sealRole) ? sealRole : 'unclear',
+    detectedSubject: String(detectedSubject || ''),
+    nameConfidence: Math.max(0, Math.min(1, Number(nameConfidence || 0))),
+    roleConfidence: Math.max(0, Math.min(1, Number(roleConfidence || 0))),
+    reason: String(source.reason || ''),
+  };
+}
+
 function createOnlineVlmProvider({ aiService }) {
   async function runJson(request, label, failureMessage) {
     if (aiService.collectJsonResponse) {
@@ -65,7 +84,10 @@ function createOnlineVlmProvider({ aiService }) {
     return aiService.requestJson(request);
   }
 
-  async function inspect(request) {
+  async function inspect(request, hooks = {}) {
+    const emitProgress = typeof hooks.onProgress === 'function' ? hooks.onProgress : () => {};
+    const emitLog = typeof hooks.onLog === 'function' ? hooks.onLog : () => {};
+
     const config = typeof aiService.getConfig === 'function' ? aiService.getConfig() : {};
     if (!config?.multimodal_enabled) {
       return {
@@ -76,58 +98,145 @@ function createOnlineVlmProvider({ aiService }) {
     }
 
     const assets = Array.isArray(request?.assets) ? request.assets : [];
-    const byAssetId = new Map(assets.map((asset) => [asset.assetId, { asset, content: null, error: undefined }]));
+    const byAssetId = new Map(assets.map((asset) => [asset.assetId, { asset, content: null, error: undefined, skipReason: undefined }]));
 
-    // 阶段一：内容识别，按 contentHash 缓存（spec §9.3：同一图片内容只上传识别一次）。
-    const contentCache = new Map();
-    const uncached = [];
-    const seenHashes = new Set();
+    // 同一内容在文档里的出现次数：进度按去重张数，印章数按出现次数累计。
+    const occurrenceCount = new Map();
     for (const entry of byAssetId.values()) {
-      if (entry.error || contentCache.has(entry.asset.contentHash) || seenHashes.has(entry.asset.contentHash)) continue;
-      seenHashes.add(entry.asset.contentHash);
-      uncached.push(entry);
+      const hash = entry.asset.contentHash;
+      occurrenceCount.set(hash, (occurrenceCount.get(hash) || 0) + 1);
     }
+
+    // 预检：两种解码器都解不了的格式直接跳过，且不连坐同批其它图片。
+    const precheck = typeof aiService.inspectLocalImage === 'function'
+      ? aiService.inspectLocalImage.bind(aiService)
+      : null;
+    const pendingEntries = [];
+    const seenHashes = new Set();
+    let skippedCount = 0;
+    for (const entry of byAssetId.values()) {
+      const hash = entry.asset.contentHash;
+      if (seenHashes.has(hash)) continue;
+      seenHashes.add(hash);
+
+      if (precheck) {
+        let verdict = null;
+        try {
+          verdict = await precheck(entry.asset.absolutePath);
+        } catch (error) {
+          verdict = { readable: false, format: 'unknown', label: '未知格式', reason: '图片不可读' };
+          logAiFailure('subject.seal.precheck', { asset: entry.asset.assetId, message: error?.message });
+        }
+        if (verdict && verdict.readable === false) {
+          entry.skipReason = `${verdict.reason || '图片不可读'}，已跳过`;
+          entry.format = verdict.format || 'unknown';
+          entry.label = verdict.label || '未知格式';
+          skippedCount += 1;
+          emitLog({ type: 'asset.skipped', assetId: entry.asset.assetId, format: verdict.format, reason: entry.skipReason });
+          continue;
+        }
+        entry.format = verdict?.format || 'unknown';
+        entry.label = verdict?.label || '未知格式';
+      }
+      pendingEntries.push(entry);
+    }
+
+    const contentTotal = pendingEntries.length;
+    let contentProcessed = 0;
+    let sealCount = 0;
+    const emitContentProgress = () => emitProgress({
+      phase: 'content', processed: contentProcessed, total: contentTotal, sealCount, skipped: skippedCount,
+    });
+    // 先发一次，令「全部被跳过」时上层也能看见 total === 0。
+    emitContentProgress();
+
     // 分批策略（spec §9.3）：整页扫描图每批 1 张；独立小图每批最多 4 张。两类不可混批。
     const contentBatches = [
-      ...uncached.filter((entry) => entry.asset.assetKind === 'page-scan').map((entry) => [entry]),
-      ...chunkItems(uncached.filter((entry) => entry.asset.assetKind !== 'page-scan'), STANDALONE_BATCH_SIZE),
+      ...pendingEntries.filter((entry) => entry.asset.assetKind === 'page-scan').map((entry) => [entry]),
+      ...chunkItems(pendingEntries.filter((entry) => entry.asset.assetKind !== 'page-scan'), STANDALONE_BATCH_SIZE),
     ];
-    for (const batch of contentBatches) {
+
+    const contentCache = new Map();
+
+    async function submitContentBatch(entries) {
+      const payload = await runJson({
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildContentPrompt(entries) },
+            ...entries.map((entry) => ({ type: 'local_image', path: entry.asset.absolutePath })),
+          ],
+        }],
+      }, '主体印章图片识别', '印章图片识别结果格式无效');
+
+      const images = Array.isArray(payload?.images) ? payload.images : [];
+      entries.forEach((entry, index) => {
+        const image = images[index] || {};
+        const hasSeal = image.has_seal !== undefined ? image.has_seal : image.hasSeal;
+        const sealText = image.seal_text !== undefined ? image.seal_text : image.sealText;
+        const imageType = image.image_type !== undefined ? image.image_type : image.imageType;
+        entry.content = {
+          hasSeal: Boolean(hasSeal),
+          sealText: String(sealText || ''),
+          imageType: String(imageType || 'unknown'),
+        };
+        contentCache.set(entry.asset.contentHash, entry.content);
+      });
+    }
+
+    function describeFailure(error) {
+      return {
+        status: error?.status || error?.statusCode || '',
+        code: error?.code || '',
+        providerMessage: error?.message || String(error || ''),
+        errorName: error?.name || 'Error',
+      };
+    }
+
+    for (let batchIndex = 0; batchIndex < contentBatches.length; batchIndex += 1) {
+      const entries = contentBatches[batchIndex];
+      const batchLabel = `${batchIndex + 1}/${contentBatches.length}`;
+      const startedAt = Date.now();
       try {
-        const payload = await runJson({
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: buildContentPrompt(batch) },
-              ...batch.map((entry) => ({ type: 'local_image', path: entry.asset.absolutePath })),
-            ],
-          }],
-        }, '主体印章图片识别', '印章图片识别结果格式无效');
-        const images = Array.isArray(payload?.images) ? payload.images : [];
-        batch.forEach((entry, index) => {
-          const image = images[index] || {};
-          const hasSeal = image.has_seal !== undefined ? image.has_seal : image.hasSeal;
-          const sealText = image.seal_text !== undefined ? image.seal_text : image.sealText;
-          const imageType = image.image_type !== undefined ? image.image_type : image.imageType;
-          entry.content = {
-            hasSeal: Boolean(hasSeal),
-            sealText: String(sealText || ''),
-            imageType: String(imageType || 'unknown'),
-          };
-          contentCache.set(entry.asset.contentHash, entry.content);
-        });
+        await submitContentBatch(entries);
       } catch (error) {
-        // 批次失败时，同 contentHash 的所有出现位置一并标记失败。
-        const failedHashes = new Set(batch.map((entry) => entry.asset.contentHash));
-        for (const entry of byAssetId.values()) {
-          if (failedHashes.has(entry.asset.contentHash)) entry.error = error.message || '图片识别失败';
+        const failure = describeFailure(error);
+        logAiFailure('subject.seal.content', { phase: 'content', batch: batchLabel, assets: entries.length, ...failure, durationMs: Date.now() - startedAt });
+        emitLog({
+          type: 'batch.failed', phase: 'content', batch: batchLabel,
+          assetIds: entries.map((entry) => entry.asset.assetId), ...failure,
+        });
+
+        if (entries.length > 1) {
+          // 降级：逐张重试，只有仍然失败的那张记为失败。
+          const recovered = [];
+          const failedAssetIds = [];
+          for (const entry of entries) {
+            try {
+              await submitContentBatch([entry]);
+              recovered.push(entry.asset.assetId);
+            } catch (singleError) {
+              entry.error = singleError?.message || '图片识别失败';
+              failedAssetIds.push(entry.asset.assetId);
+              logAiFailure('subject.seal.content.isolated', { asset: entry.asset.assetId, ...describeFailure(singleError) });
+            }
+          }
+          emitLog({ type: 'batch.isolated', phase: 'content', batch: batchLabel, batchSize: entries.length, recovered, failedAssetIds });
+        } else {
+          entries[0].error = error?.message || '图片识别失败';
         }
       }
+
+      for (const entry of entries) {
+        contentProcessed += 1;
+        if (entry.content?.hasSeal) sealCount += occurrenceCount.get(entry.asset.contentHash) || 1;
+      }
+      emitContentProgress();
     }
 
     // 把缓存中的内容识别结果回填到被去重跳过的同 hash 出现位置，保证每个出现位置都参与角色判断。
     for (const entry of byAssetId.values()) {
-      if (!entry.content && !entry.error && contentCache.has(entry.asset.contentHash)) {
+      if (!entry.content && !entry.error && !entry.skipReason && contentCache.has(entry.asset.contentHash)) {
         entry.content = contentCache.get(entry.asset.contentHash);
       }
     }
@@ -135,52 +244,78 @@ function createOnlineVlmProvider({ aiService }) {
     // 阶段二：角色判断（纯文本请求，按 contentHash + nearbyContextHash 缓存）。
     const roleCache = new Map();
     const pendingRoles = [...byAssetId.values()].filter((entry) => entry.content && !entry.error);
-    for (const batch of chunkItems(pendingRoles, ROLE_BATCH_SIZE)) {
-      const positions = batch.map((entry) => ({ asset: entry.asset, content: entry.content }));
+    const roleTotal = pendingRoles.length;
+    let roleProcessed = 0;
+    const emitRoleProgress = () => emitProgress({ phase: 'role', processed: roleProcessed, total: roleTotal });
+    const roleBatches = chunkItems(pendingRoles, ROLE_BATCH_SIZE);
+
+    async function submitRoleBatch(entries) {
+      const positions = entries.map((entry) => ({ asset: entry.asset, content: entry.content }));
       const cacheKey = positions.map((entry) => `${entry.asset.contentHash}:${hashText(entry.asset.nearbyText)}`).join('|');
       if (roleCache.has(cacheKey)) {
         const cached = roleCache.get(cacheKey);
-        batch.forEach((entry, index) => {
-          entry.role = cached[index];
-        });
-        continue;
+        entries.forEach((entry, index) => { entry.role = cached[index]; });
+        return;
       }
+      const payload = await runJson({
+        messages: [{ role: 'user', content: buildRolePrompt({ officialName: request.officialName, aliases: request.aliases || [], positions }) }],
+      }, '主体盖章角色判断', '盖章角色判断结果格式无效');
+      const results = Array.isArray(payload?.positions) ? payload.positions : [];
+      const normalized = entries.map((_entry, index) => normalizeRoleItem(results[index]));
+      roleCache.set(cacheKey, normalized);
+      entries.forEach((entry, index) => { entry.role = normalized[index]; });
+    }
+
+    for (let batchIndex = 0; batchIndex < roleBatches.length; batchIndex += 1) {
+      const entries = roleBatches[batchIndex];
+      const batchLabel = `${batchIndex + 1}/${roleBatches.length}`;
+      const startedAt = Date.now();
       try {
-        const payload = await runJson({
-          messages: [{ role: 'user', content: buildRolePrompt({ officialName: request.officialName, aliases: request.aliases || [], positions }) }],
-        }, '主体盖章角色判断', '盖章角色判断结果格式无效');
-        const results = Array.isArray(payload?.positions) ? payload.positions : [];
-        const normalized = batch.map((_entry, index) => {
-          const item = results[index] || {};
-          const pageRole = item.page_role !== undefined ? item.page_role : item.pageRole;
-          const sealRole = item.seal_role !== undefined ? item.seal_role : item.sealRole;
-          const detectedSubject = item.detected_subject !== undefined ? item.detected_subject : item.detectedSubject;
-          const nameConfidence = item.name_confidence !== undefined ? item.name_confidence : item.nameConfidence;
-          const roleConfidence = item.role_confidence !== undefined ? item.role_confidence : item.roleConfidence;
-          return {
-            pageRole: ['bidder', 'third-party', 'unclear'].includes(pageRole) ? pageRole : 'unclear',
-            sealRole: ['bidder', 'third-party', 'unclear'].includes(sealRole) ? sealRole : 'unclear',
-            detectedSubject: String(detectedSubject || ''),
-            nameConfidence: Math.max(0, Math.min(1, Number(nameConfidence || 0))),
-            roleConfidence: Math.max(0, Math.min(1, Number(roleConfidence || 0))),
-            reason: String(item.reason || ''),
-          };
-        });
-        roleCache.set(cacheKey, normalized);
-        batch.forEach((entry, index) => {
-          entry.role = normalized[index];
-        });
+        await submitRoleBatch(entries);
       } catch (error) {
-        batch.forEach((entry) => {
-          entry.error = error.message || '角色判断失败';
+        const failure = describeFailure(error);
+        logAiFailure('subject.seal.role', { phase: 'role', batch: batchLabel, assets: entries.length, ...failure, durationMs: Date.now() - startedAt });
+        emitLog({
+          type: 'batch.failed', phase: 'role', batch: batchLabel,
+          assetIds: entries.map((entry) => entry.asset.assetId), ...failure,
         });
+        if (entries.length > 1) {
+          for (const entry of entries) {
+            try {
+              await submitRoleBatch([entry]);
+            } catch (singleError) {
+              entry.error = singleError?.message || '角色判断失败';
+            }
+          }
+        } else {
+          entries[0].error = error?.message || '角色判断失败';
+        }
       }
+      roleProcessed += entries.length;
+      emitRoleProgress();
     }
 
     // 组装结果：明确普通产品截图/拓扑图/照片跳过并记录原因（spec §9.3）。
     const resultAssets = [...byAssetId.values()].map((entry) => {
+      if (entry.skipReason) {
+        return {
+          assetId: entry.asset.assetId,
+          status: 'skipped',
+          skipReason: entry.skipReason,
+          format: entry.format || '',
+          label: entry.label || '',
+          hasSeal: false,
+        };
+      }
       if (entry.error) {
-        return { assetId: entry.asset.assetId, status: 'failed', skipReason: entry.error, hasSeal: false };
+        return {
+          assetId: entry.asset.assetId,
+          status: 'failed',
+          skipReason: entry.error,
+          format: entry.format || '',
+          label: entry.label || '',
+          hasSeal: false,
+        };
       }
       const content = contentCache.get(entry.asset.contentHash) || { hasSeal: false, sealText: '', imageType: 'unknown' };
       if (['product-screenshot', 'diagram', 'photo'].includes(content.imageType)) {

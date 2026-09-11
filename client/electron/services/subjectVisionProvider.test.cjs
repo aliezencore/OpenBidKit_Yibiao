@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const path = require('node:path');
 const { createOnlineVlmProvider } = require('./subjectVisionProvider.cjs');
 
 function createFakeAiService({ multimodalEnabled = true, responses = [] } = {}) {
@@ -162,4 +163,164 @@ test('单批失败不阻塞其他批次，providerStatus 为 partial 级错误�
   assert.strictEqual(result.assets.find((item) => item.assetId === 'a1').status, 'failed');
   assert.strictEqual(result.assets.find((item) => item.assetId === 'a2').status, 'inspected');
   assert.strictEqual(result.providerStatus, 'success');
+});
+
+function createFakeAiServiceWithPrecheck({ multimodalEnabled = true, responses = [], unreadable = [] } = {}) {
+  const base = createFakeAiService({ multimodalEnabled, responses });
+  const skipped = new Set(unreadable);
+  return {
+    ...base,
+    inspectLocalImage: async (filePath) => (skipped.has(path.basename(filePath))
+      ? { readable: false, format: 'tiff', label: 'TIFF', reason: '图片格式不支持（TIFF）' }
+      : { readable: true, format: 'png', label: 'PNG' }),
+  };
+}
+
+test('不可读的格式被跳过且不进批次', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [{ images: [{ has_seal: false, image_type: 'unknown' }] }],
+    unreadable: ['logo.tiff'],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const logs = [];
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', absolutePath: 'C:/fake/logo.tiff', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', absolutePath: 'C:/fake/seal.png', contentHash: 'hash-B' }),
+    ],
+  }, { onLog: (event) => logs.push(event) });
+
+  const skippedAsset = result.assets.find((item) => item.assetId === 'asset-1');
+  assert.strictEqual(skippedAsset.status, 'skipped');
+  assert.ok(skippedAsset.skipReason.includes('TIFF'), skippedAsset.skipReason);
+  assert.ok(logs.some((event) => event.type === 'asset.skipped' && event.assetId === 'asset-1'));
+
+  const imageParts = aiService.calls[0].messages
+    .filter((message) => Array.isArray(message.content))
+    .flatMap((message) => message.content)
+    .filter((part) => part.type === 'local_image');
+  assert.strictEqual(imageParts.length, 1, '被跳过的图片不应进入批次');
+  assert.ok(imageParts[0].path.endsWith('seal.png'));
+});
+
+test('可转码格式照常入批，不被跳过', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [{ images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] }],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', absolutePath: 'C:/fake/seal.bmp', contentHash: 'hash-A' })],
+  });
+  assert.strictEqual(result.assets[0].status, 'inspected');
+  assert.strictEqual(result.assets[0].hasSeal, true);
+});
+
+test('批次失败降级为逐张，只有坏图失败', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      new Error('整批失败'),                                          // 第 1 次：整批
+      { images: [{ has_seal: false, image_type: 'unknown' }] },         // 第 2 次：asset-1 单独成功
+      new Error('该图失败'),                                          // 第 3 次：asset-2 单独失败
+      { positions: [{ page_role: 'unclear', seal_role: 'unclear' }] },   // 第 4 次：角色判断
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A', assetKind: 'standalone' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-B', assetKind: 'standalone' }),
+    ],
+  });
+  assert.strictEqual(aiService.calls.length, 4, '应为 1 次整批 + 2 次逐张 + 1 次角色判断');
+  assert.strictEqual(result.assets.find((item) => item.assetId === 'asset-1').status, 'inspected');
+  assert.strictEqual(result.assets.find((item) => item.assetId === 'asset-2').status, 'failed');
+});
+
+test('进度按去重后张数计，重复内容只算一次', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] },
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const events = [];
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-3', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-4', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-5', contentHash: 'hash-B' }),
+    ],
+  }, { onProgress: (event) => events.push(event) });
+
+  const contentEvents = events.filter((event) => event.phase === 'content');
+  assert.strictEqual(contentEvents[0].total, 2, '分母应为去重后的 2，而不是 5');
+  assert.strictEqual(contentEvents[contentEvents.length - 1].processed, 2);
+  assert.strictEqual(contentEvents[contentEvents.length - 1].sealCount, 4, '印章数按出现次数累计');
+});
+
+test('被跳过的图片不进分母', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [{ images: [{ has_seal: false, image_type: 'unknown' }] }],
+    unreadable: ['logo.tiff'],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const events = [];
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', absolutePath: 'C:/fake/logo.tiff', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', absolutePath: 'C:/fake/seal.png', contentHash: 'hash-B' }),
+    ],
+  }, { onProgress: (event) => events.push(event) });
+
+  const contentEvents = events.filter((event) => event.phase === 'content');
+  assert.strictEqual(contentEvents[0].total, 1);
+  assert.strictEqual(result.assets.filter((item) => item.status === 'skipped').length, 1);
+});
+
+test('全部图片被跳过时 total 为 0', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [],
+    unreadable: ['logo.tiff'],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const events = [];
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', absolutePath: 'C:/fake/logo.tiff', contentHash: 'hash-A' })],
+  }, { onProgress: (event) => events.push(event) });
+
+  const contentEvents = events.filter((event) => event.phase === 'content');
+  assert.strictEqual(contentEvents[0].total, 0);
+  assert.strictEqual(contentEvents[0].skipped, 1, '事件应携带被跳过的去重张数');
+  assert.strictEqual(aiService.calls.length, 0, '不应发起任何图片请求');
+});
+
+test('role 阶段按位置计（同一内容的不同位置不去重）', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] },
+      { positions: [{ page_role: 'bidder', seal_role: 'bidder', detected_subject: '甲公司', name_confidence: 0.9, role_confidence: 0.9 }] },
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const events = [];
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A', nearbyText: '投标函落款' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-A', nearbyText: '页脚' }),
+    ],
+  }, { onProgress: (event) => events.push(event) });
+
+  const roleEvents = events.filter((event) => event.phase === 'role');
+  assert.ok(roleEvents.length > 0, '应上报 role 进度');
+  assert.strictEqual(roleEvents[roleEvents.length - 1].total, 2, '两个位置不能去重成 1');
 });
