@@ -25,6 +25,12 @@
   `cd client && ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test <file>`。
 - 需要真实 Electron 主进程的验证必须清掉常驻环境变量：
   `cd client && env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/electron.exe <script.cjs>`
+- **一次性 Electron 验证脚本的两条硬性要求**（Task 2 实测踩到）：
+  ① 脚本内只要会**创建并销毁**窗口（例如用画布临时生成一张 WebP），就必须注册
+  `app.on('window-all-closed', () => {})` 空处理器 —— 否则 Electron 默认在窗口全关时退出，
+  脚本会**静默中断**（无输出、退出码 0，看起来像"通过"）。
+  ② Windows 上 GUI 子系统的主进程 stdout 可能不通；若终端看不到脚本输出，
+  把输出同时镜像写入临时文件再读回来，并以**退出码**作为权威判据。
 - `npm run build` 若被本机 safe-delete 守卫拦截，对命令临时加 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000`，**不要改仓库配置**；既有 chunk 体积警告不算失败。
 - **既有失败测试** `electron/services/knowledgeBaseStore.search.test.cjs` 与本改动无关，**不要修**。
 - 直接在 `main` 上按任务提交，**不建分支、不推送**。提交身份固定：
@@ -595,6 +601,10 @@ async function mintWebp() {
   win.destroy();
   return Buffer.from(dataUrl.split(',')[1], 'base64');
 }
+
+// Electron 默认在「所有窗口关闭」时退出。本脚本会临时创建并销毁一个窗口来生成 WebP，
+// 若不拦截该事件，转码循环还没跑到应用就退出了（表现为无输出、退出码 0）。
+app.on('window-all-closed', () => {});
 
 app.whenReady().then(async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-transcode-'));
@@ -1251,6 +1261,10 @@ async function mintWebp() {
   win.destroy();
   return Buffer.from(dataUrl.split(',')[1], 'base64');
 }
+
+// Electron 默认在「所有窗口关闭」时退出。本脚本会临时创建并销毁一个窗口来生成 WebP，
+// 若不拦截该事件，脚本会在转码开始前就退出（表现为无输出、退出码 0）。
+app.on('window-all-closed', () => {});
 
 app.whenReady().then(async () => {
   const pngPath = path.join(userDataDir, 'seal.png');
