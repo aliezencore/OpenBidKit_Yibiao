@@ -2684,11 +2684,21 @@ Expected: 全部 PASS
 
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao/client
-node --test electron/services/*.test.cjs 2>&1 | grep "^not ok" || echo "无失败"
+ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test electron/services/*.test.cjs 2>&1 | grep "^not ok" || echo "无失败"
 ```
 
-Expected: 只可能出现 `knowledgeBaseStore.search.test.cjs` 的既有失败（**与本改动无关，不要修**）。
-若有**其它**失败，必须停下来排查。
+**必须用 Electron 以 Node 模式跑**：`electron/services/` 下存在依赖 `better-sqlite3` 的测试，
+普通 `node --test` 会因原生模块 ABI 不匹配（`ERR_DLOPEN_FAILED`）整批失败，那是环境问题不是回归。
+
+Expected: 允许失败的文件**仅限本计划未触碰过的测试文件**。判定方法（逐条失败文件执行）：
+
+```bash
+cd C:/workspace/OpenBidKit_Yibiao
+git log --oneline 16dec0c..HEAD -- client/electron/services/<失败的文件名>
+```
+
+若输出为空（本计划从未改过它）→ 属既有失败，**不要修**，在报告里注明「既有失败，与本改动无关」。
+若输出非空 → 是本改动引入的回归，**必须停下来排查**。
 
 - [ ] **Step 4: Electron native 冒烟与构建**
 
