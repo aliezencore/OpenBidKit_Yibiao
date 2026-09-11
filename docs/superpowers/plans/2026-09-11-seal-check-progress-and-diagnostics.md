@@ -1045,7 +1045,9 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 
 - Produces:
   - `aiService.inspectLocalImage(filePath) → Promise<{ readable, format, label, reason? }>`
   - `aiService.__test__.compressLocalImageToDataUrl(filePath) → Promise<string>`
-  - `aiService.__test__.inspectLocalImage(filePath) → Promise<{...}>`
+  - `aiService.__test__.inspectLocalImageFile(filePath) → Promise<{ readable, format, label, reason? }>`
+    （注意：`__test__` 的键名是 `inspectLocalImageFile`，与服务方法名 `inspectLocalImage` 不同 ——
+    `__test__` 只在**模块级**暴露一处，且键名与模块级函数名一致）
   - 常量 `MULTIMODAL_PASSTHROUGH_MAX_BYTES = 2 * 1024 * 1024`
   - 错误码：`UNSUPPORTED_IMAGE_FORMAT`、`PASSTHROUGH_TOO_LARGE`、`IMAGE_DECODE_FAILED`、`IMAGE_READ_FAILED`
 
