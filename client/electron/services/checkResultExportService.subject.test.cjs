@@ -71,3 +71,50 @@ test('签名不匹配时投标主体表只保留表头', () => {
   const rows = XLSX.utils.sheet_to_json(workbook.Sheets['投标主体'], { header: 1 });
   assert.strictEqual(rows.length, 1);
 });
+
+test('投标主体表列出未能识别的图片', () => {
+  const state = {
+    ...STATE,
+    subjectCheckResult: {
+      ...STATE.subjectCheckResult,
+      stats: {
+        ...STATE.subjectCheckResult.stats,
+        visionStats: {
+          ...STATE.subjectCheckResult.stats.visionStats,
+          unrecognized: [
+            {
+              assetId: 'asset-1', bidDocumentId: 'bid-1', ordinal: 3, sectionTitle: '第三章 投标函',
+              locationHint: '正文', mediaName: 'media/image3.tif', mimeType: 'image/tiff',
+              format: 'tiff', label: 'TIFF', kind: 'skipped', reason: '图片格式不支持（TIFF），已跳过',
+            },
+            {
+              assetId: 'asset-2', bidDocumentId: 'bid-1', ordinal: 5, sectionTitle: '',
+              locationHint: '正文', mediaName: 'media/image5.webp', mimeType: 'image/webp',
+              format: 'webp', label: 'WebP', kind: 'failed', reason: '图片转码失败',
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const workbook = __test__.buildRejectionWorkbook(state, { subjectInputSignature: 'sig-subject-1' }, { exportedAt: new Date('2026-09-10T02:00:00.000Z') });
+  assert.deepStrictEqual(workbook.SheetNames, ['检查概览', '废标项', '错别字', '逻辑问题', '投标主体']);
+
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets['投标主体'], { header: 1 });
+  const flat = rows.map((row) => row.join('|'));
+  const titleIndex = flat.findIndex((line) => line.includes('未能识别的图片'));
+  assert.ok(titleIndex >= 0, '应出现「未能识别的图片」区块');
+  assert.deepStrictEqual(rows[titleIndex + 1], ['章节/位置', '序号', '媒体文件', '格式', '原因']);
+  assert.ok(flat.some((line) => line.includes('第三章 投标函') && line.includes('第 3 张')
+    && line.includes('media/image3.tif') && line.includes('TIFF') && line.includes('格式不支持')), flat.join('\n'));
+  assert.ok(flat.some((line) => line.includes('第 5 张') && line.includes('WebP')
+    && line.includes('图片转码失败')), flat.join('\n'));
+});
+
+test('无未能识别图片时不追加区块', () => {
+  const workbook = __test__.buildRejectionWorkbook(STATE, { subjectInputSignature: 'sig-subject-1' }, { exportedAt: new Date('2026-09-10T02:00:00.000Z') });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets['投标主体'], { header: 1 });
+  assert.strictEqual(rows.flat().join('|').includes('未能识别的图片'), false);
+  assert.strictEqual(workbook.SheetNames.length, 5);
+});

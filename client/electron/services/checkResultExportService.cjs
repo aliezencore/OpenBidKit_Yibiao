@@ -80,6 +80,24 @@ function appendWorksheet(workbook, name, rows, widths, filterHeaderRow) {
   XLSX.utils.book_append_sheet(workbook, createWorksheet(rows, widths, filterHeaderRow), name);
 }
 
+// 「未能识别的图片」明细：解释「跳过 N 张 / 失败 N 张」到底卡在哪几张图上。
+function buildUnrecognizedRows(subjectCheckResult) {
+  const items = subjectCheckResult?.stats?.visionStats?.unrecognized;
+  if (!Array.isArray(items) || !items.length) return [];
+  return [
+    [],
+    ['未能识别的图片'],
+    ['章节/位置', '序号', '媒体文件', '格式', '原因'],
+    ...items.map((item) => [
+      item.sectionTitle || item.locationHint || '正文',
+      `第 ${Number(item.ordinal) || 0} 张`,
+      item.mediaName || '',
+      item.label || item.format || '',
+      item.reason || '',
+    ]),
+  ];
+}
+
 function getRejectionResultDescriptor(result, expectedSignature) {
   const source = result && typeof result === 'object' ? result : { status: 'idle', findings: [] };
   const valid = source.inputSignature === expectedSignature;
@@ -296,6 +314,7 @@ function buildRejectionWorkbook(state, request, options = {}) {
       Number(finding.confidence || 0),
       finding.suggestion,
     ]),
+    ...buildUnrecognizedRows(selected.subjectCheckResult),
   ];
   appendWorksheet(workbook, rejectionSheetNames[4], subjectRows, [8, 14, 28, 10, 32, 32, 14, 14, 28, 48, 42, 42, 12, 42], 0);
   return workbook;
