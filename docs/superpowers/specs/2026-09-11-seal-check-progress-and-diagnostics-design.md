@@ -113,11 +113,12 @@ GIF 原字节透传、BMP/WebP 经离屏 Chromium 转码、PNG/JPEG 维持现状
 | `client/electron/utils/imageFormat.cjs` | 新增 | 魔数识别 + `resolveImagePlan` + `computeTargetSize`（纯函数） |
 | `client/electron/utils/imageFormat.test.cjs` | 新增 | 纯函数单测 |
 | `client/electron/services/offscreenImageTranscoder.cjs` | 新增 | 离屏窗口图片转码（懒创建 + 复用 + 空闲销毁） |
-| `client/electron/utils/aiLog.cjs` | 修改 | 新增 `logAiFailure` |
-| `client/electron/services/aiService.cjs` | 修改 | 格式标记、`inspectLocalImage`、补准备阶段日志、保留真实错误 |
+| `client/electron/utils/aiLog.cjs` | 修改 | 新增 `logAiFailure`：始终打印的单行结构化失败日志 |
+| `client/electron/utils/aiLog.test.cjs` | 新增 | `logAiFailure` 的单测（该模块无 Electron 依赖，可用普通 `node --test`） |
+| `client/electron/services/aiService.cjs` | 修改 | 三分派（压缩/透传/转码）、`inspectLocalImage`、补准备阶段日志、保留真实错误、导出 `__test__` |
 | `client/electron/services/subjectVisionProvider.cjs` | 修改 | 预检跳过、批次降级隔离、进度回调、失败日志 |
 | `client/electron/services/subjectCheckTask.cjs` | 修改 | `runSubjectSealCheck` 接收 logger、翻译进度文案、区分「全跳过」状态、汇总未能识别图片清单 |
-| `client/electron/services/rejectionCheckTask.cjs` | 修改 | 把既有 `developerLogger` 传入印章检查；把未能识别清单写进 `stats.visionStats` |
+| `client/electron/services/rejectionCheckTask.cjs` | 修改 | 把既有 `developerLogger` 传入印章检查 |
 | `client/electron/services/docxVisualAssetExtractor.cjs` | 修改 | 修 `extractSectionTitle`（取章节）与 `extractNearbyText`（按段落取可读文本） |
 | `client/electron/services/docxVisualAssetExtractor.test.cjs` | 修改 | 新增章节与附近文本的用例 |
 | `client/electron/services/checkResultExportService.cjs` | 修改 | 「投标主体」表追加「未能识别的图片」区块 |
@@ -125,7 +126,7 @@ GIF 原字节透传、BMP/WebP 经离屏 Chromium 转码、PNG/JPEG 维持现状
 | `client/electron/services/subjectVisionProvider.test.cjs` | 修改 | 新增用例 |
 | `client/electron/services/subjectCheckTask.test.cjs` | 修改 | 新增用例 |
 
-不改动：`src/` 下全部前端文件、`checkResultExportService.cjs`、`rejectionCheckStore.cjs`、数据库 schema。
+不改动：`src/` 下全部前端文件、`rejectionCheckStore.cjs`、`localImageRenderService.cjs`、`sql/workspace_schema.sql`。
 
 ## 4. 设计
 
@@ -289,8 +290,8 @@ hooks = {
 `onProgress(event)` 只有两种形状：
 
 ```js
-{ phase: 'content', processed, total, sealCount }  // 按【去重后可读图片数】计
-{ phase: 'role',    processed, total }             // 按【盖章位置数】计
+{ phase: 'content', processed, total, sealCount, skipped }  // 按【去重后可读图片数】计
+{ phase: 'role',    processed, total }                     // 按【盖章位置数】计
 ```
 
 **(a1) 阶段一：去重口径（用户明确要求）**
@@ -303,7 +304,8 @@ hooks = {
 - `processed` 每完成一张**去重后的图片** `+1`（不再按出现次数加权）。
 - **被跳过的图片不计入分母**（它们根本不进 VLM）；已失败的仍计入 `processed`（它被尝试过）。
 - `sealCount` 同样按去重计：同一张图重复出现只算一次。
-- 触发时机：**每次 VLM 响应返回后**（成功或失败均触发）。
+- `skipped` ＝ **被跳过图片的去重张数**，供「没有可被识别的图片（N 张已跳过）」文案使用。
+- 首个事件在预检完成后立刻发出（`processed: 0`），后续**每次 VLM 响应返回后**（成功或失败均触发）推进一次。
 - 分批导致进度**按批跳跃**（小图最多 4 张一批、整页扫描 1 张一批），这是批量的必然结果。
 
 **(a2) 阶段二：按位置计（不能去重）**
@@ -311,13 +313,15 @@ hooks = {
 盖章身份判断的输入是「图片 + 它所在的上下文」，**同一张图在不同位置（投标函落款 vs 页脚）
 的盖章角色可能不同**，去重会算错。因此：
 
-- `total` ＝ 需要判断的**盖章位置数**（`roleCache` 的键数）；
-- `processed` 每完成一组 `+1`；
+- `total` ＝ 需要判断的**盖章位置数**（即 `content` 就绪、未失败的资产位置数）；
+- `processed` 每完成一个位置 `+1`；
 - 文案用「组」而不是「张」，避免与阶段一的张数混淆。
 
 **(a3) 全部图片都被跳过**
 
-`total === 0` 时不报「0/0」，改报一句 `没有可被识别的图片（N 张已跳过）。`
+provider 仍会发出首个 `{ phase: 'content', processed: 0, total: 0, skipped: N }` 事件；
+`runSubjectSealCheck` 见到 `total === 0` 时**不报「0/0」**，改报一句
+`没有可被识别的图片（N 张已跳过）。`（N 取事件里的 `skipped`）。
 
 **(b) 文案（`runSubjectSealCheck` 负责翻译）**
 
@@ -469,9 +473,16 @@ function createOffscreenImageTranscoder({ idleDisposeMs = 30000 } = {}) {
 改为向前**全篇**扫描（不再限制 4000 字符），按优先级返回最近命中的段落文本：
 
 1. `w:pStyle` 的 `w:val` 命中 `Heading[1-9]` / `heading [1-9]` / `标题[1-9一二三四五六七八九十]`；
-2. 段落文本长度 ≤ 40 且该段含 `<w:b/>`（加粗）的独立短段落；
-3. 上一个非空段落；
-4. 都没命中 → `undefined`。
+2. **段落文本命中章节编号模式**（长度 ≤ 40）：`^第[一二三四五六七八九十百千0-9]+[章节篇]`、
+   `^[一二三四五六七八九十]+、`、`^（[一二三四五六七八九十]+）`、`^\d+(\.\d+)*[\s、.]`；
+3. 段落文本长度 ≤ 40 且该段含 `<w:b/>`（加粗）的独立短段落；
+4. 都没命中 → `undefined`（Excel 侧退化为 `locationHint`）。
+
+**为什么第 2 条是必要的**：中文标书大量使用**纯文本编号**当章节（如「第一章 投标函」「三、报价说明」），
+并不使用 Word 的标题样式。仅靠样式匹配在这类文档上会全部落空。
+
+**为什么去掉「上一个非空段落」这种兜底**：它几乎总会返回一句正文，
+被当成"章节"是**误导性**的——不如老实返回 `undefined`，让 Excel 显示位置（正文/页眉/页脚）。
 
 **性能约束**：`document.xml` 先一次性切成段落数组并预计算
 `[{ text, styleVal, bold }]`，图片定位时在数组上回溯查找。
@@ -615,8 +626,11 @@ unrecognized: [{
 
 13. **章节标题取自最近的标题段落**：在 `buildMinimalDocx()` 夹具中加入
     `<w:pStyle w:val="Heading1">` 的段落与图片 → 断言 `sectionTitle` 等于该标题文本。
-14. **无标题样式时的退化链**：只有加粗短段落 → 取该段；只有普通段落 → 取上一个非空段落；
-    全无 → `undefined`。
+14. **章节识别优先级**：
+    - 段落带 `w:pStyle` 标题样式 → 取最近命中（且标题在图片前 4000 字符以上仍能取到）；
+    - 无样式但文本形如 `第一章 投标函` / `三、报价说明` → 命中规则 2；
+    - 只有加粗短段 → 命中规则 3；
+    - 全是正文长句 → `undefined`（**断言不得返回正文句子**，这是旧实现之外的防回归点）。
 15. **`nearbyText` 是可读文本，不含 XML 属性**：断言结果**不含** `w:rsid`、
     `<wp:`、`w:val` 等标记片段，且长度 ≤ 200。
 16. **图片独占段落时取前后段落**：图片所在段落无 `<w:t>` → 断言 `nearbyText` 来自相邻段落。
@@ -628,9 +642,16 @@ unrecognized: [{
     断言「投标主体」表里出现 `未能识别的图片` 区块，含章节、`第 N 张`、媒体文件名、格式与原因。
 19. **无未能识别项时不追加区块**：断言表内不出现该区块标题，且 sheet 数量仍为 5。
 
-### 6.6 回归
+### 6.6 新增 `electron/utils/aiLog.test.cjs`
 
-- `node --test electron/services/subjectVisionProvider.test.cjs electron/services/subjectCheckTask.test.cjs electron/services/subjectNameUtils.test.cjs electron/services/docxVisualAssetExtractor.test.cjs electron/services/checkResultExportService.subject.test.cjs electron/utils/imageFormat.test.cjs`
+20. `logAiFailure` 输出单行 `key=value`，带 `ai-failure` 前缀与 `scope=`，且不含换行。
+21. 空值（`''` / `undefined` / `null`）被跳过；含空格的值被引号包裹。
+22. 超长值被截断（单行长度 < 1000）。
+23. 循环引用不抛错（`JSON.stringify` 失败时退化为 `String()`）。
+
+### 6.7 回归
+
+- `node --test electron/utils/imageFormat.test.cjs electron/utils/aiLog.test.cjs electron/services/subjectVisionProvider.test.cjs electron/services/subjectCheckTask.test.cjs electron/services/subjectNameUtils.test.cjs electron/services/docxVisualAssetExtractor.test.cjs electron/services/checkResultExportService.subject.test.cjs`
 - `node --check` 全部改动的 `.cjs`
 - `cd client && npm run build`（前端未改动，此项为保险）
 - **不加单测的部分**：PNG/JPEG 解码（`nativeImage`）与 BMP/WebP 转码（离屏窗口）都依赖 Electron
