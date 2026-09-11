@@ -34,6 +34,19 @@
 
 取证位置与复现方式见附录 A。
 
+**补充证据（决定 G1 取向的关键）**：把这张 GIF **原样**（`data:image/gif;base64,…`）发给同一个模型，
+可以正常返回：
+
+```json
+{ "has_seal": true, "seal_text": "江西瑞智信息技术有限公司", "image_type": "document" }
+```
+
+即这张 GIF 上就是一枚印章，且机构名与本次正文检查已抓到的 `subject-text-1`
+（「应答人：江西瑞智信息有限公司」，判为明确不一致）**同属一家**。
+
+结论：问题只是「Electron 的 `nativeImage` 解不了 GIF」这一**解码器限制**，而不是「这张图不可用」。
+因此「格式不支持就跳过」会**静默漏掉一条本应报出的印章主体不一致** —— 正确取向是「解码失败则透传」。
+
 ### 1.3 由根因派生出的三个问题
 
 | # | 问题 | 影响 |
@@ -46,7 +59,9 @@
 
 ### 2.1 目标
 
-- G1：不支持的图片格式单独跳过并计入「跳过」，不再连坐同批次其它图片。
+- G1：**不再因解码器限制而丢掉可用的图片**。GIF 解码失败时按原始字节透传给模型；
+  真正不可用的格式（WebP/BMP/未知）与不可读文件才跳过，且跳过时记录原因。
+  同时保证单张图片的问题不再连坐同批次其它图片。
 - G2：批次失败时按图片降级重试，只有真正失败的那张记为失败。
 - G3：印章检查分两阶段上报进度，每次 VLM 响应返回后推进。
 - G4：图片准备失败与 VLM/LLM 失败的真实原因与错误码，落进**后台日志**。
@@ -54,8 +69,9 @@
 ### 2.2 非目标（明确不做）
 
 - **不改任何前端文件**。用户已明确：前端现有的错误展示保持原样，真实原因与错误码只落后台。
-  （注意：G1/G2 会让汇总行的数字自然变为「跳过 1 张、失败 0 张」，这是行为修复的结果，不是前端改动。）
 - **不接入 Pi Agent 执行监视器**。理由见 §8。
+- **不做图片转码**。不引入图像解码库，也不走渲染层 canvas 转换（为一张小图不值得）。
+  透传是「不压缩、不缩放、原字节直发」。
 - 不引入数据库迁移；不新增可持久化字段。
 - 不改 `visionMessage` 的写入逻辑。
 - 不重构 `aiService` 的通用重试/超时/队列策略。
@@ -64,7 +80,7 @@
 
 | 文件 | 类型 | 说明 |
 |---|---|---|
-| `client/electron/utils/imageFormat.cjs` | 新增 | 图片格式魔数识别（纯函数） |
+| `client/electron/utils/imageFormat.cjs` | 新增 | 魔数识别 + `resolveImagePlan` 策略（纯函数） |
 | `client/electron/utils/imageFormat.test.cjs` | 新增 | 纯函数单测 |
 | `client/electron/utils/aiLog.cjs` | 修改 | 新增 `logAiFailure` |
 | `client/electron/services/aiService.cjs` | 修改 | 格式标记、`inspectLocalImage`、补准备阶段日志、保留真实错误 |
@@ -78,44 +94,83 @@
 
 ## 4. 设计
 
-### 4.1 图片格式识别与「不支持即跳过」
+### 4.1 图片格式识别、GIF 透传与其余格式跳过
 
 **新增 `electron/utils/imageFormat.cjs`（纯函数，不依赖 Electron）**
 
 ```js
 const FORMAT_SIGNATURES = [
-  { format: 'png',  label: 'PNG',  match: (b) => b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
-  { format: 'jpeg', label: 'JPEG', match: (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
-  { format: 'gif',  label: 'GIF',  match: (b) => b.length >= 6 && b.toString('latin1', 0, 4) === 'GIF8' },
-  { format: 'webp', label: 'WebP', match: (b) => b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP' },
-  { format: 'bmp',  label: 'BMP',  match: (b) => b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d },
+  { format: 'png',  label: 'PNG',  mime: 'image/png',  match: (b) => b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
+  { format: 'jpeg', label: 'JPEG', mime: 'image/jpeg', match: (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { format: 'gif',  label: 'GIF',  mime: 'image/gif',  match: (b) => b.length >= 6 && b.toString('latin1', 0, 4) === 'GIF8' },
+  { format: 'webp', label: 'WebP', mime: 'image/webp', match: (b) => b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP' },
+  { format: 'bmp',  label: 'BMP',  mime: 'image/bmp',  match: (b) => b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d },
 ];
 
 // Electron nativeImage.createFromBuffer 只稳定支持 PNG/JPEG。
 const NATIVE_DECODABLE_FORMATS = new Set(['png', 'jpeg']);
+// 解码器不支持的格式中，可原字节透传给模型的（实测 GIF 可被模型正常识别）。
+const PASSTHROUGH_FORMATS = new Set(['gif']);
 
-function detectImageFormat(buffer) { /* → { format, label }，未识别为 { format:'unknown', label:'未知格式' } */ }
-function isNativelyDecodableFormat(format) { /* → boolean */ }
+function detectImageFormat(buffer) { /* → { format, label, mime }，未识别为 { format:'unknown', label:'未知格式', mime:'' } */ }
+
+// 单一决策入口：把「该压缩 / 该透传 / 必须跳过」的策略集中在一处。
+// 纯函数、可单测，是 imageFormat.test.cjs 的主要被测对象。
+function resolveImagePlan(buffer, { maxPassthroughBytes }) {
+  // → { action: 'compress' }                                  // PNG / JPEG
+  // → { action: 'passthrough', mime: 'image/gif' }             // GIF 且体积未超限
+  // → { action: 'skip', format, label, code, reason }          // 其余一律跳过
+}
 ```
 
-导出：`detectImageFormat`、`isNativelyDecodableFormat`、`NATIVE_DECODABLE_FORMATS`。
+导出：`detectImageFormat`、`resolveImagePlan`、`NATIVE_DECODABLE_FORMATS`、`PASSTHROUGH_FORMATS`。
+
+`resolveImagePlan` 的完整判定（**唯一真相来源**）：
+
+| 条件 | 返回 | `reason`（不含「，已跳过」后缀） |
+|---|---|---|
+| `format` 为 `png` / `jpeg` | `{ action: 'compress' }` | — |
+| `format` 为 `gif` 且 `buffer.length ≤ maxPassthroughBytes` | `{ action: 'passthrough', mime: 'image/gif' }` | — |
+| `format` 为 `gif` 且超限 | `{ action: 'skip', code: 'PASSTHROUGH_TOO_LARGE' }` | `图片体积超出透传上限` |
+| `format` 为 `webp` / `bmp` / `unknown` | `{ action: 'skip', code: 'UNSUPPORTED_IMAGE_FORMAT' }` | `图片格式不支持（WebP）` |
 
 **`aiService.cjs`**
 
-- `compressLocalImageToDataUrl`（现 `:159`）：
-  - 读文件后先 `detectImageFormat`；不在 `NATIVE_DECODABLE_FORMATS` 时抛错，并挂载
-    `error.code = 'UNSUPPORTED_IMAGE_FORMAT'`、`error.imageFormat`（如 `'gif'`）、`error.filePath`。
-  - 错误消息沿用现有格式：``图片读取或压缩失败（<文件名>）：图片格式不受支持``。
-  - **仍然抛错**（开发者多模态测试页依赖"失败要响"的语义），行为不变，只增加标记。
-- 新增公开方法 `inspectLocalImage(filePath)`，返回：
+新增常量：
 
 ```js
-{ readable: true }                                   // 可解码
-{ readable: false, format, label, reason }           // 不可用，reason 为中文短句
+// 透传不做缩放，用体积上限兜底，避免超大文件撑爆请求体。
+const MULTIMODAL_PASSTHROUGH_MAX_BYTES = 2 * 1024 * 1024;
 ```
 
-判定顺序：文件读不到 → `图片文件不可读`；格式不在白名单 → `图片格式不支持（GIF）`；
-在白名单但 `nativeImage` 解码为空 → `图片无法解析`。
+`compressLocalImageToDataUrl`（现 `:159`）按 `resolveImagePlan` 分派：
+
+1. 读文件 → `resolveImagePlan(buffer, { maxPassthroughBytes: MULTIMODAL_PASSTHROUGH_MAX_BYTES })`。
+2. `action === 'passthrough'` → 直接返回 `` `data:${plan.mime};base64,${buffer.toString('base64')}` ``，
+   **不解码、不缩放**。
+3. `action === 'compress'` → 走现有 `nativeImage` 解码 → 必要时缩放 → `toJPEG` 路径，**行为完全不变**；
+   若仍解码失败，抛 `error.code = 'IMAGE_DECODE_FAILED'`。
+4. `action === 'skip'` → 抛错并挂 `error.code = plan.code`、`error.imageFormat`、`error.filePath`，
+   消息沿用既有格式：``图片读取或压缩失败（<文件名>）：<plan.reason>``。
+
+注意：GIF 命中分支 2，**不再尝试解码**，因此不会再走到「格式不受支持」。
+`compressLocalImageToDataUrl` 对 PNG/JPEG 仍保持「失败要响」的语义（开发者多模态测试页依赖该语义），
+只新增错误码标记。
+
+新增公开方法 `inspectLocalImage(filePath)`，返回：
+
+```js
+{ readable: true }                                   // 可交给模型（含 GIF 透传）
+{ readable: false, format, label, reason }           // 不可用，reason 为中文短句（不含「，已跳过」）
+```
+
+判定：文件读不到 → `图片文件不可读`；否则按 `resolveImagePlan`：`skip` → 用其 `reason`；
+`passthrough` → `readable: true`；`compress` → 再试 `nativeImage` 解码，
+失败则 `readable: false`、`图片无法解析`。
+
+> **可测性说明**：格式策略（含 GIF 透传与体积上限）全部落在纯函数 `resolveImagePlan`，
+> 可用普通 `node --test` 覆盖。PNG/JPEG 的实际解码依赖 Electron `nativeImage`，
+> 不新增单测，由 §7 手动验收覆盖。
 
 ### 4.2 预检跳过与批次降级
 
@@ -129,8 +184,9 @@ function isNativelyDecodableFormat(format) { /* → boolean */ }
 `aiService.inspectLocalImage?.(entry.asset.absolutePath)`：
 
 - 方法不存在（测试桩、或未来别处注入）→ **跳过预检，行为退回现状**（向后兼容）。
-- 返回 `readable: false` → 记 `entry.skipReason = \`${reason}，已跳过\``，**不进入任何批次**，
-  也不写入 `contentCache`。
+- 返回 `readable: false` → 记 `entry.skipReason = \`${reason}，已跳过\``，
+  **不进入任何批次**，也不写入 `contentCache`。
+- 返回 `readable: true` 的 GIF 照常进入批次（下游由 `compressLocalImageToDataUrl` 走透传分支）。
 - 组装结果时 `entry.skipReason` 存在 → `{ assetId, status: 'skipped', skipReason, hasSeal: false }`。
 
 **(b) 批次降级（解决 P1 的「一颗老鼠屎」）**
@@ -252,8 +308,8 @@ function logAiFailure(scope, payload = {}) { /* 单行 key=value，截断，永�
 输出格式（stdout，`logger.logError`，**不受 `developer_mode` 控制**）：
 
 ```
-[yibiao-client] ai-failure scope=subject.seal.content phase=content batch=1/1 assets=3 \
-  code=UNSUPPORTED_IMAGE_FORMAT file=1e643b….gif message=图片格式不受支持
+[yibiao-client] ai-failure scope=subject.seal.content phase=content batch=1/2 index=1 \
+  code=UNSUPPORTED_IMAGE_FORMAT image_format=webp file=logo.webp message=图片格式不受支持
 ```
 ```
 [yibiao-client] ai-failure scope=subject.seal.content phase=content batch=1/1 assets=3 \
@@ -289,11 +345,15 @@ function logAiFailure(scope, payload = {}) { /* 单行 key=value，截断，永�
 | 项 | 处理 |
 |---|---|
 | `inspectLocalImage` 不存在 | 跳过预检，行为退回现状；既有测试桩无需改动即可通过 |
-| 全部图片格式均不支持 | `inspected = 0 && skipped > 0` → `visionStatus = 'partial'`（见 §4.3c） |
+| GIF（含静态与动图） | 一律透传原字节；模型侧按静态帧识别。体积 > 2MB 才跳过 |
+| GIF 透传导致请求体变大 | 仅 GIF 走此路径；本例 5KB。超 2MB 的 GIF 跳过并记原因 |
+| 服务商不支持 GIF | 仅该张失败（逐张隔离已覆盖），服务商错误码进后台日志 |
+| WebP / BMP / unknown | 跳过并记「图片格式不支持（X），已跳过」 |
+| 全部图片均被跳过 | `inspected = 0 && skipped > 0` → `visionStatus = 'partial'`（见 §4.3c） |
 | 全部图片读不到 | 维持既有 `providerStatus = 'error'` 逻辑不变 |
 | 整页扫描图（`page-scan`，批大小 1） | 降级逻辑天然退化为单张，无额外调用 |
 | 逐张重试的成本 | 仅失败路径触发，最坏为批大小次额外调用；已确认接受 |
-| `compressLocalImageToDataUrl` 仍抛错 | 开发者多模态测试页语义不变（该页显式选图，失败应当响亮） |
+| `compressLocalImageToDataUrl` 对 PNG/JPEG 仍抛错 | 开发者多模态测试页语义不变（该页显式选图，失败应当响亮） |
 | `logAiFailure` 自身异常 | 内部 try/catch 吞掉，绝不影响主流程 |
 | 前端 | **零改动**；汇总行数字变化是行为修复的自然结果 |
 
@@ -303,29 +363,36 @@ function logAiFailure(scope, payload = {}) { /* 单行 key=value，截断，永�
 
 ### 6.1 新增 `electron/utils/imageFormat.test.cjs`
 
-- PNG / JPEG / GIF89a / WebP / BMP 魔数识别正确。
+- PNG / JPEG / GIF89a / WebP / BMP 魔数识别正确（含 `label` 与 `mime`）。
 - 未知格式与截断缓冲区 → `{ format: 'unknown' }`，不抛错。
-- `isNativelyDecodableFormat` 仅对 `png` / `jpeg` 返回 `true`。
+- `resolveImagePlan` 的四条分支：
+  - PNG/JPEG → `{ action: 'compress' }`；
+  - GIF 且体积 ≤ 上限 → `{ action: 'passthrough', mime: 'image/gif' }`；
+  - GIF 且体积 > 上限 → `skip` 且 `code === 'PASSTHROUGH_TOO_LARGE'`；
+  - WebP / BMP / unknown → `skip` 且 `code === 'UNSUPPORTED_IMAGE_FORMAT'`，`reason` 含格式中文名。
+- 边界：体积恰好等于上限时判定为「透传」（用 `≤` 比较）。
 
 ### 6.2 `electron/services/subjectVisionProvider.test.cjs` 增补
 
-1. **不支持格式被跳过且不进批次**：桩 `inspectLocalImage` 对 `hash-A` 返回 `readable:false`；
+1. **被跳过的格式不进批次**：桩 `inspectLocalImage` 对 `hash-A` 返回 `readable:false`；
    断言该资产 `status === 'skipped'` 且 `skipReason` 含格式、断言图片请求的 `local_image` 数量不含它。
-2. **批次失败降级为逐张**：让首个整批调用抛错，之后逐张成功；断言健康图 `inspected`、
+2. **GIF 可读时正常入批**：桩 `inspectLocalImage` 对 GIF 资产返回 `readable:true`；
+   断言该资产被计入批次（不出现 `skipped`），走既有识别路径。
+3. **批次失败降级为逐张**：让首个整批调用抛错，之后逐张成功；断言健康图 `inspected`、
    坏图 `failed`，且总调用次数 = 1（整批）+ n（逐张）。
-3. **进度回调计数**：断言 `onProgress` 收到的 content 事件 `processed` 单调不减、终值等于
+4. **进度回调计数**：断言 `onProgress` 收到的 content 事件 `processed` 单调不减、终值等于
    `assets.length`，且 `sealCount` 与预期一致；role 事件同构。
-4. **无 `inspectLocalImage` 时向后兼容**：行为与改动前一致（现有用例即回归基线）。
 5. **跳过资产计入进度**：`processed` 终值仍等于 `assets.length`。
+6. **无 `inspectLocalImage` 时向后兼容**：行为与改动前一致（现有用例即回归基线）。
 
 ### 6.3 `electron/services/subjectCheckTask.test.cjs` 增补
 
-6. **进度文案翻译**：以桩 `aiService`（提供 `getConfig`、`collectJsonResponse`、`inspectLocalImage`）
+7. **进度文案翻译**：以桩 `aiService`（提供 `getConfig`、`collectJsonResponse`、`inspectLocalImage`）
    驱动 `runSubjectSealCheck`，断言 `onProgress` 依次收到含
    `正在识别图片内容`、`已发现印章`、`正在判断盖章身份` 的文案。
-7. **全跳过时状态为 `partial`**：全部资产 `readable:false` → 断言
+8. **全跳过时状态为 `partial`**：全部资产 `readable:false` → 断言
    `visionStatus === 'partial'` 且 `stats.skippedAssets === assets.length`、`failedAssets === 0`。
-8. **`logger` 缺省不影响结果**：不传 `logger` 时调用成功。
+9. **`logger` 缺省不影响结果**：不传 `logger` 时调用成功。
 
 ### 6.4 回归
 
@@ -335,8 +402,11 @@ function logAiFailure(scope, payload = {}) { /* 单行 key=value，截断，永�
 
 ## 7. 手动验收清单
 
-1. 用**同一份含 GIF 的投标文件**重跑主体一致性检查 → 期望汇总行出现
-   `跳过 1 张，失败 0 张`，`已检查` 数字为可解码图片数。
+1. 用**同一份含 GIF 的投标文件**重跑主体一致性检查 → 期望：
+   - 汇总行为 `已检查 3/7 张，跳过 0 张，失败 0 张`（GIF 走透传，不再失败也不再跳过）；
+   - 该 GIF 参与印章识别；由于其印章文字为「江西瑞智信息技术有限公司」、与已确认主体
+     「江西博微新技术有限公司」不符，**期望产出额外一条印章来源的 finding**
+     （级别取决于名称与角色置信度是否均 ≥ 0.85）。
 2. 检查过程中观察进度：应依次出现「正在识别图片内容 x/7 张（已发现印章 y 张）…」与
    「正在判断盖章身份 x/x 张…」，且数字单调递增。
 3. 故意把模型 `base_url` 改错后重跑 → 期望终端出现 `[yibiao-client] ai-failure scope=subject.seal.content …`
@@ -344,6 +414,8 @@ function logAiFailure(scope, payload = {}) { /* 单行 key=value，截断，永�
 4. 打开 `%APPDATA%/yibiao-client/logs/rejection-check/*.jsonl` → 期望看到
    `rejection.subject.seal.content.started`、`asset.skipped`、`completed` 事件。
 5. 打开 `%APPDATA%/yibiao-client/logs/ai/` → 期望出现 `request-prepare-error` 类型的日志（若发生准备失败）。
+6. 另找一份含 **WebP** 图片的投标文件（或临时把某张 PNG 的扩展名与内容改成 WebP）→
+   期望该张计入「跳过」、其余正常检查，不再连坐。
 
 ## 8. 为什么不用 Pi Agent 执行监视器
 
