@@ -2573,11 +2573,6 @@ function createAiService({ app, configStore }) {
       return inspectLocalImageFile(filePath);
     },
 
-    __test__: {
-      compressLocalImageToDataUrl,
-      inspectLocalImage: inspectLocalImageFile,
-    },
-
     async chat(request) {
       return enqueueTextRequest(request, () => {
         const config = configStore.load();
@@ -2823,6 +2818,6 @@ module.exports = {
   createAiService,
   __test__: {
     compressLocalImageToDataUrl,
-    inspectLocalImage: inspectLocalImageFile,
+    inspectLocalImageFile,
   },
 };
