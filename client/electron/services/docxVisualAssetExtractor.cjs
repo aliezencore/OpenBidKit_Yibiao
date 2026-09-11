@@ -45,19 +45,84 @@ function stripXmlToText(xml) {
     .trim();
 }
 
-function extractNearbyText(xml, index) {
-  const start = Math.max(0, index - NEARBY_TEXT_RADIUS * 3);
-  const end = Math.min(xml.length, index + NEARBY_TEXT_RADIUS * 3);
-  const text = stripXmlToText(xml.slice(start, end));
-  const half = Math.floor(text.length / 2);
-  return text.slice(Math.max(0, half - NEARBY_TEXT_RADIUS), half + NEARBY_TEXT_RADIUS);
+const MAX_SECTION_TITLE_LENGTH = 40;
+const MAX_NEARBY_TEXT_LENGTH = 200;
+const NEARBY_PARAGRAPH_RADIUS = 2;
+
+// 中文标书大量使用纯文本编号当章节，并不使用 Word 标题样式。
+const CHAPTER_TEXT_PATTERNS = [
+  /^第[一二三四五六七八九十百千0-9]+[章节篇]/,
+  /^[一二三四五六七八九十]+、/,
+  /^（[一二三四五六七八九十]+）/,
+  /^\d+(\.\d+)*[\s、.]/,
+];
+const HEADING_STYLE_PATTERN = /^(heading\s*[1-9]|标题\s*[1-9一二三四五六七八九十])$/i;
+
+// 一次性把 XML 切成段落数组并预计算特征，避免每张图片都重扫全文。
+function buildParagraphIndex(xml) {
+  const source = String(xml || '');
+  const paragraphs = [];
+  const positions = [];
+  const paragraphRe = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let match = paragraphRe.exec(source);
+  while (match) {
+    const block = match[0];
+    const styleMatch = /<w:pStyle\b[^>]*w:val="([^"]+)"/.exec(block);
+    paragraphs.push({
+      text: stripXmlToText(block),
+      styleVal: styleMatch ? styleMatch[1] : '',
+      bold: /<w:b\b[^>]*\/?>/.test(block),
+    });
+    positions.push({ start: match.index, end: match.index + block.length });
+    match = paragraphRe.exec(source);
+  }
+  return { paragraphs, positions };
 }
 
-function extractSectionTitle(xml, index) {
-  // 向前找最近一个标题样式段落或加粗短行的纯文本。
-  const before = xml.slice(Math.max(0, index - 4000), index);
-  const headingMatch = /<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:t[^>]*>([^<]{2,60})<\/w:t>(?:(?!<\/w:p>)[\s\S])*?<\/w:p>\s*$/.exec(before);
-  return headingMatch ? stripXmlToText(headingMatch[1]) : undefined;
+function findParagraphPosition(positions, charIndex) {
+  for (let index = positions.length - 1; index >= 0; index -= 1) {
+    if (charIndex >= positions[index].start && charIndex < positions[index].end) return index;
+  }
+  return -1;
+}
+
+function isHeadingParagraph(paragraph) {
+  if (!paragraph || !paragraph.text) return false;
+  if (paragraph.styleVal && HEADING_STYLE_PATTERN.test(String(paragraph.styleVal).trim())) return true;
+  if (paragraph.text.length > MAX_SECTION_TITLE_LENGTH) return false;
+  return CHAPTER_TEXT_PATTERNS.some((pattern) => pattern.test(paragraph.text));
+}
+
+// 向前全篇回溯：先找标题样式/编号段落，再退一步找加粗短段落，都没有就返回 undefined。
+function extractSectionTitle(paragraphs, paragraphPosition) {
+  for (let index = paragraphPosition - 1; index >= 0; index -= 1) {
+    if (!paragraphs[index]?.text) continue;
+    if (isHeadingParagraph(paragraphs[index])) return paragraphs[index].text;
+  }
+  for (let index = paragraphPosition - 1; index >= 0; index -= 1) {
+    const paragraph = paragraphs[index];
+    if (!paragraph?.text || paragraph.text.length > MAX_SECTION_TITLE_LENGTH) continue;
+    if (paragraph.bold) return paragraph.text;
+  }
+  return undefined;
+}
+
+// 取图片所在段落文本；图片独占段落时取前后各最多 2 个有文本的段落。
+function extractNearbyText(paragraphs, paragraphPosition) {
+  if (paragraphPosition < 0) return '';
+  const own = paragraphs[paragraphPosition]?.text || '';
+  if (own) return own.slice(0, MAX_NEARBY_TEXT_LENGTH);
+
+  const parts = [];
+  for (let offset = 1; offset <= NEARBY_PARAGRAPH_RADIUS; offset += 1) {
+    const text = paragraphs[paragraphPosition - offset]?.text;
+    if (text) parts.push(text);
+  }
+  for (let offset = 1; offset <= NEARBY_PARAGRAPH_RADIUS; offset += 1) {
+    const text = paragraphs[paragraphPosition + offset]?.text;
+    if (text) parts.push(text);
+  }
+  return parts.join(' ').slice(0, MAX_NEARBY_TEXT_LENGTH);
 }
 
 function classifyAssetKind(widthPx, heightPx, placement) {
@@ -65,7 +130,8 @@ function classifyAssetKind(widthPx, heightPx, placement) {
   return placement === 'inline' || placement === 'anchor' ? 'standalone' : 'unknown';
 }
 
-function collectDrawingOccurrences(xml, relationships, partLabel) {
+function collectDrawingOccurrences(xml, relationships, partLabel, paragraphIndex) {
+  const { paragraphs, positions } = paragraphIndex;
   const occurrences = [];
   const drawingRe = /<w:drawing>[\s\S]*?<\/w:drawing>/g;
   for (const drawing of String(xml || '').matchAll(drawingRe)) {
@@ -92,14 +158,15 @@ function collectDrawingOccurrences(xml, relationships, partLabel) {
       height: heightPx,
       assetKind: classifyAssetKind(widthPx, heightPx, placement),
       locationHint: partLabel,
-      nearbyText: extractNearbyText(xml, drawing.index),
-      sectionTitle: extractSectionTitle(xml, drawing.index),
+      nearbyText: extractNearbyText(paragraphs, findParagraphPosition(positions, drawing.index)),
+      sectionTitle: extractSectionTitle(paragraphs, findParagraphPosition(positions, drawing.index)),
     });
   }
   return occurrences;
 }
 
-function collectVmlOccurrences(xml, relationships, partLabel) {
+function collectVmlOccurrences(xml, relationships, partLabel, paragraphIndex) {
+  const { paragraphs, positions } = paragraphIndex;
   const occurrences = [];
   const vmlRe = /<v:imagedata\b[^>]*\br:id="([^"]+)"[^>]*\/?>/g;
   for (const match of String(xml || '').matchAll(vmlRe)) {
@@ -120,8 +187,8 @@ function collectVmlOccurrences(xml, relationships, partLabel) {
       height: heightPx,
       assetKind: classifyAssetKind(widthPx, heightPx, 'inline'),
       locationHint: partLabel,
-      nearbyText: extractNearbyText(xml, match.index),
-      sectionTitle: extractSectionTitle(xml, match.index),
+      nearbyText: extractNearbyText(paragraphs, findParagraphPosition(positions, match.index)),
+      sectionTitle: extractSectionTitle(paragraphs, findParagraphPosition(positions, match.index)),
     });
   }
   return occurrences;
@@ -152,8 +219,9 @@ async function extractDocxVisualAssets(docxFilePath) {
 
   const occurrences = [];
   for (const part of parts) {
-    occurrences.push(...collectDrawingOccurrences(part.xml, part.rels, part.label));
-    occurrences.push(...collectVmlOccurrences(part.xml, part.rels, part.label));
+    const paragraphIndex = buildParagraphIndex(part.xml);
+    occurrences.push(...collectDrawingOccurrences(part.xml, part.rels, part.label, paragraphIndex));
+    occurrences.push(...collectVmlOccurrences(part.xml, part.rels, part.label, paragraphIndex));
   }
 
   const mediaFiles = [];

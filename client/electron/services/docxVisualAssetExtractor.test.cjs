@@ -133,3 +133,62 @@ test('非 zip 或缺失关键 part 时抛错', async () => {
   new AdmZip().writeZip(emptyZip);
   await assert.rejects(() => extractDocxVisualAssets(emptyZip));
 });
+
+function withRewrittenDocumentXml(zip, rewrite) {
+  const xml = zip.getEntry('word/document.xml').getData().toString('utf8');
+  zip.updateFile('word/document.xml', Buffer.from(rewrite(xml), 'utf8'));
+  return zip;
+}
+
+test('nearbyText 是可读文本，不含 XML 片段', async () => {
+  const filePath = writeFixture(buildMinimalDocx(), 'nearby.docx');
+  const { occurrences } = await extractDocxVisualAssets(filePath);
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.ok(inline.nearbyText.includes('承诺') || inline.nearbyText.includes('投标函'), inline.nearbyText);
+  assert.strictEqual(
+    /w:rsid|<wp:|w:val|w:drawing|effectExtent/.test(inline.nearbyText),
+    false,
+    `nearbyText 不应含 XML 片段：${inline.nearbyText}`,
+  );
+  assert.ok(inline.nearbyText.length <= 200, `nearbyText 应被截断，实际长度 ${inline.nearbyText.length}`);
+});
+
+test('章节标题取命中编号模式的最近段落', async () => {
+  const filePath = writeFixture(buildMinimalDocx(), 'section-pattern.docx');
+  const { occurrences } = await extractDocxVisualAssets(filePath);
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.strictEqual(inline.sectionTitle, '第一章 投标函');
+});
+
+test('章节标题优先取标题样式段落（即使文本没有编号）', async () => {
+  const zip = withRewrittenDocumentXml(buildMinimalDocx(), (xml) => xml.replace(
+    '<w:p><w:r><w:t>第一章 投标函</w:t></w:r></w:p>',
+    '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>投标函</w:t></w:r></w:p>',
+  ));
+  const { occurrences } = await extractDocxVisualAssets(writeFixture(zip, 'section-style.docx'));
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.strictEqual(inline.sectionTitle, '投标函');
+});
+
+test('无标题样式也无编号段落时不返回正文句子', async () => {
+  const zip = withRewrittenDocumentXml(buildMinimalDocx(), (xml) => xml.replace(
+    '<w:p><w:r><w:t>第一章 投标函</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>我方已认真阅读本项目招标文件的全部内容并愿意按照其要求参加本次投标活动</w:t></w:r></w:p>',
+  ));
+  const { occurrences } = await extractDocxVisualAssets(writeFixture(zip, 'section-none.docx'));
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.strictEqual(inline.sectionTitle, undefined, `不应把正文句子当章节：${inline.sectionTitle}`);
+});
+
+test('章节回溯不受 4000 字符距离限制', async () => {
+  const filler = Array.from(
+    { length: 60 },
+    (_item, index) => `<w:p><w:r><w:t>填充段落${index}：本段用于拉长文档，说明我方完全响应招标文件的各项要求与条件。</w:t></w:r></w:p>`,
+  ).join('');
+  const zip = withRewrittenDocumentXml(buildMinimalDocx(), (xml) => xml
+    .replace('<w:p><w:r><w:t>第一章 投标函</w:t></w:r></w:p>', '<w:p><w:r><w:t>第七章 售后服务</w:t></w:r></w:p>')
+    .replace('<w:p><w:r><w:t>致：某某招标代理公司。我公司郑重承诺：</w:t></w:r></w:p>', `<w:p><w:r><w:t>致：某某招标代理公司。</w:t></w:r></w:p>${filler}`));
+  const { occurrences } = await extractDocxVisualAssets(writeFixture(zip, 'section-far.docx'));
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.strictEqual(inline.sectionTitle, '第七章 售后服务');
+});
