@@ -1199,6 +1199,10 @@ module.exports = {
 };
 ```
 
+**`__test__` 只在这一处（模块级）暴露**，与仓库既有惯例一致（`checkResultExportService.cjs` 同款）。
+**不要**在服务对象上再挂一份 `__test__` —— 那会造出两个用途相同的测试钩子入口，
+后续无人能判断该用哪个。
+
 - [ ] **Step 4: 语法检查**
 
 Run: `cd client && node --check electron/services/aiService.cjs`
@@ -1285,9 +1289,8 @@ app.whenReady().then(async () => {
   fs.writeFileSync(webpPath, await mintWebp());
   fs.writeFileSync(tiffPath, makeTiff());
 
-  const config = { api_key: 'sk-test', base_url: 'https://example.invalid/v1', model_name: 'm', multimodal_enabled: true, developer_mode: true };
-  const aiService = createAiService({ app, configStore: { load: () => config, save: () => {} } });
-  const { compressLocalImageToDataUrl, inspectLocalImage } = aiService.__test__;
+  const { __test__ } = require('./electron/services/aiService.cjs');
+  const { compressLocalImageToDataUrl, inspectLocalImageFile: inspectLocalImage } = __test__;
 
   const expectations = [
     [pngPath, 'data:image/jpeg;base64,'],
