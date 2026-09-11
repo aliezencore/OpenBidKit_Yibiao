@@ -317,6 +317,16 @@ function buildRejectionWorkbook(state, request, options = {}) {
     ...buildUnrecognizedRows(selected.subjectCheckResult),
   ];
   appendWorksheet(workbook, rejectionSheetNames[4], subjectRows, [8, 14, 28, 10, 32, 32, 14, 14, 28, 48, 42, 42, 12, 42], 0);
+
+  // autofilter 默认会延伸到追加的「未能识别的图片」区块，把该说明性区块也当成数据行筛选；
+  // 因此把它收缩到「表头 + 主体结果行」的范围。
+  const subjectSheet = workbook.Sheets[rejectionSheetNames[4]];
+  if (subjectSheet?.['!autofilter']) {
+    subjectSheet['!autofilter'].ref = XLSX.utils.encode_range({
+      s: { r: 0, c: 0 },
+      e: { r: selected.subjectCheckResult.findings.length, c: 13 },
+    });
+  }
   return workbook;
 }
 

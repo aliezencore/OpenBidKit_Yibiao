@@ -112,6 +112,68 @@ test('投标主体表列出未能识别的图片', () => {
     && line.includes('图片转码失败')), flat.join('\n'));
 });
 
+test('主体表 autofilter 收缩到 findings 行，且未识别区块前有空行', () => {
+  const state = {
+    ...STATE,
+    subjectCheckResult: {
+      ...STATE.subjectCheckResult,
+      stats: {
+        ...STATE.subjectCheckResult.stats,
+        visionStats: {
+          ...STATE.subjectCheckResult.stats.visionStats,
+          unrecognized: [
+            {
+              assetId: 'asset-1', bidDocumentId: 'bid-1', ordinal: 3, sectionTitle: '第三章 投标函',
+              locationHint: '正文', mediaName: 'media/image3.tif', mimeType: 'image/tiff',
+              format: 'tiff', label: 'TIFF', kind: 'skipped', reason: '图片格式不支持（TIFF），已跳过',
+            },
+            {
+              assetId: 'asset-2', bidDocumentId: 'bid-1', ordinal: 5, sectionTitle: '',
+              locationHint: '正文', mediaName: 'media/image5.webp', mimeType: 'image/webp',
+              format: 'webp', label: 'WebP', kind: 'failed', reason: '图片转码失败',
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const workbook = __test__.buildRejectionWorkbook(state, { subjectInputSignature: 'sig-subject-1' }, { exportedAt: new Date('2026-09-10T02:00:00.000Z') });
+  assert.strictEqual(workbook.SheetNames.length, 5);
+  const sheet = workbook.Sheets['投标主体'];
+
+  // autofilter 必须只覆盖「表头行 + findings 行」，不能把追加的说明性区块也算作数据行。
+  const filterRange = XLSX.utils.decode_range(sheet['!autofilter'].ref);
+  assert.strictEqual(filterRange.s.r, 0, 'autofilter 起点应为表头行 0');
+  assert.strictEqual(filterRange.s.c, 0, 'autofilter 起点列应为 0');
+  assert.strictEqual(filterRange.e.r, state.subjectCheckResult.findings.length,
+    `autofilter 终点行应等于 findings 数（${state.subjectCheckResult.findings.length}），实际 ${filterRange.e.r}`);
+  assert.strictEqual(filterRange.e.c, 13, '主体表共 14 列，autofilter 终点列应为 13');
+
+  // 对照断言：追加区块的存在使工作表数据末行严格大于 autofilter 终点（即筛选范围确已收缩）。
+  // 未修复时 autofilter 会延伸到数据末行，此断言（连同上面的终点行断言）会失败。
+  const lastDataRow = XLSX.utils.decode_range(sheet['!ref']).e.r;
+  assert.ok(lastDataRow > filterRange.e.r,
+    `未修复时 autofilter 终点会等于数据末行；此处数据末行 ${lastDataRow} 应严格大于筛选终点 ${filterRange.e.r}`);
+
+  // 结构断言：「未能识别的图片」标题行之前必须有一个空行。
+  // sheet_to_json 会丢弃空数组行，故直接在单元格数据上定位标题行并检查其上一行为空。
+  const cellRange = XLSX.utils.decode_range(sheet['!ref']);
+  let titleRow = -1;
+  for (let r = cellRange.s.r; r <= cellRange.e.r && titleRow < 0; r += 1) {
+    for (let c = cellRange.s.c; c <= cellRange.e.c; c += 1) {
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+      if (cell && String(cell.v).includes('未能识别的图片')) { titleRow = r; break; }
+    }
+  }
+  assert.ok(titleRow > 0, '应在单元格数据中定位到「未能识别的图片」标题行');
+  const blankRow = titleRow - 1;
+  for (let c = cellRange.s.c; c <= cellRange.e.c; c += 1) {
+    assert.strictEqual(sheet[XLSX.utils.encode_cell({ r: blankRow, c })], undefined,
+      `标题行上一行（第 ${blankRow} 行）应为空行，但 ${XLSX.utils.encode_cell({ r: blankRow, c })} 存在数据`);
+  }
+});
+
 test('无未能识别图片时不追加区块', () => {
   const workbook = __test__.buildRejectionWorkbook(STATE, { subjectInputSignature: 'sig-subject-1' }, { exportedAt: new Date('2026-09-10T02:00:00.000Z') });
   const rows = XLSX.utils.sheet_to_json(workbook.Sheets['投标主体'], { header: 1 });
