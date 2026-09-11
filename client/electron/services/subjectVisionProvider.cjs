@@ -107,6 +107,31 @@ function createOnlineVlmProvider({ aiService }) {
       occurrenceCount.set(hash, (occurrenceCount.get(hash) || 0) + 1);
     }
 
+    // 同一 contentHash 的所有出现位置（含代表项与非代表项），用于把代表项的跳过/失败结果回传给同 hash 兄弟项。
+    const entriesByHash = new Map();
+    for (const entry of byAssetId.values()) {
+      const hash = entry.asset.contentHash;
+      if (!entriesByHash.has(hash)) entriesByHash.set(hash, []);
+      entriesByHash.get(hash).push(entry);
+    }
+
+    // 代表项的跳过/失败结果同步给同一 contentHash 的所有出现位置（对称于成功回填）。
+    // 防御：已带 skipReason 或有 content 的兄弟项不再改动（同一 hash 在预检阶段不会一半可读一半不可读）。
+    function applyContentOutcomeToSiblings(sourceEntry) {
+      const siblings = entriesByHash.get(sourceEntry.asset.contentHash) || [];
+      for (const sibling of siblings) {
+        if (sibling === sourceEntry) continue;
+        if (sibling.skipReason || sibling.content) continue;
+        if (sourceEntry.error) {
+          sibling.error = sourceEntry.error;
+        } else if (sourceEntry.skipReason) {
+          sibling.skipReason = sourceEntry.skipReason;
+          sibling.format = sourceEntry.format;
+          sibling.label = sourceEntry.label;
+        }
+      }
+    }
+
     // 预检：两种解码器都解不了的格式直接跳过，且不连坐同批其它图片。
     const precheck = typeof aiService.inspectLocalImage === 'function'
       ? aiService.inspectLocalImage.bind(aiService)
@@ -131,6 +156,7 @@ function createOnlineVlmProvider({ aiService }) {
           entry.skipReason = `${verdict.reason || '图片不可读'}，已跳过`;
           entry.format = verdict.format || 'unknown';
           entry.label = verdict.label || '未知格式';
+          applyContentOutcomeToSiblings(entry);
           skippedCount += 1;
           emitLog({ type: 'asset.skipped', assetId: entry.asset.assetId, format: verdict.format, reason: entry.skipReason });
           continue;
@@ -217,6 +243,7 @@ function createOnlineVlmProvider({ aiService }) {
               recovered.push(entry.asset.assetId);
             } catch (singleError) {
               entry.error = singleError?.message || '图片识别失败';
+              applyContentOutcomeToSiblings(entry);
               failedAssetIds.push(entry.asset.assetId);
               logAiFailure('subject.seal.content.isolated', { asset: entry.asset.assetId, ...describeFailure(singleError) });
             }
@@ -224,6 +251,7 @@ function createOnlineVlmProvider({ aiService }) {
           emitLog({ type: 'batch.isolated', phase: 'content', batch: batchLabel, batchSize: entries.length, recovered, failedAssetIds });
         } else {
           entries[0].error = error?.message || '图片识别失败';
+          applyContentOutcomeToSiblings(entries[0]);
         }
       }
 

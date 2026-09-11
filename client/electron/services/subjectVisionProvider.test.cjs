@@ -324,3 +324,44 @@ test('role 阶段按位置计（同一内容的不同位置不去重）', async 
   assert.ok(roleEvents.length > 0, '应上报 role 进度');
   assert.strictEqual(roleEvents[roleEvents.length - 1].total, 2, '两个位置不能去重成 1');
 });
+
+test('同 contentHash 的多个出现位置共享失败结果', async () => {
+  // 两个资产用同一个 contentHash；内容批次抛错（且逐张重试也抛错，因 responses 只有 1 项且为 Error）。
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [new Error('整批识别失败')],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-A' }),
+    ],
+  });
+  const a1 = result.assets.find((item) => item.assetId === 'asset-1');
+  const a2 = result.assets.find((item) => item.assetId === 'asset-2');
+  assert.strictEqual(a1.status, 'failed', `asset-1 应为 failed，实际 ${a1.status}`);
+  assert.strictEqual(a2.status, 'failed', `asset-2 应为 failed，实际 ${a2.status}`);
+});
+
+test('同 contentHash 的多个出现位置共享跳过结果', async () => {
+  // 两个资产用同一个 contentHash，且该文件格式不可读；代表项被跳过，兄弟项也应共享 skipReason。
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [{ images: [{ has_seal: false, image_type: 'unknown' }] }],
+    unreadable: ['logo.tiff'],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', absolutePath: 'C:/fake/logo.tiff', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', absolutePath: 'C:/fake/logo.tiff', contentHash: 'hash-A' }),
+    ],
+  });
+  const a1 = result.assets.find((item) => item.assetId === 'asset-1');
+  const a2 = result.assets.find((item) => item.assetId === 'asset-2');
+  assert.strictEqual(a1.status, 'skipped', `asset-1 应为 skipped，实际 ${a1.status}`);
+  assert.strictEqual(a2.status, 'skipped', `asset-2 应为 skipped，实际 ${a2.status}`);
+  assert.ok(a1.skipReason.includes('TIFF'), a1.skipReason);
+  assert.ok(a2.skipReason.includes('TIFF'), a2.skipReason);
+});
