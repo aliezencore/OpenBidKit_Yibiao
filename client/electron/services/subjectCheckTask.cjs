@@ -571,12 +571,16 @@ async function runSubjectSealCheck(aiService, {
     }
     if (providerAsset.status === 'skipped') {
       stats.skippedAssets += 1;
-      unrecognized.push(createUnrecognizedEntry(asset, ordinal, {
-        kind: 'skipped',
-        reason: providerAsset.skipReason,
-        format: providerAsset.format,
-        label: providerAsset.label,
-      }));
+      // 「未能识别的图片」清单只收「格式不支持」与「失败」两类（spec 修订）；
+      // 「按内容类型主动跳过（非盖章区域）」不进清单，但仍计入 skippedAssets。
+      if (providerAsset.skipKind === 'unsupported-format') {
+        unrecognized.push(createUnrecognizedEntry(asset, ordinal, {
+          kind: 'skipped',
+          reason: providerAsset.skipReason,
+          format: providerAsset.format,
+          label: providerAsset.label,
+        }));
+      }
       continue;
     }
     if (providerAsset.status === 'failed') {

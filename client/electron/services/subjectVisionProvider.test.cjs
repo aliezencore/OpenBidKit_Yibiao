@@ -193,6 +193,7 @@ test('不可读的格式被跳过且不进批次', async () => {
 
   const skippedAsset = result.assets.find((item) => item.assetId === 'asset-1');
   assert.strictEqual(skippedAsset.status, 'skipped');
+  assert.strictEqual(skippedAsset.skipKind, 'unsupported-format', '预检跳过应标记为 unsupported-format');
   assert.ok(skippedAsset.skipReason.includes('TIFF'), skippedAsset.skipReason);
   assert.ok(logs.some((event) => event.type === 'asset.skipped' && event.assetId === 'asset-1'));
 
@@ -262,7 +263,7 @@ test('进度按去重后张数计，重复内容只算一次', async () => {
   const contentEvents = events.filter((event) => event.phase === 'content');
   assert.strictEqual(contentEvents[0].total, 2, '分母应为去重后的 2，而不是 5');
   assert.strictEqual(contentEvents[contentEvents.length - 1].processed, 2);
-  assert.strictEqual(contentEvents[contentEvents.length - 1].sealCount, 4, '印章数按出现次数累计');
+  assert.strictEqual(contentEvents[contentEvents.length - 1].sealCount, 1, '按去重计：同一张图重复出现只算一次');
 });
 
 test('被跳过的图片不进分母', async () => {
@@ -364,4 +365,42 @@ test('同 contentHash 的多个出现位置共享跳过结果', async () => {
   assert.strictEqual(a2.status, 'skipped', `asset-2 应为 skipped，实际 ${a2.status}`);
   assert.ok(a1.skipReason.includes('TIFF'), a1.skipReason);
   assert.ok(a2.skipReason.includes('TIFF'), a2.skipReason);
+});
+
+test('内容类型判定为非盖章区域的图标记为 not-seal-area 且 status skipped', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [{ images: [{ has_seal: false, image_type: 'photo' }] }],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+  const asset = result.assets.find((item) => item.assetId === 'asset-1');
+  assert.strictEqual(asset.status, 'skipped', `应被跳过，实际 ${asset.status}`);
+  assert.strictEqual(asset.skipKind, 'not-seal-area', '内容类型跳过应标记为 not-seal-area');
+  assert.ok(asset.skipReason.includes('photo'), asset.skipReason);
+});
+
+test('同 contentHash 的多个出现位置共享失败结果时一并传播 format/label', async () => {
+  // 两张资产同一 contentHash 且可读，但内容批次抛错（逐张重试也抛错）。
+  // 代表项失败，兄弟项应共享 error 并带上代表项的 format/label（Finding 4）。
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [new Error('整批识别失败')],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A', absolutePath: 'C:/fake/seal.png' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-A', absolutePath: 'C:/fake/seal.png' }),
+    ],
+  });
+  const a1 = result.assets.find((item) => item.assetId === 'asset-1');
+  const a2 = result.assets.find((item) => item.assetId === 'asset-2');
+  assert.strictEqual(a1.status, 'failed');
+  assert.strictEqual(a2.status, 'failed');
+  assert.strictEqual(a1.format || '', 'png');
+  assert.strictEqual(a2.format || '', 'png', '失败结果应一并传播 format');
+  assert.strictEqual(a2.label || '', a1.label || '', '失败结果应一并传播 label');
 });

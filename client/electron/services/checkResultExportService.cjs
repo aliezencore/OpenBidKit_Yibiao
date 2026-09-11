@@ -82,6 +82,7 @@ function appendWorksheet(workbook, name, rows, widths, filterHeaderRow) {
 
 // 「未能识别的图片」明细：解释「跳过 N 张 / 失败 N 张」到底卡在哪几张图上。
 function buildUnrecognizedRows(subjectCheckResult) {
+  if (!subjectCheckResult?.valid) return [];
   const items = subjectCheckResult?.stats?.visionStats?.unrecognized;
   if (!Array.isArray(items) || !items.length) return [];
   return [

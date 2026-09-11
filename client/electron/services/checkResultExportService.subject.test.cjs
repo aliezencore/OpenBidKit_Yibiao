@@ -174,6 +174,35 @@ test('主体表 autofilter 收缩到 findings 行，且未识别区块前有空�
   }
 });
 
+test('签名失效时即使有未识别清单也不追加「未能识别的图片」区块', () => {
+  // STATE 的签名是 sig-subject-1，这里用不匹配的签名使结果 invalid，
+  // 但保留一份未识别清单，验证 buildUnrecognizedRows 在 invalid 时返回空。
+  const state = {
+    ...STATE,
+    subjectCheckResult: {
+      ...STATE.subjectCheckResult,
+      stats: {
+        ...STATE.subjectCheckResult.stats,
+        visionStats: {
+          ...STATE.subjectCheckResult.stats.visionStats,
+          unrecognized: [
+            {
+              assetId: 'asset-1', bidDocumentId: 'bid-1', ordinal: 3, sectionTitle: '第三章 投标函',
+              locationHint: '正文', mediaName: 'media/image3.tif', mimeType: 'image/tiff',
+              format: 'tiff', label: 'TIFF', kind: 'skipped', reason: '图片格式不支持（TIFF），已跳过',
+            },
+          ],
+        },
+      },
+    },
+  };
+  const workbook = __test__.buildRejectionWorkbook(state, { subjectInputSignature: 'sig-stale' }, { exportedAt: new Date() });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets['投标主体'], { header: 1 });
+  const flat = rows.map((row) => row.join('|'));
+  assert.strictEqual(flat.some((line) => line.includes('未能识别的图片')), false,
+    '签名失效时不应追加「未能识别的图片」区块');
+});
+
 test('无未能识别图片时不追加区块', () => {
   const workbook = __test__.buildRejectionWorkbook(STATE, { subjectInputSignature: 'sig-subject-1' }, { exportedAt: new Date('2026-09-10T02:00:00.000Z') });
   const rows = XLSX.utils.sheet_to_json(workbook.Sheets['投标主体'], { header: 1 });

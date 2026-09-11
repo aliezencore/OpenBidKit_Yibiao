@@ -100,12 +100,7 @@ function createOnlineVlmProvider({ aiService }) {
     const assets = Array.isArray(request?.assets) ? request.assets : [];
     const byAssetId = new Map(assets.map((asset) => [asset.assetId, { asset, content: null, error: undefined, skipReason: undefined }]));
 
-    // 同一内容在文档里的出现次数：进度按去重张数，印章数按出现次数累计。
-    const occurrenceCount = new Map();
-    for (const entry of byAssetId.values()) {
-      const hash = entry.asset.contentHash;
-      occurrenceCount.set(hash, (occurrenceCount.get(hash) || 0) + 1);
-    }
+    // 进度按去重张数计；印章数同样按去重计（同一张图重复出现只算一次，spec §4.3(a1)）。
 
     // 同一 contentHash 的所有出现位置（含代表项与非代表项），用于把代表项的跳过/失败结果回传给同 hash 兄弟项。
     const entriesByHash = new Map();
@@ -124,10 +119,13 @@ function createOnlineVlmProvider({ aiService }) {
         if (sibling.skipReason || sibling.content) continue;
         if (sourceEntry.error) {
           sibling.error = sourceEntry.error;
+          sibling.format = sourceEntry.format;
+          sibling.label = sourceEntry.label;
         } else if (sourceEntry.skipReason) {
           sibling.skipReason = sourceEntry.skipReason;
           sibling.format = sourceEntry.format;
           sibling.label = sourceEntry.label;
+          sibling.skipKind = sourceEntry.skipKind;
         }
       }
     }
@@ -156,6 +154,7 @@ function createOnlineVlmProvider({ aiService }) {
           entry.skipReason = `${verdict.reason || '图片不可读'}，已跳过`;
           entry.format = verdict.format || 'unknown';
           entry.label = verdict.label || '未知格式';
+          entry.skipKind = 'unsupported-format';
           applyContentOutcomeToSiblings(entry);
           skippedCount += 1;
           emitLog({ type: 'asset.skipped', assetId: entry.asset.assetId, format: verdict.format, reason: entry.skipReason });
@@ -257,7 +256,7 @@ function createOnlineVlmProvider({ aiService }) {
 
       for (const entry of entries) {
         contentProcessed += 1;
-        if (entry.content?.hasSeal) sealCount += occurrenceCount.get(entry.asset.contentHash) || 1;
+        if (entry.content?.hasSeal) sealCount += 1;
       }
       emitContentProgress();
     }
@@ -329,6 +328,7 @@ function createOnlineVlmProvider({ aiService }) {
         return {
           assetId: entry.asset.assetId,
           status: 'skipped',
+          skipKind: entry.skipKind || '',
           skipReason: entry.skipReason,
           format: entry.format || '',
           label: entry.label || '',
@@ -347,7 +347,7 @@ function createOnlineVlmProvider({ aiService }) {
       }
       const content = contentCache.get(entry.asset.contentHash) || { hasSeal: false, sealText: '', imageType: 'unknown' };
       if (['product-screenshot', 'diagram', 'photo'].includes(content.imageType)) {
-        return { assetId: entry.asset.assetId, status: 'skipped', skipReason: `识别为${content.imageType}，非盖章区域`, hasSeal: false };
+        return { assetId: entry.asset.assetId, status: 'skipped', skipKind: 'not-seal-area', skipReason: `识别为${content.imageType}，非盖章区域`, hasSeal: false };
       }
       if (!content.hasSeal) {
         return { assetId: entry.asset.assetId, status: 'inspected', hasSeal: false, imageType: content.imageType };

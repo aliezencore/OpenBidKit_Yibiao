@@ -502,3 +502,25 @@ test('未识别序号按投标文件分组且每份从 1 重新开始', async ()
     `三张应均为 skipped：${JSON.stringify(result.unrecognized)}`,
   );
 });
+
+test('未识别清单只收格式不支持的跳过，内容类型跳过仍计入 skippedAssets', async () => {
+  // asset-1 预检不可读（skipKind=unsupported-format）；asset-2 只读、内容识别为 photo（skipKind=not-seal-area）。
+  const aiService = createSealAiStub({
+    unreadable: ['skip.tiff'],
+    responses: [{ images: [{ has_seal: false, image_type: 'photo' }] }],
+  });
+  const result = await runSubjectSealCheck(aiService, {
+    visualAssets: [
+      makeSealAsset({ id: 'asset-1', contentHash: 'hash-A', absolutePath: 'C:/fake/skip.tiff', relativePath: 'skip.tiff' }),
+      makeSealAsset({ id: 'asset-2', contentHash: 'hash-B', absolutePath: 'C:/fake/photo.png', relativePath: 'photo.png' }),
+    ],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake/media',
+  }, () => {});
+
+  assert.strictEqual(result.unrecognized.length, 1, '清单只应含预检跳过的图');
+  assert.strictEqual(result.unrecognized[0].kind, 'skipped');
+  assert.ok(result.unrecognized[0].reason.includes('TIFF'), result.unrecognized[0].reason);
+  assert.strictEqual(result.visionStats.skippedAssets, 2, '两种跳过都应计入 skippedAssets');
+});
