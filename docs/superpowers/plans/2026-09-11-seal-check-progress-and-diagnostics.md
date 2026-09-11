@@ -992,12 +992,13 @@ app.whenReady().then(async () => {
   }
 
   console.log('caught=' + (caught ? caught.message : '(未抛错)'));
-  console.log('caught_code=' + (caught && caught.code));
   console.log('log_files=' + logs.length);
   console.log('prepare_error_type=' + (prepareType || '(缺失)'));
 
+  // 注意：本任务只验证「准备阶段失败会被记录」，此时 compressLocalImageToDataUrl
+  // 还是旧实现、不带 error.code，错误码要到 Task 4 才出现。所以这里不校验 code。
   fs.rmSync(userDataDir, { recursive: true, force: true });
-  const ok = Boolean(caught) && caught.code === 'UNSUPPORTED_IMAGE_FORMAT' && prepareType === 'request-prepare-error';
+  const ok = Boolean(caught) && prepareType === 'request-prepare-error';
   app.exit(ok ? 0 : 1);
 }).catch((error) => {
   console.log('ERR ' + error.message);
@@ -1006,7 +1007,7 @@ app.whenReady().then(async () => {
 ```
 
 Run: `cd client && env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/electron.exe .tmp-prepare-log-check.cjs`
-Expected: `caught_code=UNSUPPORTED_IMAGE_FORMAT`、`prepare_error_type=request-prepare-error`，退出码 0
+Expected: `caught=图片读取或压缩失败（scan.emf）：…`、`prepare_error_type=request-prepare-error`，退出码 0
 （终端还会出现一行 `[yibiao-client] ai-failure scope=ai.prepare …`，这正是要验证的行为）
 
 - [ ] **Step 8: 删除一次性脚本并提交**
@@ -1905,6 +1906,10 @@ function makeSealAsset(overrides = {}) {
     bidDocumentId: 'bid-1',
     mediaName: 'media/image1.png',
     absolutePath: 'C:/fake/seal.png',
+    // 注意：runSubjectSealCheck 会用 mediaRootDir + relativePath 重新解析绝对路径，
+    // 桩里的 inspectLocalImage 按解析后的 basename 判断可读性，因此覆盖 absolutePath 时
+    // 必须同步覆盖 relativePath。
+    relativePath: 'seal.png',
     contentHash: 'hash-A',
     mimeType: 'image/png',
     assetKind: 'standalone',
@@ -1953,7 +1958,7 @@ test('全部图片被跳过时给出专门文案且状态为 partial', async () 
   const progress = [];
   const logs = [];
   const result = await runSubjectSealCheck(aiService, {
-    visualAssets: [makeSealAsset({ absolutePath: 'C:/fake/seal.tiff' })],
+    visualAssets: [makeSealAsset({ absolutePath: 'C:/fake/seal.tiff', relativePath: 'seal.tiff' })],
     officialName: SUBJECT_A,
     aliases: [],
     mediaRootDir: 'C:/fake/media',
@@ -1977,8 +1982,8 @@ test('未能识别清单记录文档内序号、格式与原因', async () => {
   });
   const result = await runSubjectSealCheck(aiService, {
     visualAssets: [
-      makeSealAsset({ id: 'asset-1', contentHash: 'hash-A', absolutePath: 'C:/fake/skip.tiff' }),
-      makeSealAsset({ id: 'asset-2', contentHash: 'hash-B', absolutePath: 'C:/fake/broken.png' }),
+      makeSealAsset({ id: 'asset-1', contentHash: 'hash-A', absolutePath: 'C:/fake/skip.tiff', relativePath: 'skip.tiff' }),
+      makeSealAsset({ id: 'asset-2', contentHash: 'hash-B', absolutePath: 'C:/fake/broken.png', relativePath: 'broken.png' }),
     ],
     officialName: SUBJECT_A,
     aliases: [],
