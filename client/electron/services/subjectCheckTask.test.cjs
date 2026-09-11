@@ -473,3 +473,32 @@ test('未传 logger 时印章检查照常完成', async () => {
   assert.strictEqual(result.visionStatus, 'success');
   assert.strictEqual(result.visionStats.inspectedAssets, 1);
 });
+
+test('未识别序号按投标文件分组且每份从 1 重新开始', async () => {
+  // 三张资产分属两份投标文件：doc-1 两张、doc-2 一张；三张都不可读。
+  // 桩按解析后 basename 判断可读性，故 absolutePath 与 relativePath 需同步覆盖。
+  const aiService = createSealAiStub({
+    unreadable: ['doc1-a.tiff', 'doc1-b.tiff', 'doc2-a.tiff'],
+    responses: [],
+  });
+  const result = await runSubjectSealCheck(aiService, {
+    visualAssets: [
+      makeSealAsset({ id: 'asset-1', bidDocumentId: 'doc-1', contentHash: 'hash-A', absolutePath: 'C:/fake/doc1-a.tiff', relativePath: 'doc1-a.tiff' }),
+      makeSealAsset({ id: 'asset-2', bidDocumentId: 'doc-1', contentHash: 'hash-B', absolutePath: 'C:/fake/doc1-b.tiff', relativePath: 'doc1-b.tiff' }),
+      makeSealAsset({ id: 'asset-3', bidDocumentId: 'doc-2', contentHash: 'hash-C', absolutePath: 'C:/fake/doc2-a.tiff', relativePath: 'doc2-a.tiff' }),
+    ],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake/media',
+  }, () => {});
+
+  assert.strictEqual(result.unrecognized.length, 3);
+  assert.deepStrictEqual(
+    result.unrecognized.map((item) => `${item.bidDocumentId}#${item.ordinal}`),
+    ['doc-1#1', 'doc-1#2', 'doc-2#1'],
+  );
+  assert.ok(
+    result.unrecognized.every((item) => item.kind === 'skipped'),
+    `三张应均为 skipped：${JSON.stringify(result.unrecognized)}`,
+  );
+});
