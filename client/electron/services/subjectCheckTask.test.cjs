@@ -2,11 +2,13 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const path = require('node:path');
 const {
   buildSubjectIdentificationMessages,
   normalizeSubjectCandidates,
   parseAliasesFromCandidates,
   runBidSubjectIdentificationTask,
+  runSubjectSealCheck,
 } = require('./subjectCheckTask.cjs');
 
 const SUBJECT_A = '北方长风智能科技有限公司';
@@ -33,6 +35,46 @@ function createIdentificationAiStub(captured, candidate = IDENTIFICATION_CANDIDA
       captured.messages = messages;
       return { candidates: [candidate] };
     },
+  };
+}
+
+function createSealAiStub({ responses = [], unreadable = [] } = {}) {
+  const calls = [];
+  const skipped = new Set(unreadable);
+  let index = 0;
+  return {
+    calls,
+    getConfig: () => ({ multimodal_enabled: true }),
+    inspectLocalImage: async (filePath) => (skipped.has(path.basename(filePath))
+      ? { readable: false, format: 'tiff', label: 'TIFF', reason: '图片格式不支持（TIFF）' }
+      : { readable: true, format: 'png', label: 'PNG' }),
+    collectJsonResponse: async (request) => {
+      calls.push(request);
+      const response = responses[Math.min(index, responses.length - 1)];
+      index += 1;
+      if (response instanceof Error) throw response;
+      return response;
+    },
+  };
+}
+
+function makeSealAsset(overrides = {}) {
+  return {
+    id: 'asset-1',
+    bidDocumentId: 'bid-1',
+    mediaName: 'media/image1.png',
+    absolutePath: 'C:/fake/seal.png',
+    // 注意：runSubjectSealCheck 会用 mediaRootDir + relativePath 重新解析绝对路径，
+    // 桩里的 inspectLocalImage 按解析后的 basename 判断可读性，因此覆盖 absolutePath 时
+    // 必须同步覆盖 relativePath。
+    relativePath: 'seal.png',
+    contentHash: 'hash-A',
+    mimeType: 'image/png',
+    assetKind: 'standalone',
+    sectionTitle: '第三章 投标函',
+    locationHint: '正文',
+    nearbyText: '投标人：（盖章）',
+    ...overrides,
   };
 }
 
@@ -340,4 +382,94 @@ test('识别范围外的候选会被丢弃', async () => {
     }),
     /未能从投标文件中识别出投标主体/,
   );
+});
+
+test('印章检查按去重张数上报两阶段进度文案', async () => {
+  const aiService = createSealAiStub({
+    responses: [
+      { images: [{ has_seal: true, seal_text: SUBJECT_B, image_type: 'document' }, { has_seal: false, image_type: 'unknown' }] },
+      { positions: [
+        { page_role: 'bidder', seal_role: 'bidder', detected_subject: SUBJECT_B, name_confidence: 0.95, role_confidence: 0.95 },
+        { page_role: 'unclear', seal_role: 'unclear', detected_subject: '', name_confidence: 0, role_confidence: 0 },
+      ] },
+    ],
+  });
+  const progress = [];
+  await runSubjectSealCheck(aiService, {
+    bidDocuments: BID_DOCUMENTS,
+    visualAssets: [
+      makeSealAsset({ id: 'asset-1', contentHash: 'hash-A' }),
+      makeSealAsset({ id: 'asset-2', contentHash: 'hash-A' }),
+      makeSealAsset({ id: 'asset-3', contentHash: 'hash-B', absolutePath: 'C:/fake/other.png' }),
+    ],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake/media',
+  }, (message) => progress.push(message));
+
+  const joined = progress.join(' | ');
+  assert.ok(progress.some((message) => message.includes('正在识别图片内容 2/2 张')), `分母应为去重后的 2：${joined}`);
+  assert.ok(progress.some((message) => message.includes('已发现印章')), joined);
+  assert.ok(progress.some((message) => message.includes('正在判断盖章身份')), joined);
+});
+
+test('全部图片被跳过时给出专门文案且状态为 partial', async () => {
+  const aiService = createSealAiStub({ unreadable: ['seal.tiff'], responses: [] });
+  const progress = [];
+  const logs = [];
+  const result = await runSubjectSealCheck(aiService, {
+    visualAssets: [makeSealAsset({ absolutePath: 'C:/fake/seal.tiff', relativePath: 'seal.tiff' })],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake/media',
+    logger: { write: (event, payload) => logs.push({ event, payload }) },
+  }, (message) => progress.push(message));
+
+  assert.ok(progress.some((message) => message.includes('没有可被识别的图片（1 张已跳过）')), progress.join(' | '));
+  assert.strictEqual(result.visionStatus, 'partial');
+  assert.strictEqual(result.visionStats.skippedAssets, 1);
+  assert.strictEqual(result.visionStats.inspectedAssets, 0);
+  assert.strictEqual(result.visionStats.failedAssets, 0);
+  assert.strictEqual(aiService.calls.length, 0, '全部跳过时不应发起请求');
+  assert.ok(logs.some((entry) => entry.event === 'rejection.subject.seal.asset.skipped'));
+  assert.ok(logs.some((entry) => entry.event === 'rejection.subject.seal.completed'));
+});
+
+test('未能识别清单记录文档内序号、格式与原因', async () => {
+  const aiService = createSealAiStub({
+    unreadable: ['skip.tiff'],
+    responses: [new Error('该图失败')],
+  });
+  const result = await runSubjectSealCheck(aiService, {
+    visualAssets: [
+      makeSealAsset({ id: 'asset-1', contentHash: 'hash-A', absolutePath: 'C:/fake/skip.tiff', relativePath: 'skip.tiff' }),
+      makeSealAsset({ id: 'asset-2', contentHash: 'hash-B', absolutePath: 'C:/fake/broken.png', relativePath: 'broken.png' }),
+    ],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake/media',
+  }, () => {});
+
+  assert.strictEqual(result.unrecognized.length, 2);
+  const skipped = result.unrecognized.find((item) => item.kind === 'skipped');
+  assert.strictEqual(skipped.ordinal, 1);
+  assert.strictEqual(skipped.label, 'TIFF');
+  assert.strictEqual(skipped.mediaName, 'media/image1.png');
+  assert.ok(skipped.reason.includes('TIFF'), skipped.reason);
+  const failed = result.unrecognized.find((item) => item.kind === 'failed');
+  assert.strictEqual(failed.ordinal, 2);
+  assert.ok(failed.reason.includes('该图失败'), failed.reason);
+  assert.strictEqual(result.visionStats.unrecognized.length, 2, 'visionStats 上也要带上清单');
+});
+
+test('未传 logger 时印章检查照常完成', async () => {
+  const aiService = createSealAiStub({ responses: [{ images: [{ has_seal: false, image_type: 'unknown' }] }] });
+  const result = await runSubjectSealCheck(aiService, {
+    visualAssets: [makeSealAsset()],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake/media',
+  }, () => {});
+  assert.strictEqual(result.visionStatus, 'success');
+  assert.strictEqual(result.visionStats.inspectedAssets, 1);
 });

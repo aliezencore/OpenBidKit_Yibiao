@@ -423,6 +423,23 @@ function createEmptyVisionStats() {
   };
 }
 
+// 「未能识别的图片」清单项：供 Excel 明细逐张展示。
+function createUnrecognizedEntry(asset, ordinal, { kind, reason, format, label }) {
+  return {
+    assetId: asset.id,
+    bidDocumentId: asset.bidDocumentId,
+    ordinal,
+    sectionTitle: asset.sectionTitle || '',
+    locationHint: asset.locationHint || '',
+    mediaName: asset.mediaName || '',
+    mimeType: asset.mimeType || '',
+    format: format || '',
+    label: label || '',
+    kind,
+    reason: String(reason || ''),
+  };
+}
+
 // 单资产分级（spec §10.2）：名称与角色置信度均 ≥0.85 才算明确印章不一致。
 function classifySealFinding(asset, providerAsset, { officialName, aliases }) {
   if (!providerAsset || providerAsset.status !== 'inspected' || !providerAsset.hasSeal) return null;
@@ -463,9 +480,11 @@ async function runSubjectSealCheck(aiService, {
   aliases = [],
   subjectSealCheck = true,
   mediaRootDir,
+  logger,
 }, onProgress) {
   const stats = createEmptyVisionStats();
   stats.totalAssets = visualAssets.length;
+  stats.unrecognized = [];
 
   if (!subjectSealCheck) {
     return { findings: [], visionStatus: 'disabled', visionStats: stats };
@@ -481,7 +500,7 @@ async function runSubjectSealCheck(aiService, {
     return { findings: [], visionStatus: 'success', visionStats: stats };
   }
 
-  onProgress(`正在检查 ${visualAssets.length} 张投标文件图片的印章主体。`);
+  const writeLog = typeof logger?.write === 'function' ? logger.write.bind(logger) : () => {};
   const providerAssets = visualAssets.map((asset) => ({
     assetId: asset.id,
     bidDocumentId: asset.bidDocumentId,
@@ -498,6 +517,11 @@ async function runSubjectSealCheck(aiService, {
   }));
   stats.candidateAssets = providerAssets.length;
 
+  writeLog('rejection.subject.seal.content.started', {
+    total_assets: visualAssets.length,
+    unique_assets: new Set(visualAssets.map((asset) => asset.contentHash)).size,
+  });
+
   let response;
   try {
     response = await provider.inspect({
@@ -505,8 +529,26 @@ async function runSubjectSealCheck(aiService, {
       officialName,
       aliases,
       assets: providerAssets,
+    }, {
+      onProgress: (event) => {
+        if (event.phase === 'content') {
+          if (event.total === 0) {
+            onProgress(`没有可被识别的图片（${event.skipped || 0} 张已跳过）。`);
+            return;
+          }
+          onProgress(`正在识别图片内容 ${event.processed}/${event.total} 张（已发现印章 ${event.sealCount} 张）…`);
+          return;
+        }
+        if (event.total === 0) return;
+        onProgress(`正在判断盖章身份 ${event.processed}/${event.total} 组…`);
+      },
+      onLog: (event) => {
+        const { type, ...payload } = event;
+        writeLog(`rejection.subject.seal.${type}`, payload);
+      },
     });
   } catch (error) {
+    writeLog('rejection.subject.seal.error', { name: error?.name || 'Error', message: error?.message || '' });
     return { findings: [], visionStatus: 'error', visionStats: stats, error: error.message };
   }
 
@@ -515,18 +557,36 @@ async function runSubjectSealCheck(aiService, {
   }
 
   const findings = [];
+  const unrecognized = [];
+  const ordinalByDocument = new Map();
   for (const asset of visualAssets) {
+    const ordinal = (ordinalByDocument.get(asset.bidDocumentId) || 0) + 1;
+    ordinalByDocument.set(asset.bidDocumentId, ordinal);
+
     const providerAsset = response.assets.find((item) => item.assetId === asset.id);
     if (!providerAsset) {
       stats.failedAssets += 1;
+      unrecognized.push(createUnrecognizedEntry(asset, ordinal, { kind: 'failed', reason: '未返回识别结果' }));
       continue;
     }
     if (providerAsset.status === 'skipped') {
       stats.skippedAssets += 1;
+      unrecognized.push(createUnrecognizedEntry(asset, ordinal, {
+        kind: 'skipped',
+        reason: providerAsset.skipReason,
+        format: providerAsset.format,
+        label: providerAsset.label,
+      }));
       continue;
     }
     if (providerAsset.status === 'failed') {
       stats.failedAssets += 1;
+      unrecognized.push(createUnrecognizedEntry(asset, ordinal, {
+        kind: 'failed',
+        reason: providerAsset.skipReason,
+        format: providerAsset.format,
+        label: providerAsset.label,
+      }));
       continue;
     }
     stats.inspectedAssets += 1;
@@ -538,10 +598,21 @@ async function runSubjectSealCheck(aiService, {
     }
   }
 
-  // 全部资产失败（含 Provider 整体 error）时为 error，部分失败为 partial（spec §13）。
+  // 全部失败（含 Provider 整体 error）时为 error；部分失败或「全跳过」为 partial（spec §13）。
   const allFailed = stats.failedAssets > 0 && stats.inspectedAssets + stats.skippedAssets === 0;
-  const visionStatus = response.providerStatus === 'error' || allFailed ? 'error' : stats.failedAssets > 0 ? 'partial' : 'success';
-  return { findings, visionStatus, visionStats: stats };
+  const noneInspected = stats.inspectedAssets === 0 && stats.skippedAssets > 0;
+  const visionStatus = response.providerStatus === 'error' || allFailed
+    ? 'error'
+    : (stats.failedAssets > 0 || noneInspected) ? 'partial' : 'success';
+
+  stats.unrecognized = unrecognized;
+  writeLog('rejection.subject.seal.completed', {
+    vision_status: visionStatus,
+    vision_stats: stats,
+    unrecognized_count: unrecognized.length,
+  });
+
+  return { findings, visionStatus, visionStats: stats, unrecognized };
 }
 
 async function runBidSubjectIdentificationTask({ aiService, checkpointTask, payload, previousState }) {

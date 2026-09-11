@@ -1757,6 +1757,7 @@ async function runRejectionCheckTask({ aiService, workspaceStore, updateTask, ch
             aliases: subjectProfile.aliases,
             subjectSealCheck: true,
             mediaRootDir: workspaceStore.getSubjectMediaRootDir(),
+            logger: developerLogger,
           }, onProgress);
         } catch (error) {
           sealResult = { findings: [], visionStatus: 'error', visionStats: undefined, error: error.message };
