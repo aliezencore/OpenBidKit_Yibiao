@@ -125,6 +125,9 @@ function createOffscreenImageTranscoder({ idleDisposeMs = DEFAULT_IDLE_DISPOSE_M
   function convertToJpegDataUrl(filePath, options = {}) {
     // 离屏窗口是单线程的，串行化避免并发争用同一个窗口。
     const task = queue.catch(() => undefined).then(async () => {
+      // 任务真正开始执行时才清空空闲定时器：若在入队时清，排队等待期间会失去保护；
+      // 若只在 finally 里重设，则在途转码会被前序任务留下的定时器中途销毁。
+      clearIdleTimer();
       try {
         return await convert(filePath, options);
       } finally {
