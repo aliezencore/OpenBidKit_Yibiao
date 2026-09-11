@@ -992,6 +992,9 @@ app.whenReady().then(async () => {
     caught = error;
   }
 
+  // writeAiLog 走的是异步入队（enqueueJsonReplace），不等它落盘就读取会偶现空目录、误判为失败。
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
   const logDir = path.join(userDataDir, 'logs', 'ai');
   const logs = fs.existsSync(logDir) ? fs.readdirSync(logDir) : [];
   const prepareLogs = logs.filter((name) => name.includes('主体印章图片识别'));
