@@ -504,7 +504,26 @@ function createOffscreenImageTranscoder({ idleDisposeMs = 30000 } = {}) {
 **(c) 「未能识别的图片」清单的数据流**
 
 `subjectVisionProvider` 的每个资产结果已带 `status`。`runSubjectSealCheck` 在遍历
-`visualAssets` 时收集 `status` 为 `skipped` / `failed` 的项：
+`visualAssets` 时收集下列两类项 —— **注意不要收录「被主动判定为非盖章区域」的跳过**：
+
+| 来源 | 是否进清单 | 判据 |
+|---|---|---|
+| 预检发现格式不受支持而跳过 | ✅ 进 | `status === 'skipped'` 且 `skipKind === 'unsupported-format'` |
+| 识别过程失败 | ✅ 进 | `status === 'failed'` |
+| 内容类型判定为非盖章区域（`product-screenshot` / `diagram` / `photo`） | ❌ **不进** | `skipKind === 'not-seal-area'` |
+
+**为什么排除第三类**：那张图**已经被成功识别**，只是判定它不属于盖章区域（例如产品截图、拓扑图）。
+把它列进「**未能识别**的图片」既与标题语义矛盾，又会让区块被大量截图/照片撑长，掩盖真正需要处理的图。
+
+因此 `subjectVisionProvider` 的结果资产需要新增一个判别字段 `skipKind`：
+
+```js
+{ assetId, status: 'inspected' | 'skipped' | 'failed',
+  skipKind?: 'unsupported-format' | 'not-seal-area',   // 仅 status === 'skipped' 时存在
+  skipReason?, format?, label?, hasSeal, ... }
+```
+
+清单项形状：
 
 ```js
 unrecognized: [{
@@ -520,9 +539,11 @@ unrecognized: [{
 - 挂到 `subjectCheckResult.stats.visionStats.unrecognized`。
 - **不新增数据库列**（`stats_json` 本就是 JSON blob，天然可扩）；
   **不动前端**（前端只读 `totalAssets` 等数字字段，会忽略未知键）。
-- `listVisualAssets` 已返回 `mediaName`/`sectionTitle`/`locationHint`/`mimeType`，
+- `locationHint` 已返回 `mediaName`/`sectionTitle`/`locationHint`/`mimeType`，
   但**不返回 `sortOrder`**，因此 `ordinal` 由 `runSubjectSealCheck` 按 `bidDocumentId`
   分组计数得出——这正是「第 N 张」的语义。
+- 同一 `contentHash` 的重复出现位置共享跳过/失败结果时，`format`/`label` 也要**一并传播**
+  （否则重复出现的失败图在 Excel 的「格式」列会是空的）。
 
 **(d) Excel「投标主体」表追加区块**
 
