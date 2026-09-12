@@ -523,3 +523,22 @@ test('XML 残渣上下文不会进入提示词', async () => {
     `提示词不应含 XML 残渣：${promptText}`,
   );
 });
+
+// 源文档里真实存在的乱入文本：内容阶段识别正常，但模型会因「上下文仅显示乱码」
+// 把角色判成低置信度 third-party。中文标书的上下文不含 CJK 就按没有上下文处理。
+test('非中文的乱码上下文不会进入提示词', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A', sectionTitle: undefined, nearbyText: 'x`' })],
+  });
+
+  const promptText = aiService.calls[0].messages[0].content[0].text;
+  assert.strictEqual(promptText.includes('x`'), false, `提示词不应含乱码上下文：${promptText}`);
+});

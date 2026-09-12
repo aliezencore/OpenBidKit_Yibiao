@@ -324,6 +324,36 @@ test('classifySealFinding 合法第三方印章不报警', () => {
   assert.strictEqual(finding, null);
 });
 
+// 线上实例：价格包封上的外部印章被模型以 0.6 置信度「推测」为第三方，旧实现无条件丢弃，
+// 「投标方区域盖了别家章」这条真不一致被静默吞掉。低置信度 third-party 必须降级进需人工复核。
+test('classifySealFinding 低置信度 third-party 不吞掉不一致，降级为需人工复核', () => {
+  const sealSide = classifySealFinding(ASSET_BASE, {
+    status: 'inspected',
+    hasSeal: true,
+    sealText: SUBJECT_B,
+    detectedSubject: SUBJECT_B,
+    pageRole: 'unclear',
+    sealRole: 'third-party',
+    nameConfidence: 0.95,
+    roleConfidence: 0.6,
+  }, SEAL_CONTEXT);
+  assert.strictEqual(sealSide.level, 'needs-review');
+  assert.strictEqual(sealSide.source, 'seal');
+  assert.strictEqual(sealSide.detectedSubject, SUBJECT_B);
+
+  const pageSide = classifySealFinding(ASSET_BASE, {
+    status: 'inspected',
+    hasSeal: true,
+    sealText: SUBJECT_B,
+    detectedSubject: SUBJECT_B,
+    pageRole: 'third-party',
+    sealRole: 'bidder',
+    nameConfidence: 0.95,
+    roleConfidence: 0.5,
+  }, SEAL_CONTEXT);
+  assert.strictEqual(pageSide.level, 'needs-review');
+});
+
 test('classifySealFinding 投标方自身印章不报警，模糊印章降级为需人工复核', () => {
   assert.strictEqual(classifySealFinding(ASSET_BASE, {
     status: 'inspected', hasSeal: true, sealText: SUBJECT_A, detectedSubject: SUBJECT_A,

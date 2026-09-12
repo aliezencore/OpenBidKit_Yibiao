@@ -77,11 +77,16 @@ function normalizeRoleItem(item) {
 // 实测这类碎片会让模型的退化输出率显著上升（干净上下文 0/3 失败，污染上下文 1/3 失败），
 // 所以在拼提示词前再兜一层：命中特征就当作没有上下文。
 const XML_RESIDUE_PATTERN = /w:rsid|w:val|posOffset|effectExtent|paraId|textId|<wp:|<\/?w:/i;
+// 中文标书里不含任何 CJK 的「上下文」只能是乱码或编号残渣（源文档里真实存在 `x\`` 这类乱入文本，
+// 线上实例中模型明确以「上下文仅显示乱码」为由把角色判成低置信度 third-party），同样按没有上下文处理。
+const CJK_PATTERN = /[\u4e00-\u9fa5]/;
 
 function sanitizeAssetContext(text) {
   const value = String(text || '').trim();
   if (!value) return '';
-  return XML_RESIDUE_PATTERN.test(value) ? '' : value;
+  if (XML_RESIDUE_PATTERN.test(value)) return '';
+  if (!CJK_PATTERN.test(value)) return '';
+  return value;
 }
 
 // 明确不属于盖章区域的图片类型：它们已识别成功，只是不该做盖章判断。

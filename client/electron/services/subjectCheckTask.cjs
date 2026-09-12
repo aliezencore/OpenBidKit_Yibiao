@@ -440,17 +440,27 @@ function createUnrecognizedEntry(asset, ordinal, { kind, reason, format, label }
   };
 }
 
+// 明确不一致的置信度门槛（spec §10.1 / §10.2-5）。
+const CONFIRMED_CONFIDENCE = 0.85;
+
 // 单资产分级（spec §10.2）：名称与角色置信度均 ≥0.85 才算明确印章不一致。
 function classifySealFinding(asset, providerAsset, { officialName, aliases }) {
   if (!providerAsset || providerAsset.status !== 'inspected' || !providerAsset.hasSeal) return null;
   const detected = String(providerAsset.detectedSubject || providerAsset.sealText || '').trim();
   if (!detected) return null;
   if (matchesAllowedSubject(detected, officialName, aliases)) return null; // 投标方自身印章
-  if (providerAsset.sealRole === 'third-party' || providerAsset.pageRole === 'third-party') return null; // 合法第三方印章
+  // 合法第三方印章不报警（spec §10.2-3）。但 third-party 本身是模型的判断：
+  // 线上实例里模型以 0.6 置信度「推测」价格包封上的外部印章为第三方（它看到的上下文还是乱码），
+  // 把「投标方区域盖了别家章」这条真不一致静默吞掉了。只有角色置信度达到明确门槛才允许抑制，
+  // 低置信度猜测按 spec §10.2「任何一项不满足只能进入需人工复核或不输出」降级进需人工复核。
+  const roleConfidence = Number(providerAsset.roleConfidence || 0);
+  if ((providerAsset.sealRole === 'third-party' || providerAsset.pageRole === 'third-party')
+    && roleConfidence >= CONFIRMED_CONFIDENCE) return null;
   if (providerAsset.pageRole === 'unclear' && providerAsset.sealRole === 'unclear') return null; // 角色不清且无投标方要求证据
   const nameConfidence = Number(providerAsset.nameConfidence || 0);
-  const roleConfidence = Number(providerAsset.roleConfidence || 0);
-  const level = nameConfidence >= 0.85 && roleConfidence >= 0.85 ? 'confirmed-mismatch' : 'needs-review';
+  const level = nameConfidence >= CONFIRMED_CONFIDENCE && roleConfidence >= CONFIRMED_CONFIDENCE
+    ? 'confirmed-mismatch'
+    : 'needs-review';
   const isScan = asset.assetKind === 'page-scan';
   return {
     id: `subject-seal-${asset.id}`,
