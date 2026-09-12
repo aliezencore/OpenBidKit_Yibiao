@@ -58,6 +58,15 @@ function createSealAiStub({ responses = [], unreadable = [] } = {}) {
   };
 }
 
+// 角色阶段的桩响应：条目数必须与请求里的位置数一致，否则会被 provider 的形状校验判为失败。
+function sealPositionsResponse(count) {
+  return {
+    positions: Array.from({ length: count }, () => ({
+      page_role: 'unclear', seal_role: 'unclear', detected_subject: '', name_confidence: 0, role_confidence: 0,
+    })),
+  };
+}
+
 function makeSealAsset(overrides = {}) {
   return {
     id: 'asset-1',
@@ -463,7 +472,12 @@ test('未能识别清单记录文档内序号、格式与原因', async () => {
 });
 
 test('未传 logger 时印章检查照常完成', async () => {
-  const aiService = createSealAiStub({ responses: [{ images: [{ has_seal: false, image_type: 'unknown' }] }] });
+  const aiService = createSealAiStub({
+    responses: [
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      sealPositionsResponse(1),
+    ],
+  });
   const result = await runSubjectSealCheck(aiService, {
     visualAssets: [makeSealAsset()],
     officialName: SUBJECT_A,

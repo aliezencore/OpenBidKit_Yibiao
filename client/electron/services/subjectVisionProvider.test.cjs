@@ -176,6 +176,15 @@ function createFakeAiServiceWithPrecheck({ multimodalEnabled = true, responses =
   };
 }
 
+// 角色阶段的桩响应：条目数必须与请求里的位置数一致，否则会被形状校验判为失败。
+function positionsResponse(count) {
+  return {
+    positions: Array.from({ length: count }, () => ({
+      page_role: 'unclear', seal_role: 'unclear', detected_subject: '', name_confidence: 0, role_confidence: 0,
+    })),
+  };
+}
+
 test('不可读的格式被跳过且不进批次', async () => {
   const aiService = createFakeAiServiceWithPrecheck({
     responses: [{ images: [{ has_seal: false, image_type: 'unknown' }] }],
@@ -207,7 +216,10 @@ test('不可读的格式被跳过且不进批次', async () => {
 
 test('可转码格式照常入批，不被跳过', async () => {
   const aiService = createFakeAiServiceWithPrecheck({
-    responses: [{ images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] }],
+    responses: [
+      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] },
+      positionsResponse(1),
+    ],
   });
   const provider = createOnlineVlmProvider({ aiService });
   const result = await provider.inspect({
@@ -243,8 +255,9 @@ test('批次失败降级为逐张，只有坏图失败', async () => {
 test('进度按去重后张数计，重复内容只算一次', async () => {
   const aiService = createFakeAiServiceWithPrecheck({
     responses: [
-      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] },
-      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      // 2 条去重图片 → 批次响应必须给 2 条，否则会被形状校验判为失败。
+      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }, { has_seal: false, image_type: 'unknown' }] },
+      positionsResponse(5),
     ],
   });
   const provider = createOnlineVlmProvider({ aiService });
@@ -403,4 +416,110 @@ test('同 contentHash 的多个出现位置共享失败结果时一并传播 for
   assert.strictEqual(a1.format || '', 'png');
   assert.strictEqual(a2.format || '', 'png', '失败结果应一并传播 format');
   assert.strictEqual(a2.label || '', a1.label || '', '失败结果应一并传播 label');
+});
+
+// 线上实例：模型（Qwen3.6 思考型）把整批回答退化成 `{}`，旧实现照单全收 → 每张图都被
+// 判成「无印章」→ 报「检查成功、印章 0 张」。以下用例锁住这条路径必须走逐张重试。
+test('模型返回空对象时触发逐张重试，不再静默判为无印章', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      {},
+      { images: [{ has_seal: true, seal_text: '江西瑞智信息技术有限公司', image_type: 'document' }] },
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      positionsResponse(2),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const logs = [];
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-B' }),
+    ],
+  }, { onLog: (event) => logs.push(event) });
+
+  assert.strictEqual(aiService.calls.length, 4, '应为 1 次整批（退化）+ 2 次逐张 + 1 次角色判断');
+  assert.strictEqual(result.assets[0].status, 'inspected');
+  assert.strictEqual(result.assets[0].hasSeal, true, '退化响应不应让这张图变成「无印章」');
+  assert.ok(
+    logs.some((event) => event.type === 'batch.failed' && event.code === 'VISION_RESPONSE_SHAPE_MISMATCH'),
+    `应记录形状不匹配：${JSON.stringify(logs)}`,
+  );
+});
+
+test('批次条目数少于图片数时同样触发逐张重试', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] },
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      positionsResponse(2),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [
+      makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' }),
+      makeAsset({ assetId: 'asset-2', contentHash: 'hash-B' }),
+    ],
+  });
+
+  assert.strictEqual(aiService.calls.length, 4, '应为 1 次整批（缺条目）+ 2 次逐张 + 1 次角色判断');
+  assert.strictEqual(result.assets[0].hasSeal, true);
+});
+
+test('角色阶段条目数不匹配时该位置判为失败', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '甲公司', image_type: 'document' }] },
+      { positions: [] },
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+
+  const asset = result.assets.find((item) => item.assetId === 'asset-1');
+  assert.strictEqual(asset.status, 'failed', `角色判断没结论时应判失败，实际 ${asset.status}`);
+  assert.ok(String(asset.skipReason).includes('盖章角色判断'), asset.skipReason);
+});
+
+test('非盖章区域的图不再触发角色判断请求', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [{ images: [{ has_seal: false, image_type: 'photo' }] }],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+
+  assert.strictEqual(aiService.calls.length, 1, '照片已判定为非盖章区域，不该再发一次角色判断');
+  assert.strictEqual(result.assets[0].status, 'skipped');
+});
+
+test('XML 残渣上下文不会进入提示词', async () => {
+  const junk = '7777777" w:rsidR="00FB2113" w:rsidRDefault="00FB2113"/> 1143000 132715 <wp:effectExtent l="';
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: false, image_type: 'unknown' }] },
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A', sectionTitle: undefined, nearbyText: junk })],
+  });
+
+  const promptText = aiService.calls[0].messages[0].content[0].text;
+  assert.strictEqual(
+    /w:rsid|posOffset|effectExtent|<wp:|<\/?w:/.test(promptText),
+    false,
+    `提示词不应含 XML 残渣：${promptText}`,
+  );
 });

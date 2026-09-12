@@ -19,7 +19,8 @@ function hashText(content) {
 function buildContentPrompt(batch) {
   const descriptions = batch.map((entry, index) => ({
     image_index: index + 1,
-    context: entry.asset.sectionTitle || entry.asset.nearbyText || '',
+    // 优先取干净的那个：章节标题与附近文本任一可能是历史遗留的 XML 残渣。
+    context: sanitizeAssetContext(entry.asset.sectionTitle) || sanitizeAssetContext(entry.asset.nearbyText),
   }));
   return `【印章与内容识别】
 请逐张识别图片：是否包含印章/公章、印章上的机构名称文字（尽量完整转写）、图片内容类型（document=公文/函件/证书、product-screenshot=产品截图、diagram=拓扑/图表、photo=照片、unknown）。
@@ -34,8 +35,8 @@ function buildRolePrompt({ officialName, aliases, positions }) {
     position: index + 1,
     seal_text: entry.content.sealText || '',
     image_type: entry.content.imageType || 'unknown',
-    context: entry.asset.nearbyText || '',
-    section: entry.asset.sectionTitle || '',
+    context: sanitizeAssetContext(entry.asset.nearbyText),
+    section: sanitizeAssetContext(entry.asset.sectionTitle),
   }));
   return `【盖章方角色判断】
 正式投标主体：${officialName}
@@ -70,6 +71,42 @@ function normalizeRoleItem(item) {
     roleConfidence: Math.max(0, Math.min(1, Number(roleConfidence || 0))),
     reason: String(source.reason || ''),
   };
+}
+
+// 历史资产行的上下文由「按字符偏移切 XML」的旧实现写入时会是 XML 残渣。
+// 实测这类碎片会让模型的退化输出率显著上升（干净上下文 0/3 失败，污染上下文 1/3 失败），
+// 所以在拼提示词前再兜一层：命中特征就当作没有上下文。
+const XML_RESIDUE_PATTERN = /w:rsid|w:val|posOffset|effectExtent|paraId|textId|<wp:|<\/?w:/i;
+
+function sanitizeAssetContext(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  return XML_RESIDUE_PATTERN.test(value) ? '' : value;
+}
+
+// 明确不属于盖章区域的图片类型：它们已识别成功，只是不该做盖章判断。
+// 既不该进角色判断（省一次 VLM 调用），也不该被判成 failed。
+const NON_SEAL_IMAGE_TYPES = ['product-screenshot', 'diagram', 'photo'];
+
+function isSealAreaContent(content) {
+  return !NON_SEAL_IMAGE_TYPES.includes(content?.imageType);
+}
+
+function safeResponsePreview(payload) {
+  try {
+    return String(JSON.stringify(payload)).slice(0, 500);
+  } catch {
+    return '';
+  }
+}
+
+// 思考型模型（本项目实配 Qwen3.6）偶发把整个回答退化成 `{}` 或少于图片数的条目。
+// 若照单全收，`images[index] || {}` 会把每张图都判成「无印章」——假阴性伪装成成功。
+function createShapeMismatchError(label, expected, actual, payload) {
+  const error = new Error(`${label}结果与图片数量不匹配（期望 ${expected} 条，实际 ${actual} 条）`);
+  error.code = 'VISION_RESPONSE_SHAPE_MISMATCH';
+  error.rawResponse = safeResponsePreview(payload);
+  return error;
 }
 
 function createOnlineVlmProvider({ aiService }) {
@@ -194,7 +231,10 @@ function createOnlineVlmProvider({ aiService }) {
         }],
       }, '主体印章图片识别', '印章图片识别结果格式无效');
 
-      const images = Array.isArray(payload?.images) ? payload.images : [];
+      const images = Array.isArray(payload?.images) ? payload.images : null;
+      if (!images || images.length !== entries.length) {
+        throw createShapeMismatchError('印章识别', entries.length, images ? images.length : 0, payload);
+      }
       entries.forEach((entry, index) => {
         const image = images[index] || {};
         const hasSeal = image.has_seal !== undefined ? image.has_seal : image.hasSeal;
@@ -215,6 +255,7 @@ function createOnlineVlmProvider({ aiService }) {
         code: error?.code || '',
         providerMessage: error?.message || String(error || ''),
         errorName: error?.name || 'Error',
+        responsePreview: error?.rawResponse || '',
       };
     }
 
@@ -270,7 +311,7 @@ function createOnlineVlmProvider({ aiService }) {
 
     // 阶段二：角色判断（纯文本请求，按 contentHash + nearbyContextHash 缓存）。
     const roleCache = new Map();
-    const pendingRoles = [...byAssetId.values()].filter((entry) => entry.content && !entry.error);
+    const pendingRoles = [...byAssetId.values()].filter((entry) => entry.content && !entry.error && isSealAreaContent(entry.content));
     const roleTotal = pendingRoles.length;
     let roleProcessed = 0;
     const emitRoleProgress = () => emitProgress({ phase: 'role', processed: roleProcessed, total: roleTotal });
@@ -287,7 +328,10 @@ function createOnlineVlmProvider({ aiService }) {
       const payload = await runJson({
         messages: [{ role: 'user', content: buildRolePrompt({ officialName: request.officialName, aliases: request.aliases || [], positions }) }],
       }, '主体盖章角色判断', '盖章角色判断结果格式无效');
-      const results = Array.isArray(payload?.positions) ? payload.positions : [];
+      const results = Array.isArray(payload?.positions) ? payload.positions : null;
+      if (!results || results.length !== entries.length) {
+        throw createShapeMismatchError('盖章角色判断', entries.length, results ? results.length : 0, payload);
+      }
       const normalized = entries.map((_entry, index) => normalizeRoleItem(results[index]));
       roleCache.set(cacheKey, normalized);
       entries.forEach((entry, index) => { entry.role = normalized[index]; });
@@ -346,7 +390,7 @@ function createOnlineVlmProvider({ aiService }) {
         };
       }
       const content = contentCache.get(entry.asset.contentHash) || { hasSeal: false, sealText: '', imageType: 'unknown' };
-      if (['product-screenshot', 'diagram', 'photo'].includes(content.imageType)) {
+      if (!isSealAreaContent(content)) {
         return { assetId: entry.asset.assetId, status: 'skipped', skipKind: 'not-seal-area', skipReason: `识别为${content.imageType}，非盖章区域`, hasSeal: false };
       }
       if (!content.hasSeal) {

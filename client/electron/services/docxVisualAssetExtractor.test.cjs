@@ -192,3 +192,28 @@ test('章节回溯不受 4000 字符距离限制', async () => {
   const inline = occurrences.find((item) => item.placement === 'inline');
   assert.strictEqual(inline.sectionTitle, '第七章 售后服务');
 });
+
+// 真实标书里 <wp:posOffset>1143000</wp:posOffset> 的**数字本身就是元素文本**，
+// 整段剥标签会留下坐标残渣 —— 既污染喂给模型的上下文，又会被章节编号规则误判成章节。
+test('坐标数字不会进入附近文本（只取 <w:t> 可见文本）', async () => {
+  const zip = withRewrittenDocumentXml(buildMinimalDocx(), (xml) => xml.replace(
+    '<wp:inline distT="0" distB="0">',
+    '<wp:inline distT="0" distB="0"><wp:positionH relativeFrom="column"><wp:posOffset>1143000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>132715</wp:posOffset></wp:positionV>',
+  ));
+  const { occurrences } = await extractDocxVisualAssets(writeFixture(zip, 'posoffset.docx'));
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.strictEqual(/\d{4,}/.test(inline.nearbyText), false, `附近文本不应含坐标数字：${inline.nearbyText}`);
+  assert.strictEqual(inline.nearbyText.includes('1143000'), false, inline.nearbyText);
+  assert.ok(inline.nearbyText.includes('承诺') || inline.nearbyText.includes('投标函'), inline.nearbyText);
+});
+
+test('纯数字段不会被当成章节标题', async () => {
+  const zip = withRewrittenDocumentXml(buildMinimalDocx(), (xml) => xml.replace(
+    '<w:p><w:r><w:t>第一章 投标函</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>1143000 132715 x</w:t></w:r></w:p>',
+  ));
+  const { occurrences } = await extractDocxVisualAssets(writeFixture(zip, 'numeric-section.docx'));
+  const inline = occurrences.find((item) => item.placement === 'inline');
+  assert.notStrictEqual(inline.sectionTitle, '1143000 132715 x');
+  assert.strictEqual(inline.sectionTitle, undefined, `无中文的段落不该当章节：${inline.sectionTitle}`);
+});

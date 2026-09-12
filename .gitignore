@@ -25,6 +25,9 @@ client/release/
 # 智能体命令工具下载临时目录
 client/.tmp-agent-tools-download/
 
+# 印章 VLM 探针的本地上下文数据（含真实标书片段，不入库）
+client/.probe-contexts.json
+
 # Open XML 助手构建产物与自包含发布包
 openxmlhelper/**/bin/
 openxmlhelper/**/obj/

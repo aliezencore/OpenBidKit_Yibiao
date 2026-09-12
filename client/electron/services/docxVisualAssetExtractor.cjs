@@ -37,12 +37,24 @@ function parseRelationships(xml) {
   return map;
 }
 
-function stripXmlToText(xml) {
-  return String(xml || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+function unescapeXmlEntities(text) {
+  return String(text || '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+}
+
+// 只拼接 <w:t>（可见文本）的内容。
+// 不能整段剥标签：<wp:posOffset>1143000</wp:posOffset> 这类坐标的数字**本身就是元素文本**，
+// 剥完标签会留下「1143000 132715」这种残渣，既污染喂给模型的上下文，又会被章节编号规则误判成章节。
+function extractRunText(block) {
+  const source = String(block || '');
+  const runs = [];
+  const runRe = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
+  let match = runRe.exec(source);
+  while (match) {
+    runs.push(unescapeXmlEntities(match[1]));
+    match = runRe.exec(source);
+  }
+  return runs.join('').replace(/\s+/g, ' ').trim();
 }
 
 const MAX_SECTION_TITLE_LENGTH = 40;
@@ -57,6 +69,8 @@ const CHAPTER_TEXT_PATTERNS = [
   /^\d+(\.\d+)*[\s、.]/,
 ];
 const HEADING_STYLE_PATTERN = /^(heading\s*[1-9]|标题\s*[1-9一二三四五六七八九十])$/i;
+// 章节候选必须含中文，否则纯数字/坐标残渣会命中上面的编号规则。
+const CJK_PATTERN = /[\u4e00-\u9fa5]/;
 
 // 一次性把 XML 切成段落数组并预计算特征，避免每张图片都重扫全文。
 function buildParagraphIndex(xml) {
@@ -69,7 +83,7 @@ function buildParagraphIndex(xml) {
     const block = match[0];
     const styleMatch = /<w:pStyle\b[^>]*w:val="([^"]+)"/.exec(block);
     paragraphs.push({
-      text: stripXmlToText(block),
+      text: extractRunText(block),
       styleVal: styleMatch ? styleMatch[1] : '',
       bold: /<w:b\b[^>]*\/?>/.test(block),
     });
@@ -90,6 +104,7 @@ function isHeadingParagraph(paragraph) {
   if (!paragraph || !paragraph.text) return false;
   if (paragraph.styleVal && HEADING_STYLE_PATTERN.test(String(paragraph.styleVal).trim())) return true;
   if (paragraph.text.length > MAX_SECTION_TITLE_LENGTH) return false;
+  if (!CJK_PATTERN.test(paragraph.text)) return false;
   return CHAPTER_TEXT_PATTERNS.some((pattern) => pattern.test(paragraph.text));
 }
 
@@ -102,7 +117,7 @@ function extractSectionTitle(paragraphs, paragraphPosition) {
   for (let index = paragraphPosition - 1; index >= 0; index -= 1) {
     const paragraph = paragraphs[index];
     if (!paragraph?.text || paragraph.text.length > MAX_SECTION_TITLE_LENGTH) continue;
-    if (paragraph.bold) return paragraph.text;
+    if (paragraph.bold && CJK_PATTERN.test(paragraph.text)) return paragraph.text;
   }
   return undefined;
 }
