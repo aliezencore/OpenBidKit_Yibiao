@@ -568,3 +568,58 @@ test('未识别清单只收格式不支持的跳过，内容类型跳过仍计�
   assert.ok(result.unrecognized[0].reason.includes('TIFF'), result.unrecognized[0].reason);
   assert.strictEqual(result.visionStats.skippedAssets, 2, '两种跳过都应计入 skippedAssets');
 });
+
+// 线上实例：章上实际刻的是主体全名，但单次 OCR 漏字读成近名（差一两个字），
+// 相似名称必须人工确认，不得自动判成明确不一致（spec §7.4 的对称应用）。
+test('classifySealFinding 近名转写降级为需人工复核', () => {
+  const finding = classifySealFinding(ASSET_BASE, {
+    status: 'inspected',
+    hasSeal: true,
+    sealText: '北方长风智能有限公司',
+    detectedSubject: '北方长风智能有限公司',
+    pageRole: 'bidder',
+    sealRole: 'bidder',
+    nameConfidence: 0.95,
+    roleConfidence: 0.95,
+  }, SEAL_CONTEXT);
+  assert.strictEqual(finding.level, 'needs-review', '近名不得进 confirmed-mismatch');
+
+  const withSuffixNoise = classifySealFinding(ASSET_BASE, {
+    status: 'inspected',
+    hasSeal: true,
+    sealText: `${SUBJECT_A} 3601081210231`,
+    detectedSubject: `${SUBJECT_A} 3601081210231`,
+    pageRole: 'bidder',
+    sealRole: 'bidder',
+    nameConfidence: 0.95,
+    roleConfidence: 0.95,
+  }, SEAL_CONTEXT);
+  assert.strictEqual(withSuffixNoise.level, 'needs-review', '夹带印鉴编号噪声同样降级');
+});
+
+test('近名印章触发二次确认后按多数票消除假不一致', async () => {
+  const aiService = createSealAiStub({
+    responses: [
+      // 首次识别：漏「科技」的近名转写
+      { images: [{ has_seal: true, seal_text: '北方长风智能有限公司', image_type: 'document' }] },
+      // 二次确认第 1、2 轮：读出完整主体名
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技有限公司', image_type: 'document' }] },
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技有限公司', image_type: 'document' }] },
+      sealPositionsResponse(1),
+    ],
+  });
+  const progress = [];
+  const result = await runSubjectSealCheck(aiService, {
+    visualAssets: [makeSealAsset()],
+    officialName: SUBJECT_A,
+    aliases: [],
+    mediaRootDir: 'C:/fake',
+  }, (message) => progress.push(message));
+
+  assert.strictEqual(aiService.calls.length, 4, '应为 1 次识别 + 2 次确认 + 1 次角色判断');
+  assert.ok(progress.some((message) => message.includes('复核')), progress.join(' | '));
+  assert.strictEqual(result.visionStats.inspectedAssets, 1);
+  assert.strictEqual(result.visionStats.sealAssets, 1);
+  assert.strictEqual(result.findings.length, 0, '确认后的完整主体名应与正式主体匹配，不产生结果');
+  assert.strictEqual(result.visionStatus, 'success');
+});

@@ -542,3 +542,96 @@ test('非中文的乱码上下文不会进入提示词', async () => {
   const promptText = aiService.calls[0].messages[0].content[0].text;
   assert.strictEqual(promptText.includes('x`'), false, `提示词不应含乱码上下文：${promptText}`);
 });
+// 边缘样本二次确认：章文与主体仅差一两个字/截断/夹编号时，单次 OCR 漏字会把投标方
+// 自己的章误报成近名别家（线上实例：「江西博微技术有限公司」vs「江西博微新技术有限公司」）。
+// 对这类图重发单张请求做多数投票定稿章文。
+test('近名转写触发二次确认，多数票定稿为完整主体名', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      // 首次识别：漏「科技」的近名转写
+      { images: [{ has_seal: true, seal_text: '北方长风智能有限公司', image_type: 'document' }] },
+      // 二次确认第 1、2 轮：读出完整主体名
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技有限公司', image_type: 'document' }] },
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技有限公司', image_type: 'document' }] },
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const logs = [];
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  }, { onLog: (event) => logs.push(event) });
+
+  assert.strictEqual(aiService.calls.length, 4, '应为 1 次识别 + 2 次确认 + 1 次角色判断');
+  assert.strictEqual(result.assets[0].sealText, '北方长风智能科技有限公司');
+  assert.ok(logs.some((event) => event.type === 'confirm.completed'), JSON.stringify(logs));
+});
+
+test('章文与主体明显不同时不触发二次确认', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '南屿云图数据服务有限责任公司', image_type: 'document' }] },
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+
+  assert.strictEqual(aiService.calls.length, 2, '真不一致的章不需要复核：1 次识别 + 1 次角色判断');
+});
+
+test('精确命中主体名的转写不触发二次确认', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技有限公司', image_type: 'document' }] },
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+
+  assert.strictEqual(aiService.calls.length, 2);
+});
+
+test('确认请求失败时保留原读，不再继续投票', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '北方长风智能有限公司', image_type: 'document' }] },
+      new Error('网络超时'),
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+
+  assert.strictEqual(aiService.calls.length, 3, '确认失败后不再发第 2 轮');
+  assert.strictEqual(result.assets[0].sealText, '北方长风智能有限公司');
+});
+
+test('三方平票时取信息最完整的转写', async () => {
+  const aiService = createFakeAiServiceWithPrecheck({
+    responses: [
+      { images: [{ has_seal: true, seal_text: '北方长风智能有限公司', image_type: 'document' }] },
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技有限公司', image_type: 'document' }] },
+      { images: [{ has_seal: true, seal_text: '北方长风智能科技', image_type: 'document' }] },
+      positionsResponse(1),
+    ],
+  });
+  const provider = createOnlineVlmProvider({ aiService });
+  const result = await provider.inspect({
+    ...REQUEST_BASE,
+    assets: [makeAsset({ assetId: 'asset-1', contentHash: 'hash-A' })],
+  });
+
+  assert.strictEqual(result.assets[0].sealText, '北方长风智能科技有限公司');
+});

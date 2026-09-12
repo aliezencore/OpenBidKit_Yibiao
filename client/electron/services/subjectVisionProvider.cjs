@@ -2,9 +2,12 @@
 
 const crypto = require('node:crypto');
 const { logAiFailure } = require('../utils/aiLog.cjs');
+const { matchesAllowedSubject, isNearMatchSubjectName, normalizeSubjectName } = require('./subjectNameUtils.cjs');
 
 const STANDALONE_BATCH_SIZE = 4;
 const ROLE_BATCH_SIZE = 8;
+// 边缘样本二次确认的额外请求次数：连同首次识别共 3 票多数表决。
+const SEAL_TEXT_CONFIRM_ROUNDS = 2;
 
 function chunkItems(items, batchSize) {
   const result = [];
@@ -112,6 +115,28 @@ function createShapeMismatchError(label, expected, actual, payload) {
   error.code = 'VISION_RESPONSE_SHAPE_MISMATCH';
   error.rawResponse = safeResponsePreview(payload);
   return error;
+}
+
+// 印章转写多数投票：按「归一化 + 去数字噪声」的规范形分组（转写尾部常带印鉴编号），
+// 票数最多者当选；平票取组内最长的原始转写（信息更完整）。空读数不参与分组。
+function pickMajoritySealText(readings) {
+  const groups = new Map();
+  for (const text of readings) {
+    const value = String(text || '').trim();
+    if (!value) continue;
+    const key = normalizeSubjectName(value).replace(/\d+/g, '');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(value);
+  }
+  let bestGroup = null;
+  for (const group of groups.values()) {
+    if (!bestGroup
+      || group.length > bestGroup.length
+      || (group.length === bestGroup.length && group[0].length > bestGroup[0].length)) {
+      bestGroup = group;
+    }
+  }
+  return bestGroup ? bestGroup[0] : '';
 }
 
 function createOnlineVlmProvider({ aiService }) {
@@ -312,6 +337,61 @@ function createOnlineVlmProvider({ aiService }) {
       if (!entry.content && !entry.error && !entry.skipReason && contentCache.has(entry.asset.contentHash)) {
         entry.content = contentCache.get(entry.asset.contentHash);
       }
+    }
+
+    // 边缘样本二次确认：章文与主体/允许简称「高度相似但不完全一致」的位置是单次 OCR 漏字的
+    // 高发区（线上实测同一张 363px 章 3 次识别 1 次漏字，漏掉的恰是区分主体的关键字，把
+    // 投标方自己的章误报成近名别家）。对这类去重图片重发单张请求做多数投票定稿章文，
+    // 显著压低假不一致率；确认失败或翻票不足时保留原读，由下游相似降级兜底。
+    const officialNameForConfirm = request.officialName;
+    const aliasesForConfirm = Array.isArray(request.aliases) ? request.aliases : [];
+    const pendingConfirmEntries = [];
+    const seenConfirmHashes = new Set();
+    for (const entry of byAssetId.values()) {
+      if (!entry.content || entry.error || seenConfirmHashes.has(entry.asset.contentHash)) continue;
+      seenConfirmHashes.add(entry.asset.contentHash);
+      if (!entry.content.hasSeal) continue;
+      const sealText = String(entry.content.sealText || '').trim();
+      if (!sealText) continue;
+      if (matchesAllowedSubject(sealText, officialNameForConfirm, aliasesForConfirm)) continue; // 已精确命中主体，无歧义
+      if (isNearMatchSubjectName(sealText, officialNameForConfirm, aliasesForConfirm)) {
+        pendingConfirmEntries.push(entry);
+      }
+    }
+    const confirmTotal = pendingConfirmEntries.length;
+    let confirmProcessed = 0;
+    const emitConfirmProgress = () => emitProgress({ phase: 'confirm', processed: confirmProcessed, total: confirmTotal });
+    emitConfirmProgress();
+
+    for (const entry of pendingConfirmEntries) {
+      const originalContent = entry.content;
+      const readings = [String(originalContent.sealText || '').trim()];
+      // 用替身条目重发，避免确认请求覆盖原识别结果；确认结束后统一写回票选结论。
+      const probeEntry = { asset: entry.asset, content: null, error: undefined, skipReason: undefined };
+      for (let round = 1; round <= SEAL_TEXT_CONFIRM_ROUNDS; round += 1) {
+        const startedAt = Date.now();
+        try {
+          await submitContentBatch([probeEntry]);
+          const text = String(probeEntry.content?.sealText || '').trim();
+          if (probeEntry.content?.hasSeal && text) readings.push(text);
+          else break; // 复核判无章/读不出：停止投票，保留原读，交给下游分级
+        } catch (error) {
+          const failure = describeFailure(error);
+          logAiFailure('subject.seal.confirm', { asset: entry.asset.assetId, round, ...failure, durationMs: Date.now() - startedAt });
+          emitLog({ type: 'confirm.failed', assetId: entry.asset.assetId, round, ...failure });
+          break;
+        }
+      }
+      const chosen = pickMajoritySealText(readings);
+      if (chosen && chosen !== originalContent.sealText) {
+        // 原地更新：contentCache 与同 hash 兄弟位置共享同一个 content 对象。
+        originalContent.sealText = chosen;
+      }
+      // submitContentBatch 会把替身结果写进 contentCache，这里恢复为定稿结果。
+      contentCache.set(entry.asset.contentHash, originalContent);
+      emitLog({ type: 'confirm.completed', assetId: entry.asset.assetId, readings, chosen: originalContent.sealText });
+      confirmProcessed += 1;
+      emitConfirmProgress();
     }
 
     // 阶段二：角色判断（纯文本请求，按 contentHash + nearbyContextHash 缓存）。

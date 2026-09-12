@@ -7,6 +7,7 @@ const {
   SUBJECT_CHECK_PROTOCOL_VERSION,
   normalizeSubjectName,
   matchesAllowedSubject,
+  isNearMatchSubjectName,
   createSubjectCheckInputSignature,
   applySubjectAutoSelectRules,
   looksLikeCompanyName,
@@ -90,4 +91,29 @@ test('looksLikeCompanyName 识别具名机构并排除语义代称', () => {
   assert.strictEqual(looksLikeCompanyName('我公司'), false);
   assert.strictEqual(looksLikeCompanyName('投标人'), false);
   assert.strictEqual(looksLikeCompanyName(''), false);
+});
+
+// 线上实例：363px 章 3 次识别里 1 次把「北方长风智能科技有限公司」形状的名称漏读成
+// 少一字/截断/夹印鉴编号的转写。近似命中用于「触发复核」与「降级需人工复核」，不得用于自动放行。
+test('isNearMatchSubjectName 漏一字、截断、夹带编号噪声都算近似', () => {
+  // 线上同款：漏中间一个字（编辑距离 1）
+  assert.strictEqual(isNearMatchSubjectName('北方长风技术有限公司于', SUBJECT_A, []), false, '缺两字又多一字，距离 3 不算近似');
+  assert.strictEqual(isNearMatchSubjectName('北方长风智能有限公司', SUBJECT_A, []), true);
+  // 截断（缺后缀）
+  assert.strictEqual(isNearMatchSubjectName('北方长风智能科技', SUBJECT_A, []), true);
+  // 夹带印鉴编号噪声
+  assert.strictEqual(isNearMatchSubjectName(`${SUBJECT_A} 3601081210231`, SUBJECT_A, []), true);
+  // 命中允许简称的近似
+  assert.strictEqual(isNearMatchSubjectName('北方长锋', SUBJECT_A, [SUBJECT_A_ALIAS]), true);
+  // 距离 2 边界内
+  assert.strictEqual(isNearMatchSubjectName('南屿云图数据服务有限责任公司', SUBJECT_B, []), false);
+  assert.strictEqual(isNearMatchSubjectName('屿云图数据服务有限责任公司', SUBJECT_B, []), true);
+});
+
+test('isNearMatchSubjectName 精确命中、明显不同、空值都不算近似', () => {
+  assert.strictEqual(isNearMatchSubjectName(SUBJECT_A, SUBJECT_A, [SUBJECT_A_ALIAS]), false);
+  assert.strictEqual(isNearMatchSubjectName(SUBJECT_A_ALIAS, SUBJECT_A, [SUBJECT_A_ALIAS]), false);
+  assert.strictEqual(isNearMatchSubjectName(SUBJECT_B, SUBJECT_A, [SUBJECT_A_ALIAS]), false);
+  assert.strictEqual(isNearMatchSubjectName('', SUBJECT_A, [SUBJECT_A_ALIAS]), false);
+  assert.strictEqual(isNearMatchSubjectName('3601081210231', SUBJECT_A, [SUBJECT_A_ALIAS]), false, '纯编号噪声去噪后为空');
 });

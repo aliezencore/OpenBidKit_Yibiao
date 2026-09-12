@@ -6,6 +6,7 @@ const {
   normalizeSubjectName,
   applySubjectAutoSelectRules,
   matchesAllowedSubject,
+  isNearMatchSubjectName,
   looksLikeCompanyName,
 } = require('./subjectNameUtils.cjs');
 const { resolveVisualAssetAbsolutePath } = require('./subjectMediaFiles.cjs');
@@ -457,8 +458,12 @@ function classifySealFinding(asset, providerAsset, { officialName, aliases }) {
   if ((providerAsset.sealRole === 'third-party' || providerAsset.pageRole === 'third-party')
     && roleConfidence >= CONFIRMED_CONFIDENCE) return null;
   if (providerAsset.pageRole === 'unclear' && providerAsset.sealRole === 'unclear') return null; // 角色不清且无投标方要求证据
+  // 近名降级（spec §7.4 的对称应用）：转写与主体/简称仅差一两个字、截断或夹带印鉴编号时，
+  // 单次 OCR 的漏字/噪声足以翻转结论（线上实例：「江西博微技术有限公司」vs「江西博微新技术有限公司」，
+  // 章上实际刻的就是主体全名），相似名称必须人工确认，不得自动判成明确不一致。
+  const nearMatchOfficial = isNearMatchSubjectName(detected, officialName, aliases);
   const nameConfidence = Number(providerAsset.nameConfidence || 0);
-  const level = nameConfidence >= CONFIRMED_CONFIDENCE && roleConfidence >= CONFIRMED_CONFIDENCE
+  const level = !nearMatchOfficial && nameConfidence >= CONFIRMED_CONFIDENCE && roleConfidence >= CONFIRMED_CONFIDENCE
     ? 'confirmed-mismatch'
     : 'needs-review';
   const isScan = asset.assetKind === 'page-scan';
@@ -547,6 +552,11 @@ async function runSubjectSealCheck(aiService, {
             return;
           }
           onProgress(`正在识别图片内容 ${event.processed}/${event.total} 张（已发现印章 ${event.sealCount} 张）…`);
+          return;
+        }
+        if (event.phase === 'confirm') {
+          if (event.total === 0) return;
+          onProgress(`正在复核疑似主体印章 ${event.processed}/${event.total} 张…`);
           return;
         }
         if (event.total === 0) return;
