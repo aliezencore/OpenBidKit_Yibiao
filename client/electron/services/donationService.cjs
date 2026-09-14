@@ -145,7 +145,8 @@ function createDonationService({ app, onPrompt, onPaid }) {
     const bucket = Math.floor(state.accumulatedRuntimeMs / RUNTIME_PROMPT_INTERVAL_MS);
     if (bucket <= state.processedRuntimeBucket) return false;
     state.processedRuntimeBucket = bucket;
-    if (!donated) onPrompt?.(summary('runtime'));
+    // [已停用弹窗] 不再主动提示打赏；保留档位记录，便于日后恢复。
+    // if (!donated) onPrompt?.(summary('runtime'));
     return true;
   };
 
@@ -287,13 +288,15 @@ function createDonationService({ app, onPrompt, onPaid }) {
         if (!donated) prompt = summary('word-export');
       }
       tryPersist('保存 Word 导出次数');
-      if (prompt && !deferPrompt) onPrompt?.(prompt);
+      // [已停用弹窗] 不再主动提示打赏；保留计数与档位记录，便于日后恢复。
+      // if (prompt && !deferPrompt) onPrompt?.(prompt);
       return prompt;
     },
     showPrompt(prompt) {
       if (prompt && !donated) {
         checkpointRuntime();
-        onPrompt?.(summary(prompt.reason));
+        // [已停用弹窗] 不再主动提示打赏。
+        // onPrompt?.(summary(prompt.reason));
       }
     },
     close() {

@@ -188,7 +188,8 @@ function UpdateNotifier({ noticeEnabled }: UpdateNotifierProps) {
     };
 
     const checkAll = () => {
-      void checkUpdate();
+      // [已停用版本检查] 不再自动请求更新源；设置页手动「检查更新」入口保持可用。
+      // void checkUpdate();
       void checkRemoteNotice();
     };
 

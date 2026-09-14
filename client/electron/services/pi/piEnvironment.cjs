@@ -35,6 +35,12 @@ function preparePiEnvironment(app) {
     workspaceDir: layout.workspaceDir,
     writeInstructions: false,
   });
+  // Pi SDK 的安装遥测默认开启（enableInstallTelemetry 默认 true）。虽然 piSessionFactory 已通过
+  // settings 关闭遥测，但这里再用环境变量兜一层：PI_TELEMETRY 优先级高于 settings，
+  // 且 PI_SKIP_VERSION_CHECK 覆盖了 settings 管不到的版本检查外联。
+  // 注意：SDK 通过动态 import 在 Main 进程内加载，读取的是 process.env，因此必须写在这里。
+  process.env.PI_TELEMETRY = '0';
+  process.env.PI_SKIP_VERSION_CHECK = '1';
   const env = applyAgentToolEnvironment({
     ...process.env,
     HOME: layout.homeDir,

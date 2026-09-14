@@ -200,30 +200,32 @@ function configUsageValueText(value: unknown) {
 }
 
 function sendAnalytics(event: AnalyticsEvent, page = '', payload: Record<string, unknown> = {}) {
-  void Promise.all([getVersion(), getAnalyticsIdentity(), getAnalyticsLicenseSnapshot()]).then(([version, identity, license]) => {
-    fetch(ANALYTICS_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        projectName: PROJECT_NAME,
-        event,
-        page,
-        version,
-        platform: getPlatform(),
-        arch: '',
-        client_id: identity.clientId,
-        client_created_at: identity.clientCreatedAt,
-        license_status: license.licenseStatus,
-        license_plan: license.licensePlan,
-        license_expires_at: license.licenseExpiresAt,
-        source_trusted: license.sourceTrusted,
-        untrusted_reason: license.untrustedReason,
-        ...payload,
-      }),
-    }).catch(() => undefined);
-  }).catch(() => undefined);
+  // [已停用上报] 不再向 analytics.agnet.top 发送任何埋点数据。
+  // 恢复方式：取消下面整段注释即可。
+  // void Promise.all([getVersion(), getAnalyticsIdentity(), getAnalyticsLicenseSnapshot()]).then(([version, identity, license]) => {
+  //   fetch(ANALYTICS_ENDPOINT, {
+  //     method: 'POST',
+  //     headers: {
+  //       'Content-Type': 'application/json',
+  //     },
+  //     body: JSON.stringify({
+  //       projectName: PROJECT_NAME,
+  //       event,
+  //       page,
+  //       version,
+  //       platform: getPlatform(),
+  //       arch: '',
+  //       client_id: identity.clientId,
+  //       client_created_at: identity.clientCreatedAt,
+  //       license_status: license.licenseStatus,
+  //       license_plan: license.licensePlan,
+  //       license_expires_at: license.licenseExpiresAt,
+  //       source_trusted: license.sourceTrusted,
+  //       untrusted_reason: license.untrustedReason,
+  //       ...payload,
+  //     }),
+  //   }).catch(() => undefined);
+  // }).catch(() => undefined);
 }
 
 export function trackAppOpen() {
