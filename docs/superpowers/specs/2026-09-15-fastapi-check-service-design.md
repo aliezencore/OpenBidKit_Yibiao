@@ -3,16 +3,16 @@
 - 日期：2026-09-15
 - 关联规格：无。本次为**新建独立服务**，不改动 `client/` 现有实现。
 - 工作分支：`fastapi-check-service`（worktree `.worktrees/fastapi-check-service`，从 `main` = `51900b1` 开出）
-- 状态：待评审
+- 状态：已评审，待编制实施计划（拆分为多个计划，见 §15）
 
 ## 1. 背景与目标
 
 现有两条检查链路（标书查重、废标项检查）实现在 Electron 客户端内：
 
-| 归属 | Main 侧实现 | Renderer |
-|---|---|---|
+| 归属    | Main 侧实现                                                                                                                                                                                                                                   | Renderer                       |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
 | 废标项检查 | `rejectionCheckTask.cjs`(1806) · `rejectionCheckStore.cjs`(1473) · `subjectCheckTask.cjs`(704) · `subjectVisionProvider.cjs`(436) · `bidAnalysisTask.cjs`(472) · `checkResultExportService.cjs`(547) · `docxVisualAssetExtractor.cjs`(260) | `RejectionCheckPage.tsx`(2806) |
-| 标书查重 | `duplicateCheckService.cjs`(2870) · `duplicateCheckStore.cjs`(987) | `DuplicateCheckPage.tsx`(1158) |
+| 标书查重  | `duplicateCheckService.cjs`(2870) · `duplicateCheckStore.cjs`(987)                                                                                                                                                                         | `DuplicateCheckPage.tsx`(1158) |
 
 它们的运行离不开 Electron：`better-sqlite3` 是 Electron ABI 原生模块（普通 `node` 加载直接 `ERR_DLOPEN_FAILED`），印章图片转码靠 Electron 离屏 Chromium（`nativeImage` 只认 PNG/JPEG）。
 
@@ -30,26 +30,26 @@
 
 ### 2.2 明确不纳入
 
-| 项 | 说明 |
-|---|---|
-| AI 评标 | 现有客户端中未实现（菜单项挂「开发中」提示），本次不设计。 |
-| 多用户与鉴权 | 本次不做 `users` 表、登录、权限。隔离粒度止于「项目」（见 §5.1）。 |
-| 现有 `client/` 的任何改动 | 本次不动 Electron 侧代码，两条链路在客户端继续可用。 |
-| `.doc` 旧格式的本地正文提取 | 首版降级：仅走 MinerU 在线解析（见 §8.2）。 |
+| 项                   | 说明                                        |
+| ------------------- | ----------------------------------------- |
+| AI 评标               | 现有客户端中未实现（菜单项挂「开发中」提示），本次不设计。             |
+| 多用户与鉴权              | 本次不做 `users` 表、登录、权限。隔离粒度止于「项目」（见 §5.1）。  |
+| 现有 `client/` 的任何改动  | 本次不动 Electron 侧代码，两条链路在客户端继续可用。           |
+| `.doc` 旧格式的本地正文提取   | 首版降级：仅走 MinerU 在线解析（见 §8.2）。              |
 | 与 Electron 共享同一份数据库 | 新服务使用独立数据目录，不读写 `yibiao.sqlite`（迁移见 §12）。 |
 
 ## 3. 已确认决策
 
-| # | 决策 | 取值 |
-|---|---|---|
-| D1 | 实现策略 | Python 全量重写。Prompt 资产、归一化与校验规则、相似度算法原样搬运；编排、存储、HTTP 层重新设计。 |
-| D2 | 交付层次 | FastAPI 服务 + 自带 Web 界面，可脱离 Electron 独立运行。 |
-| D3 | 整体形态 | 方案 A：单体同进程（路由 + 静态前端 + 任务引擎 + SQLite 一个进程）。 |
-| D4 | 部署与使用 | 内网少数人共用。 |
-| D5 | 持久化 | SQLite，WAL 模式。 |
-| D6 | 印章视觉检查 | 纳入首版。Python 侧用 Pillow 重做格式转码。 |
-| D7 | 模型配置 | 服务端统一配置（共享 Base URL / Key / 模型名），不入库。 |
-| D8 | 隔离粒度 | 保留「项目」维度，不做登录。 |
+| #  | 决策     | 取值                                                         |
+| -- | ------ | ---------------------------------------------------------- |
+| D1 | 实现策略   | Python 全量重写。Prompt 资产、归一化与校验规则、相似度算法原样搬运；编排、存储、HTTP 层重新设计。 |
+| D2 | 交付层次   | FastAPI 服务 + 自带 Web 界面，可脱离 Electron 独立运行。                  |
+| D3 | 整体形态   | 方案 A：单体同进程（路由 + 静态前端 + 任务引擎 + SQLite 一个进程）。                |
+| D4 | 部署与使用  | 内网少数人共用。                                                   |
+| D5 | 持久化    | SQLite，WAL 模式。                                             |
+| D6 | 印章视觉检查 | 纳入首版。Python 侧用 Pillow 重做格式转码。                              |
+| D7 | 模型配置   | 服务端统一配置（共享 Base URL / Key / 模型名），不入库。                      |
+| D8 | 隔离粒度   | 保留「项目」维度，不做登录。                                             |
 
 ## 4. 总体架构与模块边界
 
@@ -268,6 +268,7 @@ class TaskContext(Protocol):
 
 触发升级的信号：有人跑任务时其他人明显被卡住；单次检查平均耗时升到十几分钟以上；需要跨机器分摊。
 
+
 ## 7. AI 层
 
 ### 7.1 客户端
@@ -276,13 +277,13 @@ class TaskContext(Protocol):
 
 必须逐条保留的现有行为：
 
-| 行为 | 原实现 | 要求 |
-|---|---|---|
-| JSON 收集与修复 | `aiService.collectJsonResponse` / `requestJson` | 发请求 → 抽 JSON → 失败修复重试，重试策略照抄 |
-| 多模态 | 图片以 data URL 塞进 message content | 同 |
-| 配置分离 | 文本模型与视觉模型**各自**有 base_url / api_key / model_name | 同 |
-| 上下文长度 | `getConfig()` 提供上限，`userTextSplitter` 依赖它切分 | 同 |
-| 失败日志 | `utils/aiLog.cjs` 的 `logAiFailure(scope, payload)` | **始终打印**的单行 `key=value`，不受 debug 开关控制 |
+| 行为         | 原实现                                                | 要求                                    |
+| ---------- | -------------------------------------------------- | ------------------------------------- |
+| JSON 收集与修复 | `aiService.collectJsonResponse` / `requestJson`    | 发请求 → 抽 JSON → 失败修复重试，重试策略照抄          |
+| 多模态        | 图片以 data URL 塞进 message content                    | 同                                     |
+| 配置分离       | 文本模型与视觉模型**各自**有 base_url / api_key / model_name   | 同                                     |
+| 上下文长度      | `getConfig()` 提供上限，`userTextSplitter` 依赖它切分        | 同                                     |
+| 失败日志       | `utils/aiLog.cjs` 的 `logAiFailure(scope, payload)` | **始终打印**的单行 `key=value`，不受 debug 开关控制 |
 
 **结构化输出继续靠 Prompt 约束 + JSON 抽取修复，不换 function calling / `response_format`。** 换机制意味着全部 Prompt 需要重调，风险不可接受。
 
@@ -296,14 +297,14 @@ class TaskContext(Protocol):
 
 ### 8.1 解析选型
 
-| 扩展名 | 方案 |
-|---|---|
-| `.docx` | `python-docx` + `lxml`（部分行为需直接读 `word/document.xml`） |
-| `.pdf` | `PyMuPDF`（纯 wheel，无系统依赖） |
-| `.xlsx` | `openpyxl` |
-| `.txt` / `.md` | 直读 |
-| `.doc` | 见 §8.2 |
-| 其他 | 报错并列出支持的扩展名 |
+| 扩展名            | 方案                                                   |
+| -------------- | ---------------------------------------------------- |
+| `.docx`        | `python-docx` + `lxml`（部分行为需直接读 `word/document.xml`） |
+| `.pdf`         | `PyMuPDF`（纯 wheel，无系统依赖）                             |
+| `.xlsx`        | `openpyxl`                                           |
+| `.txt` / `.md` | 直读                                                   |
+| `.doc`         | 见 §8.2                                               |
+| 其他             | 报错并列出支持的扩展名                                          |
 
 MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` 重做，token 走配置。解析路由按扩展名 + 配置里的 provider 选择器决定，与现在 `resolveFileParser` 同构。
 
@@ -314,7 +315,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 ### 8.3 图片管线（印章检查用）
 
 1. **提取**：`zipfile` 读 `word/media/*`；解析 `document.xml` 的 `r:embed` / `r:link` 关系拿放置位置。
-2. **上下文**：**按段落索引**计算 `section_title` / `nearby_text`，对齐现有 `docxVisualAssetExtractor`。章节优先级：标题样式 / 中文编号模式 → 加粗短段 → `None`，**不加**「上一个非空段落」兜底。
+2. **上下文**：**按段落索引**计算 `section_title` / `nearby_text`，对齐现有 `docxVisualAssetExtractor`。章节优先级：标题样式 / 中文编号模式 → 加粗短段 → `None`，**不加**「上一个非空段落」兜底。  
    绝不退回按字符偏移切 XML —— 旧实现那版产出的「附近文本」是 XML 碎片，还被当作位置上下文喂给模型。
 3. **转码**：`Pillow` 直接支持 PNG / JPEG / GIF / BMP / WebP / TIFF，**比 Electron 侧强**（`nativeImage` 只认 PNG/JPEG，需靠离屏 Chromium 兜底）。压缩参数（尺寸上限、质量）对齐现有 `compressLocalImageToDataUrl` 的策略。
 
@@ -332,24 +333,24 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 
 **页面三步**：`documents` → `items` → `results`（类型 `RejectionCheckStep`）。
 
-| # | 步骤 | 原实现入口 | 输入 | 产出 | 前置约束 |
-|---|---|---|---|---|---|
-| 1 | 导入文档 | IPC `rejection-check:import-document`、`rejection-check:import-tender-from-technical-plan` | `role`（tender/bid）+ 文件路径 | markdown 落盘、`rejection_check_documents` 行、`content_hash` | — |
-| 2 | 无效与废标项解析 | 任务 `rejection-items-extraction` → `runRejectionItemsExtractionTask` → `runInvalidBidAndRejectionItemsExtraction` | **招标文件正文** | `rejection_check_extraction.content`、`tender_signature` | 招标文件非空，否则抛「缺少招标文件内容，无法解析无效与废标项」 |
-| 3 | 投标主体识别 | 任务 `bid-subject-identification` → `runBidSubjectIdentificationTask` | 投标文件（默认全部；可按 `payload.bidDocumentIds` 收窄） | `rejection_check_subject_profile` 候选 | — |
-| 4 | 主体确认 | IPC `rejection-check:confirm-subject` | `officialName`、`aliases` | `status='confirmed'`、`bid_signature` | — |
-| 5 | 执行检查 | 任务 `rejection-check-run` → `runRejectionCheckTask` | 见下表 | 四个结果 | 至少启用一种检查；废标项检查需**步骤 2 已完成**；主体检查需**步骤 4 已确认** |
+| # | 步骤       | 原实现入口                                                                                                            | 输入                                        | 产出                                                       | 前置约束                                          |
+| - | -------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| 1 | 导入文档     | IPC `rejection-check:import-document`、`rejection-check:import-tender-from-technical-plan`                        | `role`（tender/bid）+ 文件路径                  | markdown 落盘、`rejection_check_documents` 行、`content_hash` | —                                             |
+| 2 | 无效与废标项解析 | 任务 `rejection-items-extraction` → `runRejectionItemsExtractionTask` → `runInvalidBidAndRejectionItemsExtraction` | **招标文件正文**                                | `rejection_check_extraction.content`、`tender_signature`  | 招标文件非空，否则抛「缺少招标文件内容，无法解析无效与废标项」               |
+| 3 | 投标主体识别   | 任务 `bid-subject-identification` → `runBidSubjectIdentificationTask`                                              | 投标文件（默认全部；可按 `payload.bidDocumentIds` 收窄） | `rejection_check_subject_profile` 候选                     | —                                             |
+| 4 | 主体确认     | IPC `rejection-check:confirm-subject`                                                                            | `officialName`、`aliases`                  | `status='confirmed'`、`bid_signature`                     | —                                             |
+| 5 | 执行检查     | 任务 `rejection-check-run` → `runRejectionCheckTask`                                                               | 见下表                                       | 四个结果                                                     | 至少启用一种检查；废标项检查需**步骤 2 已完成**；主体检查需**步骤 4 已确认** |
 
 步骤 2 的细节：`bidAnalysisTask` 对超长招标文件先 `splitUserTextByContextLimit` 分段，再 `mergeSegmentedAiResults` 合并。**分段与合并逻辑必须原样搬**，否则超长招标文件的解析结果会与现状不一致。
 
 步骤 5 内部：**四个检查并行**（`Promise.all`），进度 `min(95, 5 + completed/enabledTasks × 90)`。
 
-| 检查 | 原实现入口 | 输入 | 输出键 | 签名口径 |
-|---|---|---|---|---|
-| 废标项 | `runRejectionItemCheck` | `invalidBidAndRejectionItems` + `customCheckItems` + **全部投标文件** | `rejectionCheckResult` | `rejectionInputSignature`（含检查项内容） |
-| 错别字 | `runTypoCheck` | **全部投标文件** | `typoCheckResult` | `bidSignature` |
-| 逻辑谬误 | `runLogicCheck` | **全部投标文件** | `logicCheckResult` | `bidSignature` |
-| 主体一致性 | `runSubjectBodyCheck` → `runSubjectSealCheck`（**内部串行**） | **全部投标文件** + `subjectProfile` + `visualAssets` | `subjectCheckResult` | `subjectInputSignature`（依赖 profile 已 confirmed） |
+| 检查    | 原实现入口                                                   | 输入                                                              | 输出键                    | 签名口径                                            |
+| ----- | ------------------------------------------------------- | --------------------------------------------------------------- | ---------------------- | ----------------------------------------------- |
+| 废标项   | `runRejectionItemCheck`                                 | `invalidBidAndRejectionItems` + `customCheckItems` + **全部投标文件** | `rejectionCheckResult` | `rejectionInputSignature`（含检查项内容）               |
+| 错别字   | `runTypoCheck`                                          | **全部投标文件**                                                      | `typoCheckResult`      | `bidSignature`                                  |
+| 逻辑谬误  | `runLogicCheck`                                         | **全部投标文件**                                                      | `logicCheckResult`     | `bidSignature`                                  |
+| 主体一致性 | `runSubjectBodyCheck` → `runSubjectSealCheck`（**内部串行**） | **全部投标文件** + `subjectProfile` + `visualAssets`                  | `subjectCheckResult`   | `subjectInputSignature`（依赖 profile 已 confirmed） |
 
 三条易漏约束：
 
@@ -363,20 +364,20 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 
 **页面两步**：`upload` → `analysis`。
 
-| # | 步骤 | 原实现入口 | 说明 |
-|---|---|---|---|
-| 1 | 上传 | IPC `duplicate-check:save-files` | 招标文件与投标文件按 `role` 存入 `duplicate_check_files` |
-| 2 | 分析 | 任务 `duplicate-analysis` → `duplicateCheckService.runAnalysisTask` | 见下 |
+| # | 步骤 | 原实现入口                                                             | 说明                                           |
+| - | -- | ----------------------------------------------------------------- | -------------------------------------------- |
+| 1 | 上传 | IPC `duplicate-check:save-files`                                  | 招标文件与投标文件按 `role` 存入 `duplicate_check_files` |
+| 2 | 分析 | 任务 `duplicate-analysis` → `duplicateCheckService.runAnalysisTask` | 见下                                           |
 
 阶段表 —— **四处文件参与范围的非对称是搬运最大风险点**：
 
-| 阶段 | 参与文件 | 产出表 | 依赖 |
-|---|---|---|---|
-| 元数据提取 `runMetadataExtraction` | **仅 bidFiles** | `duplicate_check_metadata_items` | — |
-| 正文提取 `runContentExtraction` | **allFiles（含招标）** | `duplicate_check_content_files` | — |
-| 目录分析 `runOutlineAnalysis` | **tenderFiles + bidFiles** | `duplicate_check_outline_items` / `_groups` / `_outline_pairwise` | contentFiles |
-| 正文比对 `runContentDuplicateAnalysis` | **tenderFiles + bidFiles** | `duplicate_check_content_duplicates` / `_content_occurrences` | contentFiles |
-| 图片比对 `runImageDuplicateAnalysis` | **仅 bidFiles** | `duplicate_check_image_files` / `_image_occurrences` / `_duplicate_images` | contentFiles |
+| 阶段                                 | 参与文件                       | 产出表                                                                        | 依赖           |
+| ---------------------------------- | -------------------------- | -------------------------------------------------------------------------- | ------------ |
+| 元数据提取 `runMetadataExtraction`      | **仅 bidFiles**             | `duplicate_check_metadata_items`                                           | —            |
+| 正文提取 `runContentExtraction`        | **allFiles（含招标）**          | `duplicate_check_content_files`                                            | —            |
+| 目录分析 `runOutlineAnalysis`          | **tenderFiles + bidFiles** | `duplicate_check_outline_items` / `_groups` / `_outline_pairwise`          | contentFiles |
+| 正文比对 `runContentDuplicateAnalysis` | **tenderFiles + bidFiles** | `duplicate_check_content_duplicates` / `_content_occurrences`              | contentFiles |
+| 图片比对 `runImageDuplicateAnalysis`   | **仅 bidFiles**             | `duplicate_check_image_files` / `_image_occurrences` / `_duplicate_images` | contentFiles |
 
 编排（`run()`，逐行对照）：
 
@@ -418,7 +419,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 
 「证明没漂移」是本次最大风险，策略分三层：
 
-1. **翻译现有单测**，逐个改为 pytest：
+1. **翻译现有单测**，逐个改为 pytest：  
    `subjectCheckTask.test.cjs`、`subjectMediaFiles.test.cjs`、`docxVisualAssetExtractor.test.cjs`、`checkResultExportService.test.cjs`、`rejectionCheckStore.subject.test.cjs`、`taskService.confirmBidSubject.test.cjs`、`localImageRenderService.test.cjs`（仅取其中的图片格式决策部分）。
 2. **金标准对照（主力手段）**：从现有实现导出固定「输入 → 输出」样本对，新实现必须逐字符对上。重点覆盖：
    - **Prompt 构造结果**（拼接顺序、换行、分隔符，逐字节对齐）；
@@ -437,18 +438,31 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 
 ## 13. 风险与缓解
 
-| # | 风险 | 缓解 |
-|---|---|---|
+| #  | 风险                                                                                                                           | 缓解                                                |
+| -- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
 | R1 | `ole.py` 的手写 CFB / OLE 属性集字节级解析（`parsePropertySet`、`parseTypedPropertyValue`、`parseLpstr`、`codePageToEncoding` 等）最易出**静默偏差** | **最先搬运并配足单测**；`olefile` 只用于「取流」，语义解析照搬；用现有文件做输出对照 |
-| R2 | Prompt 在 Python 中的拼接顺序与换行必须**逐字节**对齐，否则模型输出漂移 | 把 Prompt 作为常量整体搬运；用金标准对照逐字符校验 |
-| R3 | Pillow 的压缩参数与 Electron 侧不完全等价，印章 VLM 判定可能有细微差异 | 用真实图片（含 GIF / BMP / WebP）回归，对照 `visionStats` |
-| R4 | 查重的相似度阈值与目录归一化规则是**调参调出来的** | 原样搬，不「顺手优化」 |
-| R5 | `.doc` 正文首版降级 | 在界面明确提示不支持，不静默失败 |
-| R6 | 检查项**内部**算法（滚动归并状态机、补丁应用）细节尚未逐行核对 | 不靠读代码保证，靠 §11.2 金标准对照兜底 |
-| R7 | 前端两个页面（2806 / 1158 行）的完整交互流尚未逐行核对 | 按 §10 的页面清单对齐，实现期以现有页面行为为准逐步核对 |
+| R2 | Prompt 在 Python 中的拼接顺序与换行必须**逐字节**对齐，否则模型输出漂移                                                                                | 把 Prompt 作为常量整体搬运；用金标准对照逐字符校验                     |
+| R3 | Pillow 的压缩参数与 Electron 侧不完全等价，印章 VLM 判定可能有细微差异                                                                               | 用真实图片（含 GIF / BMP / WebP）回归，对照 `visionStats`      |
+| R4 | 查重的相似度阈值与目录归一化规则是**调参调出来的**                                                                                                  | 原样搬，不「顺手优化」                                       |
+| R5 | `.doc` 正文首版降级                                                                                                                | 在界面明确提示不支持，不静默失败                                  |
+| R6 | 检查项**内部**算法（滚动归并状态机、补丁应用）细节尚未逐行核对                                                                                            | 不靠读代码保证，靠 §11.2 金标准对照兜底                           |
+| R7 | 前端两个页面（2806 / 1158 行）的完整交互流尚未逐行核对                                                                                            | 按 §10 的页面清单对齐，实现期以现有页面行为为准逐步核对                    |
 
 ## 14. 交付边界声明
 
 - 本规格**只覆盖流程骨架与架构约束**，不包含检查项内部逐行算法说明；后者的保真由 §11.2 的金标准对照承担。
 - 检查项的 Prompt 文本不在本规格内复制，实现时从现有 `.cjs` 原样搬运，一字不改。
 - 本规格落地为实施计划后，才进入编码；实施计划由 `writing-plans` 产出。
+
+## 15. 实施计划拆分
+
+本规格覆盖多个可独立交付的子系统。按「每个计划产出可运行、可测试的软件」拆成 4 个计划，按序实施：
+
+| # | 计划 | 产出（可独立验证） | 依赖 |
+|---|---|---|---|
+| P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端能跑通 `collect_json_response` 的成功与修复路径；「domain 层不 import 框架」的护栏测试生效 | — |
+| P2 | 文档解析与图片管线 | 给定 docx / pdf / xlsx 能产出 markdown 与视觉资产（含章节上下文、去重、格式转码） | P1 |
+| P3 | 标书查重领域 + 查重闭环 | 上传招标 / 投标文件 → 跑查重 → 看结果 → 导 Excel（**零模型依赖**，可端到端验证） | P1、P2 |
+| P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | P1、P2、P3（复用 API 与前端骨架） |
+
+§11.2 的金标准对照工具在 P2 起随各计划就地搭建，不单独成计划。
