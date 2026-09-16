@@ -61,3 +61,20 @@ def test_missing_file_raises_parsing_error(tmp_path):
     # R12 把 `pdf-open-failed` 定为唯一允许在解析模块里归一化的用户可见失败，
     # 那 code 就是契约的一部分，必须被钉住（与 Task 5 的 libreoffice-missing 同例）。
     assert info.value.code == "pdf-open-failed"
+
+
+def test_find_tables_none_degrades_to_text_only(tmp_path, monkeypatch):
+    """R21：find_tables() 内部异常时返回 None，不得拖垮整份 PDF 解析。
+
+    pymupdf/table.py 用宽 except Exception 包住整条找表 pipeline，失败即 `return None`。
+    降级口径是「本页没有表格」，正文本照常输出。
+    """
+    p = _make_pdf(tmp_path / "e.pdf", [["Chapter One", "body text"]])
+
+    monkeypatch.setattr(fitz.Page, "find_tables", lambda self: None)
+
+    text = pdf_to_markdown(p)
+
+    assert "Chapter One" in text
+    assert "body text" in text
+    assert "|" not in text

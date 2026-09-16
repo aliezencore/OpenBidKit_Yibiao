@@ -43,7 +43,7 @@ def pdf_to_markdown(path: Path) -> str:
             text = page.get_text("text").strip()
             if text:
                 parts.append(text)
-            for table in page.find_tables():
+            for table in (page.find_tables() or ()):
                 rendered = _render_table(table.extract())
                 if rendered:
                     parts.append(rendered)
