@@ -410,7 +410,6 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 ```python
 from openpyxl import Workbook
 
-from app.infra.parsing.pdf import pdf_to_markdown
 from app.infra.parsing.spreadsheet import spreadsheet_to_markdown
 
 
