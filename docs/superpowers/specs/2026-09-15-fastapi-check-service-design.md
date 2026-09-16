@@ -326,10 +326,21 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 
 ### 8.3 图片管线（印章检查用）
 
-1. **提取**：`zipfile` 读 `word/media/*`；解析 `document.xml` 的 `r:embed` / `r:link` 关系拿放置位置。
-2. **上下文**：**按段落索引**计算 `section_title` / `nearby_text`，对齐现有 `docxVisualAssetExtractor`。章节优先级：标题样式 / 中文编号模式 → 加粗短段 → `None`，**不加**「上一个非空段落」兜底。
-   绝不退回按字符偏移切 XML —— 旧实现那版产出的「附近文本」是 XML 碎片，还被当作位置上下文喂给模型。
-3. **格式决策与转码**：沿用现有 `resolveImagePlan` 的四分动作（`compress` / `passthrough` / `transcode` / `skip`）与全部跳过码（`UNSUPPORTED_IMAGE_FORMAT`、`PASSTHROUGH_TOO_LARGE`），以及 `computeTargetSize` 的等比缩放语义。**理由**：印章 VLM 的输入形态要对齐——GIF 原字节透传、BMP/WebP 转码是现有实现刻意的取舍，不是 Electron 的缺陷；Python 侧虽然 Pillow 也能解 GIF/BMP/WebP，仍保留同一动作分类，只把「transcode」的实现从离屏 Chromium 换成 Pillow，「compress」的实现换成 Pillow 压缩。`skipped` 的码与「未能识别的图片」清单直接依赖这些码，改动会造成 P4 行为漂移。
+**本条整条是纯本地的**（2026-09-16 核实）：现有 `docxVisualAssetExtractor.cjs` 的全部依赖是 `node:crypto` + `adm-zip`，对 `BrowserWindow` / `offscreen` / `fetch` / 任何 URL 的引用数为 **0**。docx 本身就是 zip，提取就是「解压 → 读关系表 → 扫 XML 找图片出现位置」。Python 侧对应 `zipfile` + `lxml`，**不需要任何外部能力**。
+
+1. **提取**：`zipfile` 读 `word/media/*`；解析 `word/_rels/document.xml.rels` 拿关系表，再扫 `word/document.xml` 里的 `a:blip r:embed`（Drawing）与 VML 的 `v:imagedata r:id` 拿图片的**出现位置**与所属段落索引。对齐现有 `collectDrawingOccurrences` / `collectVmlOccurrences`。
+2. **上下文**：**按段落索引**计算 `section_title` / `nearby_text`，对齐现有 `buildParagraphIndex` / `extractSectionTitle` / `extractNearbyText`。章节优先级：标题样式 → 中文编号模式 → 加粗短段 → `None`，**不加**「上一个非空段落」兜底。
+   绝不退回按字符偏移切 XML —— 旧实现早期那版产出的「附近文本」是 XML 碎片，还被当作位置上下文喂给模型。
+3. **格式决策与转码**：沿用现有 `resolveImagePlan`（`utils/imageFormat.cjs`）的四分动作与全部跳过码，以及 `computeTargetSize` 的等比缩放语义：
+   - `png` / `jpeg` → `compress`
+   - `gif` → `passthrough`（超过 `maxPassthroughBytes` 则 `skip` / `PASSTHROUGH_TOO_LARGE`）
+   - `bmp` / `webp` → `transcode`
+   - `tiff` / `emf` / `wmf` / 未识别 → `skip` / `UNSUPPORTED_IMAGE_FORMAT`
+
+   **保留动作分类、只换实现**：`compress` 与 `transcode` 一律用 Pillow，`passthrough` 原字节透传。理由：印章 VLM 的输入形态要对齐现有实现，`skipped` 的码与「未能识别的图片」清单直接依赖这些码，改动会造成 P4 行为漂移。
+   
+   **同时记录一个事实**：原项目的 `transcode` 走离屏 Chromium，是 Electron `nativeImage` 只支持 PNG/JPEG 造成的**绕路**；Python/Pillow 没有这个限制。保留该动作只是为了输入形态一致，**不是因为它难做**。
+4. **去重**：按 `content_hash`（sha256）去重，同一 hash 的所有出现位置共享跳过 / 失败结果。
 
 ### 8.4 必须保留的三条既有约定
 
@@ -480,13 +491,17 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 
 ## 15. 实施计划拆分
 
-本规格覆盖多个可独立交付的子系统。按「每个计划产出可运行、可测试的软件」拆成 4 个计划，按序实施：
+本规格覆盖多个可独立交付的子系统。**拆分轴是「能力是否本地」+ 子领域，不是「先本地后外网」**（2026-09-16 修正：原表把纯本地的图片管线与需网络的 MinerU 捆成一个「在线解析与图片管线」，轴划错了——图片提取全链路是 `zipfile` + `lxml` + Pillow，与网络、与 Electron 都无关）。
 
-| # | 计划 | 产出（可独立验证） | 依赖 |
-|---|---|---|---|
-| P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端能跑通 `collect_json_response` 的成功与修复路径；「domain 层不 import 框架」的护栏测试生效 | — |
-| P2 | 文档解析与图片管线 | 给定 docx / pdf / xlsx 能产出 markdown 与视觉资产（含章节上下文、去重、格式转码） | P1 |
-| P3 | 标书查重领域 + 查重闭环 | 上传招标 / 投标文件 → 跑查重 → 看结果 → 导 Excel（**零模型依赖**，可端到端验证） | P1、P2 |
-| P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | P1、P2、P3（复用 API 与前端骨架） |
+| # | 计划 | 产出（可独立验证） | 能力 | 依赖 | 状态 |
+|---|---|---|---|---|---|
+| P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端跑通 `collect_json_response` 的成功与修复路径；「domain 不 import 框架」护栏生效 | 纯本地 | — | **已完成**（22 提交 / 123 测试） |
+| P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown 并落盘（`content_hash` 入库）；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **计划已写** |
+| P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | 计划待写 |
+| P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | 计划待写 |
+| P3 | 标书查重领域 + 查重闭环 | 上传招标 / 投标文件 → 跑查重 → 看结果 → 导 Excel（**零模型依赖**，可端到端验证） | 纯本地 | P1、P2a、P2b（图片重复比对需图片提取） | — |
+| P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
+
+**关于 P2a / P2b 为何不合并**：合起来约 13 个任务，单个计划的 TDD 步骤会到 90+ 条，可执行性下降。两者**没有依赖关系**（图片管线不读 markdown，文档解析不碰图片），可以任意顺序或并行实施。**若你更希望一个大计划，可以合并**——那是我对计划粒度的取舍，不是能力约束。
 
 §11.2 的金标准对照工具在 P2 起随各计划就地搭建，不单独成计划。

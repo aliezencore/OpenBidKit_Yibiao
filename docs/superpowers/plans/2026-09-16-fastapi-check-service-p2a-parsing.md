@@ -6,11 +6,11 @@
 
 **Architecture:** 沿用 P1 的分层（`api → domain → infra`）。解析是纯 infra 能力：`infra/parsing/` 提供一个 `parse_document(path, options) -> ParsedDocument` 入口，内部按扩展名与配置路由。domain 不 import 解析库。所有解析结果落盘为 markdown 文件，库里只存路径与 `content_hash`（对齐 P1 的 `rejection_check_documents` 形状）。
 
-**Tech Stack:** python-mammoth · markdownify · beautifulsoup4 + lxml · openpyxl · charset-normalizer · Pillow（P2b）· PyMuPDF（P2b）· httpx
+**Tech Stack:** PyMuPDF · python-mammoth · markdownify · beautifulsoup4 + lxml · openpyxl · charset-normalizer
 
 **Spec:** `docs/superpowers/specs/2026-09-15-fastapi-check-service-design.md` §8.1 / §8.2 / §8.5（2026-09-16 修订版）
 
-**明确不在本计划内（P2b）:** PDF 解析、MinerU 两类 API、docx 图片提取与格式转码、`content_hash` 图片去重。
+**范围**：本地文档解析（**含 PDF**）。图片管线属 P2b、MinerU 在线解析属 P2c，见文末「明确不做」。
 
 ## Global Constraints
 
@@ -20,7 +20,7 @@
 - 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`；**不推送**；按显式路径 `git add`。
 - `app/domain/**` 禁止 import `fastapi` / `starlette` / `sqlalchemy` / `httpx` / `pydantic` / `sqlite3`（护栏测试强制；解析库全部放在 `app/infra/parsing/`）。
 - **验收标准是结构等价（spec §8.5）**：标题层级、表格数量与行列、段落数量 ±10%、无 XML 碎片、无 base64 泄漏。**不要求与 Electron 输出逐字节一致**。
-- 主流程**不得网络请求**；MinerU 属 P2b。
+- 主流程**不得网络请求**；MinerU 属 P2c。
 - Main 侧文件读写显式 UTF-8（Windows 中文路径是默认场景）。
 - 新增依赖仅限：`mammoth`、`markdownify`、`beautifulsoup4`、`lxml`、`openpyxl`、`charset-normalizer`（+ dev: `python-docx` 用于生成测试夹具）。**不得引入** turndown / pdfjs / SheetJS 的等价替代品以外的东西。
 
@@ -28,7 +28,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `server/app/config.py` | 增：`file_parser_provider`、`mineru_token`、图片压缩参数（P2b 用） |
+| `server/app/config.py` | 增：`file_parser_provider`、`mineru_token`（P2c 用）；图片压缩参数属 P2b，不在本计划 |
 | `server/app/infra/parsing/__init__.py` | 包 |
 | `server/app/infra/parsing/format.py` | `detect_file_format()`：按魔数+后缀识别 |
 | `server/app/infra/parsing/encoding.py` | `read_text_with_encoding()`：编码探测直读 |
@@ -38,6 +38,7 @@
 | `server/app/infra/parsing/docx.py` | docx 编排：html→md + 图片占位 |
 | `server/app/infra/parsing/legacy_doc.py` | .doc → LibreOffice → docx |
 | `server/app/infra/parsing/router.py` | `resolve_parser()` + `parse_document()` 入口 + 错误归一化 |
+| `server/app/infra/parsing/pdf.py` | PDF → markdown（PyMuPDF） |
 | `server/app/domain/shared/errors.py` | `ParsingError`（domain 可见的错误类型，`code` 字段） |
 | `server/tests/parsing_fixtures.py` | 测试夹具生成器（python-docx 造 docx） |
 | `server/tests/test_parsing_*.py` | 各任务测试 |
@@ -399,6 +400,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 ```python
 from openpyxl import Workbook
 
+from app.infra.parsing.pdf import pdf_to_markdown
 from app.infra.parsing.spreadsheet import spreadsheet_to_markdown
 
 
@@ -899,7 +901,167 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 
 ---
 
-### Task 6: 解析路由与统一入口
+### Task 6: PDF → markdown（PyMuPDF）
+
+**Files:**
+- Create: `server/app/infra/parsing/pdf.py`
+- Test: `server/tests/test_parsing_pdf.py`
+
+**Interfaces:**
+- Consumes: `ParsingError`
+- Produces: `pdf_to_markdown(path: Path) -> str`（按页输出，页间用 `\n\n---\n\n` 分隔；页内先正文后表格；无文本的页输出「（本页无可提取文本，可能是扫描件）」）
+
+**说明**：PDF 是**纯本地**解析（PyMuPDF 是本地 wheel，无网络无系统依赖）。现有 Node 侧用 pdf-parse + pdfjs-dist，其中表格靠 ~150 行自定义的矩形分析；这里用 PyMuPDF 的 `page.find_tables()`，算法不同但**验收标准是结构等价**（spec §8.5），只要求「表格数量与行列一致」。
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `server/tests/test_parsing_pdf.py`：
+
+```python
+import fitz
+import pytest
+
+from app.infra.parsing.pdf import pdf_to_markdown
+
+
+def _make_pdf(path, pages):
+    """pages: [list[str]]，每页一组文本行。"""
+    doc = fitz.open()
+    for lines in pages:
+        page = doc.new_page()
+        y = 72
+        for line in lines:
+            page.insert_text((72, y), line, fontsize=12)
+            y += 20
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_extracts_text_per_page(tmp_path):
+    p = _make_pdf(tmp_path / "a.pdf", [["Chapter One", "body text"]])
+
+    text = pdf_to_markdown(p)
+
+    assert "Chapter One" in text
+    assert "body text" in text
+
+
+def test_pages_are_separated(tmp_path):
+    p = _make_pdf(tmp_path / "b.pdf", [["first page"], ["second page"]])
+
+    text = pdf_to_markdown(p)
+
+    assert text.index("first page") < text.index("---") < text.index("second page")
+
+
+def test_blank_page_gets_placeholder(tmp_path):
+    p = _make_pdf(tmp_path / "c.pdf", [[]])
+
+    text = pdf_to_markdown(p)
+
+    assert "本页无可提取文本" in text
+
+
+def test_no_xml_or_base64_leak(tmp_path):
+    p = _make_pdf(tmp_path / "d.pdf", [["plain"]])
+
+    text = pdf_to_markdown(p)
+
+    for bad in ("base64", "<w:", "xmlns"):
+        assert bad not in text
+
+
+def test_missing_file_raises_parsing_error(tmp_path):
+    from app.infra.parsing import ParsingError
+
+    with pytest.raises(ParsingError):
+        pdf_to_markdown(tmp_path / "nope.pdf")
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_pdf.py -v`
+Expected: FAIL，`ModuleNotFoundError: No module named 'app.infra.parsing.pdf'`
+
+- [ ] **Step 3: 写实现**
+
+先加依赖：`server/pyproject.toml` 的 dependencies 追加 `"pymupdf>=1.24"`，然后 `pip install -e ".[dev]"`。
+
+创建 `server/app/infra/parsing/pdf.py`：
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+import fitz
+
+from app.domain.shared.errors import ParsingError
+
+
+def _escape_cell(value) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _render_table(rows: list[list]) -> str:
+    if not rows:
+        return ""
+    header = [_escape_cell(cell) for cell in rows[0]]
+    lines = ["| " + " | ".join(header) + " |",
+             "| " + " | ".join("---" for _ in header) + " |"]
+    for row in rows[1:]:
+        padded = [_escape_cell(cell) for cell in row] + [""] * (len(header) - len(row))
+        lines.append("| " + " | ".join(padded[: len(header)]) + " |")
+    return "\n".join(lines)
+
+
+def pdf_to_markdown(path: Path) -> str:
+    """PDF → markdown（逐页，正文 + GFM 表格）。
+
+    现有 Node 侧用 pdf-parse 取正文、pdfjs-dist 分析图形矩形还原表格
+    （convert.mjs:596-737）。这里改用 PyMuPDF 的 find_tables()：算法不同，
+    但 spec §8.5 只要求结构等价（表格数量与行列一致），不要求逐字节一致。
+    """
+    path = Path(path)
+    try:
+        document = fitz.open(path)
+    except Exception as error:  # fitz 抛的是自身的 RuntimeError 子类
+        raise ParsingError("文件解析失败：不是有效的 PDF", code="pdf-open-failed", path=str(path)) from error
+
+    sections: list[str] = []
+    try:
+        for page in document:
+            parts: list[str] = []
+            text = page.get_text("text").strip()
+            if text:
+                parts.append(text)
+            for table in page.find_tables():
+                rendered = _render_table(table.extract())
+                if rendered:
+                    parts.append(rendered)
+            sections.append("\n\n".join(parts) if parts else "（本页无可提取文本，可能是扫描件）")
+    finally:
+        document.close()
+
+    return "\n\n---\n\n".join(sections) + "\n"
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_pdf.py -v`
+Expected: PASS（5 passed）。若 `insert_text` 造出的样本让 `find_tables` 找不到表格，**不要为了造表格去改实现**——表格还原在 Task 9 的结构等价验收里用真实 PDF 样本验证；本任务只钉「逐页文本 + 分隔 + 占位 + 无泄漏」。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add server/pyproject.toml server/app/infra/parsing/pdf.py server/tests/test_parsing_pdf.py
+git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): PDF 转 markdown（PyMuPDF）（P2a Task 6）"
+```
+
+---
+
+### Task 7: 解析路由与统一入口
 
 **Files:**
 - Create: `server/app/infra/parsing/router.py`
@@ -992,10 +1154,11 @@ from app.infra.parsing.docx import docx_to_markdown
 from app.infra.parsing.encoding import read_text_with_encoding
 from app.infra.parsing.format import FileFormat, detect_file_format
 from app.infra.parsing.legacy_doc import doc_to_markdown as legacy_doc_to_markdown
+from app.infra.parsing.pdf import pdf_to_markdown
 from app.infra.parsing.spreadsheet import spreadsheet_to_markdown
 
 _MINERU_PROVIDERS = frozenset({"mineru-agent-api", "mineru-accurate-api"})
-_LOCAL_SUPPORTED = frozenset({".docx", ".doc", ".txt", ".md"})  # pdf/xlsx 属 P2b
+_LOCAL_SUPPORTED = frozenset({".docx", ".doc", ".txt", ".md", ".pdf", ".xlsx"})
 
 
 @dataclass(frozen=True)
@@ -1043,8 +1206,8 @@ def parse_document(path: Path, *, provider: str = "local", include_images: bool 
     if decision.provider == "local":
         markdown = _parse_locally(path, fmt)
     else:
-        # MinerU 客户端属 P2b；此处不会到达（路由已把非 pdf 回退到本地）。
-        raise ParsingError("MinerU 解析属 P2b 范围", code="not-implemented", path=str(path))
+        # MinerU 客户端属 P2c；P2a 阶段请求它会被路由回退到本地，故此处不可达。
+        raise ParsingError("MinerU 解析属 P2c 范围", code="not-implemented", path=str(path))
     label = "local" if decision.fallback_to_local else decision.provider
     return ParsedDocument(markdown=markdown, format_kind=fmt.kind,
                           extension=fmt.extension, parser_label=label)
@@ -1061,7 +1224,9 @@ def _parse_locally(path: Path, fmt: FileFormat) -> str:
         return docx_to_markdown(path)
     if fmt.kind == "doc":
         return legacy_doc_to_markdown(path)
-    raise ParsingError(f"P2b 尚未支持 {fmt.kind}", code="not-implemented", path=str(path))
+    if fmt.kind == "pdf":
+        return pdf_to_markdown(path)
+    raise ParsingError(f"尚未支持 {fmt.kind}", code="not-implemented", path=str(path))
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -1078,7 +1243,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 
 ---
 
-### Task 7: 存储集成与「上传 → 解析 → 落盘」服务入口
+### Task 8: 存储集成与「上传 → 解析 → 落盘」服务入口
 
 **Files:**
 - Create: `server/app/infra/parsing/service.py`
@@ -1095,11 +1260,11 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 - [ ] **Step 2: 跑测试确认失败**
 - [ ] **Step 3: 实现**（`hashlib.sha256` 算 content_hash；`uuid4().hex[:12]` 生成 document_id；复制原文件到 `<data_root>/projects/<id>/uploads/` 以便复现）
 - [ ] **Step 4: 全量套件确认通过且无回归**
-- [ ] **Step 5: 提交** `feat(server): 上传→解析→落盘服务入口（P2a Task 7）`
+- [ ] **Step 5: 提交** `feat(server): 上传→解析→落盘服务入口（P2a Task 8）`
 
 ---
 
-### Task 8: 真实样本结构等价验证
+### Task 9: 真实样本结构等价验证
 
 **Files:**
 - Create: `server/tests/test_parsing_structure_equivalence.py`
@@ -1122,18 +1287,21 @@ def test_docx_structure_equivalence(sample_docx):
 ```
 
 - [ ] **Step 3: 全量套件确认通过**
-- [ ] **Step 4: 提交** `test(server): 解析链结构等价验收（P2a Task 8）`
+- [ ] **Step 4: 提交** `test(server): 解析链结构等价验收（P2a Task 9）`
 
 ---
 
 ## 完成标准
 
 - `cd server && .venv/Scripts/python.exe -m pytest -q` 全绿（P1 的 123 个 + P2a 新增）。
-- `parse_document()` 对 docx / doc / xlsx / txt / md 五类输入都能产出 markdown 并落盘，`rejection_check_documents` 行含 `content_hash`。
-- `resolve_parser` 的三段语义（支持 / 回退本地 / 不支持）与现有 `resolveFileParser` 一致。
-- 全程无网络请求（MinerU 属 P2b）。
+- `parse_document()` 对 docx / doc / pdf / xlsx / txt / md 六类输入都能产出 markdown 并落盘，`rejection_check_documents` 行含 `content_hash`。
+- `resolve_parser` 的三段语义（支持 / 回退本地 / 不支持）与现有 `resolveFileParser` 一致；`local` 支持集为 docx/doc/pdf/xlsx/txt/md。
+- 全程无网络请求（MinerU 属 P2c）。
 - 护栏测试仍全绿：解析库全部位于 `app/infra/parsing/`，`app/domain/**` 无新增依赖。
 
-## 明确不做（P2b）
+## 明确不做（属 P2b / P2c）
 
-PDF 解析（PyMuPDF + 表格）、MinerU agent/accurate 客户端、docx 图片提取、图片格式决策与 Pillow 转码、`content_hash` 图片去重与兄弟共享、`section_title`/`nearby_text` 段落上下文。
+- **P2b（本地图片管线，纯本地）**：docx 图片解压提取（`word/media/*` + 关系表 + `a:blip`/VML 出现位置）、段落级 `section_title`/`nearby_text`、`resolveImagePlan` 四分决策、Pillow 压缩 / 透传 / 转码、`content_hash` 图片去重与兄弟共享。
+- **P2c（在线解析，需网络）**：MinerU `agent` / `accurate` 两个客户端与路由接入。
+
+**注**：PDF 解析**在本计划内**（Task 6）——它是纯本地的。原先把 PDF 归入后续计划是把「本地的文本解析」与「需网络的 MinerU」混为一谈，已被 spec §15 的修正纠正。
