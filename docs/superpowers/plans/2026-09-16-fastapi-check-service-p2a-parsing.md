@@ -54,7 +54,9 @@
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `DetectFormatError`、`ParsingError(message, code, path)`；`detect_file_format(path: Path) -> FileFormat`，`FileFormat` 为 dataclass（`kind: Literal['docx','doc','pdf','xlsx','markdown','txt','unknown']`、`extension: str`、`mime: str`）；`SUPPORTED_EXTENSIONS: frozenset[str]`
+- Produces: `ParsingError(message, *, code: str, path: str | None = None)`（放在 `app/domain/shared/errors.py`，只 import `__future__`，不碰框架）；`detect_file_format(path: Path) -> FileFormat`；`FileFormat` 为 frozen dataclass（`kind: str`、`extension: str`、`mime: str`），`kind` 取 `'docx' | 'doc' | 'pdf' | 'xlsx' | 'markdown' | 'txt'` 之一（**无 `'unknown'`**：识别失败直接抛 `ParsingError`）；`SUPPORTED_EXTENSIONS: frozenset[str]`（**扩展名**集合，仅用于报错信息；`.md` 与 `.markdown` 的 `kind` 都是 `'markdown'`）
+  - 裁定 R5：`_is_zip` 用**纯魔数比对**，不用 `zipfile.ZipFile`（与 Node `isZipHeader` 一致，且才有 `_by_magic` 用例成立）
+  - 裁定 R6：不定义 `DetectFormatError`（原 Interfaces 行的残留，全计划零引用）
 
 - [ ] **Step 1: 加依赖并安装**
 
