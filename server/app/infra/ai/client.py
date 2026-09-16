@@ -53,7 +53,10 @@ class AiClient:
         headers = {"Authorization": f"Bearer {config.api_key}"}
         async with self._gate:
             try:
-                response = await self._http.post(url, json=body, headers=headers)
+                response = await self._http.post(
+                    url, json=body, headers=headers,
+                    timeout=httpx.Timeout(config.timeout_seconds),
+                )
             except httpx.HTTPError as error:
                 log_ai_failure("chat", {"type": "transport-error", "error": str(error)})
                 raise AiRequestError(f"模型请求失败：{error}") from error
@@ -66,7 +69,7 @@ class AiClient:
             )
         try:
             return response.json()["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, ValueError) as error:
+        except (KeyError, IndexError, ValueError, TypeError) as error:
             log_ai_failure("chat", {"type": "shape-error", "body": response.text[:200]})
             raise AiRequestError("模型响应结构不符合预期") from error
 

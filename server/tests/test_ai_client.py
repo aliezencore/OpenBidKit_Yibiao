@@ -157,3 +157,64 @@ async def test_missing_base_url_raises():
     await client.aclose()
 
     assert "Base URL" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"choices": None}, id="choices-null"),
+        pytest.param({"foo": 1}, id="no-choices-key"),
+    ],
+)
+async def test_chat_shape_error_raises_ai_request_error_and_logs(body, capsys):
+    # R18: 任意畸形响应结构都必须以 AiRequestError 结束，且必须打到
+    # 常开诊断通道（log_ai_failure，打印 type=shape-error）。
+    # {"choices": None} -> None[0] 抛 TypeError（原 except 元组遗漏，会漏出去）；
+    # {"foo": 1}        -> ["choices"] 抛 KeyError。
+    def handler(request):
+        return httpx.Response(200, json=body)
+
+    client = make_client(handler)
+    with pytest.raises(AiRequestError) as info:
+        await client.chat([{"role": "user", "content": "x"}])
+    await client.aclose()
+
+    # 必须是 AiRequestError，而不是裸的 TypeError / KeyError / IndexError / ValueError 逃逸
+    assert not isinstance(info.value, (TypeError, KeyError, IndexError, ValueError))
+    assert "模型响应结构" in str(info.value)
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert "type=shape-error" in out[0]
+
+
+async def test_vision_request_uses_vision_timeout_not_text_timeout():
+    # R19: 每个模型必须用自己的 timeout_seconds。
+    # 注意：httpx.MockTransport 不施加真实 socket 超时（time.sleep 不会触发超时），
+    # 因此这里用确定性方式——读取 httpx 贴在请求上的有效 timeout 扩展——来证明
+    # 哪一份 timeout_seconds 被应用到了请求上。这正是裁定允许「更确定的判定方式」。
+    settings = Settings(
+        _env_file=None,
+        text_model=ModelConfig(base_url="https://api.example.com/v1", api_key="sk-a",
+                               model_name="text-model", timeout_seconds=0.01),
+        vision_model=ModelConfig(base_url="https://api.example.com/v1", api_key="sk-a",
+                                 model_name="vision-model", timeout_seconds=5.0),
+        ai_max_concurrency=2,
+    )
+
+    captured = []
+
+    def handler(request):
+        timeout = request.extensions.get("timeout")
+        captured.append(timeout["connect"] if timeout else None)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    client = AiClient(settings, transport=httpx.MockTransport(handler))
+
+    await client.chat([{"role": "user", "content": "x"}], use_vision=False)  # text timeout
+    await client.chat([{"role": "user", "content": "x"}], use_vision=True)   # vision timeout
+    await client.aclose()
+
+    # 文本请求用 text_model.timeout_seconds，视觉请求用 vision_model.timeout_seconds
+    assert captured[0] == 0.01
+    assert captured[1] == 5.0
