@@ -1,10 +1,12 @@
 import asyncio
+import sqlite3
 
 import httpx
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 
+from app.api import deps
 from app.config import Settings
 from app.main import create_app
 
@@ -139,3 +141,64 @@ def test_startup_recovers_interrupted_tasks(tmp_path):
         task = second.get("/tasks/t-interrupted").json()
 
     assert task["status"] == "interrupted"
+
+
+def test_build_state_closes_database_when_executor_construction_fails(tmp_path, monkeypatch):
+    # 裁定 R23：构造在数据库已建成之后失败时，必须回滚——关闭已开的 SQLite 连接，
+    # 并且原异常要照旧抛给调用方（不能吞掉）。
+    closed = []
+
+    class RecordingDatabase(deps.Database):
+        def close(self) -> None:
+            closed.append(self)
+            super().close()
+
+    class FailingExecutor:
+        def __init__(self, max_workers: int) -> None:
+            raise RuntimeError("executor construction failed")
+
+    monkeypatch.setattr(deps, "Database", RecordingDatabase)
+    monkeypatch.setattr(deps, "CpuExecutor", FailingExecutor)
+
+    settings = Settings(_env_file=None, data_root=tmp_path)
+
+    with pytest.raises(RuntimeError, match="executor construction failed"):
+        deps.build_state(settings)
+
+    assert len(closed) == 1
+    # 不只是「close() 被调用过」：底层连接确实已关闭（再用即报错）。
+    with pytest.raises(sqlite3.ProgrammingError):
+        closed[0].query("SELECT 1")
+
+
+def test_build_state_shuts_down_cpu_pool_then_database_when_ai_construction_fails(
+    tmp_path, monkeypatch
+):
+    # 线程池是泄漏后果最重的一环：构造在 cpu 已建、ai 才失败时，
+    # 必须按 aclose 的顺序（cpu → db）逐个释放。
+    events = []
+
+    class RecordingDatabase(deps.Database):
+        def close(self) -> None:
+            events.append("db.close")
+            super().close()
+
+    class RecordingExecutor(deps.CpuExecutor):
+        def shutdown(self, wait: bool = True) -> None:
+            events.append("cpu.shutdown")
+            super().shutdown(wait=wait)
+
+    class FailingAiClient:
+        def __init__(self, settings: Settings) -> None:
+            raise RuntimeError("ai construction failed")
+
+    monkeypatch.setattr(deps, "Database", RecordingDatabase)
+    monkeypatch.setattr(deps, "CpuExecutor", RecordingExecutor)
+    monkeypatch.setattr(deps, "AiClient", FailingAiClient)
+
+    settings = Settings(_env_file=None, data_root=tmp_path)
+
+    with pytest.raises(RuntimeError, match="ai construction failed"):
+        deps.build_state(settings)
+
+    assert events == ["cpu.shutdown", "db.close"]

@@ -41,17 +41,34 @@ class AppState:
 
 
 def build_state(settings: Settings) -> AppState:
-    db = Database(settings.db_path)
-    apply_schema(db)
-    projects = ProjectRepository(db)
-    tasks = TaskRepository(db)
-    logs = TaskLogRepository(db)
-    bus = EventBus()
-    engine = TaskEngine(tasks, logs, settings, publisher=bus)
-    # 上次进程被强杀时遗留的 running 任务标为 interrupted（spec §6.4）
-    engine.recover_interrupted()
-    cpu = CpuExecutor(settings.cpu_workers)
-    ai = AiClient(settings)
+    # 构造失败时必须回滚已建资源，否则 lifespan 顶部的 build_state 抛出后
+    # 关闭逻辑（aclose）永远不会执行，SQLite 连接与 CpuExecutor 线程池会随
+    # 每次失败重启累积泄漏（裁定 R23）。释放顺序与 aclose 一致，且逐个释放
+    # 互不影响。AiClient 无需在此释放：httpx.AsyncClient 惰性建连、构造期不持有
+    # OS/网络资源，且它是最后一步（详见报告 R23 的裁定说明）。
+    db: Database | None = None
+    cpu: CpuExecutor | None = None
+    try:
+        db = Database(settings.db_path)
+        apply_schema(db)
+        projects = ProjectRepository(db)
+        tasks = TaskRepository(db)
+        logs = TaskLogRepository(db)
+        bus = EventBus()
+        engine = TaskEngine(tasks, logs, settings, publisher=bus)
+        # 上次进程被强杀时遗留的 running 任务标为 interrupted（spec §6.4）
+        engine.recover_interrupted()
+        cpu = CpuExecutor(settings.cpu_workers)
+        ai = AiClient(settings)
+    except BaseException:
+        # 用嵌套 finally 保证 cpu 释放失败时 db 仍会被关闭；随后原样重抛原异常。
+        try:
+            if cpu is not None:
+                cpu.shutdown(wait=False)
+        finally:
+            if db is not None:
+                db.close()
+        raise
     return AppState(settings=settings, db=db, projects=projects, tasks=tasks,
                     logs=logs, bus=bus, engine=engine, cpu=cpu, ai=ai)
 
