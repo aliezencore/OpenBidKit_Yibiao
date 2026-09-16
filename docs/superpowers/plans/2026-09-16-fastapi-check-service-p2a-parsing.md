@@ -582,11 +582,12 @@ def build_docx(
         else:
             doc.add_paragraph(text)
     if table:
-        rendered = doc.add_table(rows=0, cols=0)
-        for row in table:
-            cells = rendered.add_row().cells
-            for index, value in enumerate(row):
-                cells[index].text = value
+        # 裁定 R17：add_table(rows=0, cols=0) 会让 python-docx 抛 IndexError
+        # （它按行列数建网格）。按实际形状建表再填单元格。
+        rendered = doc.add_table(rows=len(table), cols=len(table[0]))
+        for row_index, row in enumerate(table):
+            for col_index, value in enumerate(row):
+                rendered.cell(row_index, col_index).text = value
     doc.save(path)
     return path
 ```
@@ -596,8 +597,15 @@ def build_docx(
 创建 `server/tests/test_parsing_docx.py`：
 
 ```python
+import pytest
+
 from app.infra.parsing.docx import docx_to_markdown
-from app.infra.parsing.markdown import html_to_markdown, normalize_markdown
+from app.infra.parsing.markdown import (
+    extract_tables,
+    html_to_markdown,
+    normalize_markdown,
+    restore_tables,
+)
 from tests.parsing_fixtures import build_docx
 
 
@@ -640,6 +648,37 @@ def test_normalize_collapses_blank_runs(tmp_path):
 
 def test_html_to_markdown_keeps_bold(tmp_path):
     assert "**加粗**" in html_to_markdown("<p><strong>加粗</strong></p>")
+
+
+def test_extract_tables_returns_placeholder_and_gfm():
+    """裁定 R15：markdownify 自己也能产出 GFM 表格，所以端到端的表格用例
+    区分不出「是否走了占位符往返」。这两个 helper 的契约必须由它们自己的
+    单测钉住，否则整条占位符机制等于没有测试。"""
+    html = "<p>前</p><table><tr><th>项目</th><th>金额</th></tr><tr><td>土建</td><td>100</td></tr></table><p>后</p>"
+
+    html_without_tables, tables = extract_tables(html)
+
+    assert "<table>" not in html_without_tables
+    assert "<!--TABLE:0-->" in html_without_tables
+    assert tables == ["| 项目 | 金额 |\n| --- | --- |\n| 土建 | 100 |"]
+    assert "前" in html_without_tables and "后" in html_without_tables
+
+
+def test_restore_tables_puts_the_table_back():
+    html_without_tables, tables = extract_tables(
+        "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+    )
+
+    restored = restore_tables(html_without_tables, tables)
+
+    assert "<!--TABLE:0-->" not in restored
+    assert "| A |" in restored and "| --- |" in restored and "| 1 |" in restored
+
+
+def test_extract_tables_ignores_table_without_rows():
+    html_without_tables, tables = extract_tables("<table></table><p>x</p>")
+    assert tables == []
+    assert "x" in html_without_tables
 
 
 def test_empty_document_yields_empty_string(tmp_path):
@@ -795,7 +834,7 @@ def docx_to_markdown(path: Path, *, include_images: bool = False) -> str:
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_docx.py -v`
-Expected: PASS（7 passed）。若 mammoth 对 `add_heading` 产出的标题映射与断言不符（例如产出 `<h1>` 但 markdownify 需要 ATX），按实际输出调整**断言**而不是实现——这一步的验收是结构等价。
+Expected: PASS（10 passed）。若 mammoth 对 `add_heading` 产出的标题映射与断言不符（例如产出 `<h1>` 但 markdownify 需要 ATX），按实际输出调整**断言**而不是实现——这一步的验收是结构等价。
 
 - [ ] **Step 6: 提交**
 
