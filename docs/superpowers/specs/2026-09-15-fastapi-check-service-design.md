@@ -295,35 +295,59 @@ class TaskContext(Protocol):
 
 ## 8. 文档解析与图片管线
 
-### 8.1 解析选型
+### 8.1 解析选型（2026-09-16 修订，用户已确认「Python 原生等价物」）
 
-| 扩展名            | 方案                                                   |
-| -------------- | ---------------------------------------------------- |
-| `.docx`        | `python-docx` + `lxml`（部分行为需直接读 `word/document.xml`） |
-| `.pdf`         | `PyMuPDF`（纯 wheel，无系统依赖）                             |
-| `.xlsx`        | `openpyxl`                                           |
-| `.txt` / `.md` | 直读                                                   |
-| `.doc`         | 见 §8.2                                               |
-| 其他             | 报错并列出支持的扩展名                                          |
+**现状事实**（2026-09-16 实读 `doc2markdown/convert.mjs`，1633 行）：现有本地解析是一条**库链**，不是手写解析器——
+docx → **mammoth**（HTML）→ 表格用 **cheerio** 抽出、GFM 渲染、占位符回填 → **turndown + GFM 插件**（HTML→markdown）→ normalize；
+PDF 走 **pdf-parse + pdfjs-dist**（含约 150 行自定义的矩形表格抽取）；
+xlsx 走 **SheetJS**；编码探测 chardet + iconv-lite；旧 `.doc` 由 **LibreOffice 转 docx** 后走 docx 路径。
 
-MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` 重做，token 走配置。解析路由按扩展名 + 配置里的 provider 选择器决定，与现在 `resolveFileParser` 同构。
+**决定：采用 Python 原生等价物，验收标准为「结构等价」而非逐字节一致。** 理由：mammoth / turndown / pdfjs 的表格算法均无精确 Python 对应，逐字节对齐不可达；而服务的目标是检查可用，不是与 Electron 逐字节一致。
 
-### 8.2 `.doc` 旧格式降级
+| 扩展名            | Python 方案                                                              |
+| -------------- | ---------------------------------------------------------------------- |
+| `.docx`        | python-mammoth（docx→HTML）+ 表格抽取（lxml/bs4）+ markdownify（HTML→markdown）+ 归一化 |
+| `.pdf`         | PyMuPDF（文本 + `find_tables`）                                            |
+| `.xlsx`        | openpyxl                                                               |
+| `.txt` / `.md` | 直读 + charset-normalizer 编码探测                                           |
+| `.doc`         | 见 §8.2                                                                 |
+| 其他             | 报错并列出支持的扩展名                                            |
 
-首版对 `.doc` **不做本地正文提取**：只读 OLE 元数据（供查重使用）并给出明确的不支持提示，正文走 MinerU 在线解析。纯 Python 没有可靠的 `.doc` 正文提取方案，不为此引入重型依赖。
+**代价（必须显式承担）**：markdown 输出与 Electron 版**必然不同**——查重的正文切句、目录抽取结果会与旧客户端漂移。因此：
+
+- P3 的查重阈值与切句口径**必须用新管线的输出重新校准**，不得直接沿用旧客户端的调参结果；
+- §11.2 的金标准对照仅适用于其明确列出的四类（Prompt 构造、归一化/去重、指纹口径、聚合口径），**不包含解析器的 markdown 输出**。
+
+MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` 重做，token 走配置。解析路由按扩展名 + 配置里的 provider 选择器决定，与现在 `resolveFileParser` 同构，**含「请求的 provider 不支持该扩展名 → 回退本地」语义**。
+
+### 8.2 `.doc`（2026-09-16 修订，原「降级」决定作废）
+
+原 §8.2 说 `.doc` 首版降级、正文走 MinerU——**该决定基于不完整的调研，作废**。现有客户端对 `.doc` 的本地支持就是 LibreOffice 转 docx（`withLegacyWordDocxFile` + `runLibreOfficeDocxConversion`），Python 侧同样调用 `soffice --convert-to docx` 后走 docx 路径。LibreOffice 不可用时给出明确错误，对齐现有 `LIBREOFFICE_REQUIRED_MESSAGE` 的语义。
 
 ### 8.3 图片管线（印章检查用）
 
 1. **提取**：`zipfile` 读 `word/media/*`；解析 `document.xml` 的 `r:embed` / `r:link` 关系拿放置位置。
-2. **上下文**：**按段落索引**计算 `section_title` / `nearby_text`，对齐现有 `docxVisualAssetExtractor`。章节优先级：标题样式 / 中文编号模式 → 加粗短段 → `None`，**不加**「上一个非空段落」兜底。  
+2. **上下文**：**按段落索引**计算 `section_title` / `nearby_text`，对齐现有 `docxVisualAssetExtractor`。章节优先级：标题样式 / 中文编号模式 → 加粗短段 → `None`，**不加**「上一个非空段落」兜底。
    绝不退回按字符偏移切 XML —— 旧实现那版产出的「附近文本」是 XML 碎片，还被当作位置上下文喂给模型。
-3. **转码**：`Pillow` 直接支持 PNG / JPEG / GIF / BMP / WebP / TIFF，**比 Electron 侧强**（`nativeImage` 只认 PNG/JPEG，需靠离屏 Chromium 兜底）。压缩参数（尺寸上限、质量）对齐现有 `compressLocalImageToDataUrl` 的策略。
+3. **格式决策与转码**：沿用现有 `resolveImagePlan` 的四分动作（`compress` / `passthrough` / `transcode` / `skip`）与全部跳过码（`UNSUPPORTED_IMAGE_FORMAT`、`PASSTHROUGH_TOO_LARGE`），以及 `computeTargetSize` 的等比缩放语义。**理由**：印章 VLM 的输入形态要对齐——GIF 原字节透传、BMP/WebP 转码是现有实现刻意的取舍，不是 Electron 的缺陷；Python 侧虽然 Pillow 也能解 GIF/BMP/WebP，仍保留同一动作分类，只把「transcode」的实现从离屏 Chromium 换成 Pillow，「compress」的实现换成 Pillow 压缩。`skipped` 的码与「未能识别的图片」清单直接依赖这些码，改动会造成 P4 行为漂移。
 
 ### 8.4 必须保留的三条既有约定
 
 1. **按 `content_hash` 去重**，同一 hash 的所有出现位置**共享**跳过 / 失败结果（`applyContentOutcomeToSiblings` 语义）。
 2. **`skipped` 两分**（`skipKind`）：`unsupported-format`（格式解不了，**要进**「未能识别的图片」清单）vs `not-seal-area`（已识别但判定为产品截图 / 拓扑图 / 照片，**不进**清单）。`stats.skippedAssets` 两种都计。
 3. **单张失败不连坐**：上传前预检（不可读 → `skipped` 且不进批次）；批次失败**降级为逐张重试**。
+
+### 8.5 解析一致性验收（2026-09-16 新增）
+
+解析输出的验收是**结构等价**，用真实 docx/pdf/xlsx 样本对照：
+
+- 标题层级序列一致（层级深度可不同，相对结构须一致）；
+- 表格数量与行列数一致；
+- 段落数量在同一量级（±10%），无 XML 碎片、无 base64 泄漏进正文；
+- 图片占位数量与位置一致；
+- 编码探测对 GBK/UTF-8/BOM 样本均正确。
+
+不要求逐字节一致；LLM 提示词对 markdown 风格不敏感，但**不得**出现解析伪影。
 
 ## 9. 流程对照（搬运基准）
 
