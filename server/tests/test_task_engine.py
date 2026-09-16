@@ -118,6 +118,40 @@ async def test_progress_write_is_throttled_but_still_broadcast(env):
     assert broadcast == [10, 20, 25], "节流只影响落库，不影响实时广播"
 
 
+async def test_progress_repeated_identical_percent_does_not_write(env):
+    """R13：逐文件循环重复落到同一整数百分比时，不得重复写库。
+
+    旧逻辑在 changed 为 False 时会「穿透」到写库分支，导致每个重复百分比
+    都写一遍数据库，违背节流初衷。本测试用受控 Clock 复现该场景，并断言
+    persisted 序列——只有真正的首次落库标记为 True，其余重复广播均为 False。
+    """
+
+    async def runner(ctx, payload, previous_state):
+        ctx.progress(50, "x")          # 首次：changed + 间隔无限 → 落库
+        env["clock"].seconds += 0.30    # 超过 0.2s 间隔，但百分比未变
+        ctx.progress(50, "x")          # 重复同一整数：不应写库
+        env["clock"].seconds += 0.30
+        ctx.progress(50, "x")          # 再次重复：不应写库
+
+    task_id = await env["engine"].submit(
+        project_id=env["project_id"], domain="duplicate", kind="duplicate-analysis",
+        payload={}, runner=runner,
+    )
+    await env["engine"].drain()
+
+    progress_events = [event for _, event in env["publisher"].events
+                       if event["type"] == "progress"]
+    persisted = [event["persisted"] for event in progress_events]
+    broadcast = [event["progress"] for event in progress_events]
+
+    # 三帧都广播了，但只有第一帧真正写库；后续重复百分比被节流拦截。
+    assert broadcast == [50, 50, 50], "节流只拦落库，不拦广播"
+    assert persisted == [True, False, False], \
+        "重复的相同百分比不应触发第二次落库（R13 缺陷：旧逻辑会漏写条件而回退到写库）"
+    # 落库行停在首次写入的 50，未被重复写入覆盖（值相同，仅作一致性核验）。
+    assert read(env, task_id)["progress"] == 50
+
+
 async def test_checkpoint_persists_state(env):
     async def runner(ctx, payload, previous_state):
         ctx.checkpoint({"stage": "outline", "done": [1, 2]})

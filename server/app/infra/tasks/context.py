@@ -50,19 +50,18 @@ class TaskContext:
         now = self._monotonic()
         changed = value != self._last_percent
         elapsed = now - self._last_write_at
-        if changed and elapsed < self._interval:
-            # 节流：百分比变了但间隔未到，仍要透传给订阅者，只是不落库。
-            self._publisher.publish(self.task_id, {
-                "type": "progress", "taskId": self.task_id,
-                "progress": value, "stageLabel": label, "persisted": False,
-            })
-            return
-        self._last_write_at = now
-        self._last_percent = value
-        self._repo.set_progress(self.task_id, value, label)
+        persisted = False
+        # 节流：仅在「百分比变化」且「距上次落库已满间隔」时才写库。
+        # 百分比未变化（例如逐文件循环重复落到同一整数）一律不写库，
+        # 但仍要保留「始终广播」这一副作用，仅把 persisted 标记为 False。
+        if changed and elapsed >= self._interval:
+            self._repo.set_progress(self.task_id, value, label)
+            self._last_write_at = now
+            self._last_percent = value
+            persisted = True
         self._publisher.publish(self.task_id, {
             "type": "progress", "taskId": self.task_id,
-            "progress": value, "stageLabel": label, "persisted": True,
+            "progress": value, "stageLabel": label, "persisted": persisted,
         })
 
     def log(self, message: str) -> None:
