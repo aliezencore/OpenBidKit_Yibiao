@@ -8,6 +8,7 @@ from app.domain.shared.protocols import (
 )
 
 DOMAIN_DIR = Path(__file__).resolve().parents[1] / "app" / "domain"
+PROJECT_ROOT = DOMAIN_DIR.parents[1]
 FORBIDDEN_ROOTS = {
     "fastapi",
     "starlette",
@@ -35,6 +36,39 @@ def imported_roots(path: Path) -> set[str]:
     return roots
 
 
+def package_parts_for(path: Path) -> tuple[str, ...]:
+    """由文件路径推出其所在包的分段。
+
+    例如 `server/app/domain/shared/protocols.py` -> `("app", "domain", "shared")`。
+    """
+    relative = path.resolve().relative_to(PROJECT_ROOT)
+    return relative.with_suffix("").parts[:-1]
+
+
+def absolute_import_target(
+    package_parts: tuple[str, ...], level: int, module: str | None
+) -> str | None:
+    """把一条 import-from 语句解析为绝对点分目标。
+
+    `level` 为 `ast.ImportFrom.level`：0 为绝对导入，1 为 `.x`、2 为 `..x`、3 为 `...x`。
+    `module` 可为 None（`from . import x`）。过深的相对导入是畸形语句，返回 None，
+    而不是靠负索引拼出一个错误的目标。
+    """
+    if level == 0:
+        return module
+    keep = len(package_parts) - (level - 1)
+    if keep <= 0:
+        return None
+    parts = list(package_parts[:keep])
+    if module:
+        parts.append(module)
+    return ".".join(parts)
+
+
+def is_infra_target(target: str) -> bool:
+    return target == "app.infra" or target.startswith("app.infra.")
+
+
 def test_domain_modules_exist():
     assert iter_domain_modules(), "domain 目录下应当存在模块"
 
@@ -52,13 +86,58 @@ def test_domain_does_not_import_frameworks():
 def test_domain_does_not_import_infra():
     offenders = []
     for path in iter_domain_modules():
+        package_parts = package_parts_for(path)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module.startswith("app.infra") or "/infra" in node.module:
-                    offenders.append(f"{path.name} -> {node.module}")
+            if isinstance(node, ast.ImportFrom):
+                target = absolute_import_target(package_parts, node.level, node.module)
+                if target and is_infra_target(target):
+                    offenders.append(f"{path.name} -> {target}")
 
     assert offenders == [], f"domain 层不得依赖 infra：{offenders}"
+
+
+def test_resolver_keeps_absolute_import_unchanged():
+    target = absolute_import_target(("app", "domain", "shared"), 0, "app.infra.db.engine")
+
+    assert target == "app.infra.db.engine"
+
+
+def test_resolver_maps_level_2_to_the_enclosing_package():
+    parts = package_parts_for(PROJECT_ROOT / "app" / "domain" / "shared" / "protocols.py")
+
+    assert parts == ("app", "domain", "shared")
+    assert absolute_import_target(parts, 2, "rejection") == "app.domain.rejection"
+
+
+def test_resolver_maps_level_3_from_domain_shared_to_app_root():
+    parts = package_parts_for(PROJECT_ROOT / "app" / "domain" / "shared" / "protocols.py")
+
+    target = absolute_import_target(parts, 3, "infra.db.engine")
+
+    assert target == "app.infra.db.engine"
+    assert is_infra_target(target)
+
+
+def test_resolver_keeps_within_domain_relative_import_inside_domain():
+    parts = package_parts_for(PROJECT_ROOT / "app" / "domain" / "rejection" / "foo.py")
+
+    target = absolute_import_target(parts, 2, "shared.protocols")
+
+    assert target == "app.domain.shared.protocols"
+    assert not is_infra_target(target)
+
+
+def test_resolver_returns_none_for_over_deep_level():
+    parts = ("app", "domain", "shared")
+
+    assert absolute_import_target(parts, 4, "infra") is None
+    assert absolute_import_target(parts, 99, "infra") is None
+
+
+def test_resolver_handles_missing_module():
+    assert absolute_import_target(("app", "domain", "shared"), 1, None) == "app.domain.shared"
+    assert absolute_import_target(("app", "domain", "shared"), 0, None) is None
 
 
 class FakeContext:
