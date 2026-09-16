@@ -38,6 +38,8 @@ class TaskEngine:
         self._monotonic = monotonic_fn or (lambda: asyncio.get_running_loop().time())
         self._running: dict[str, asyncio.Task] = {}
         self._contexts: dict[str, TaskContext] = {}
+        self._global_gate = asyncio.Semaphore(settings.task_global_concurrency)
+        self._project_gates: dict[str, asyncio.Semaphore] = {}
 
     async def submit(self, *, project_id: str, domain: str, kind: str,
                      payload: dict, runner: Runner) -> str:
@@ -54,9 +56,23 @@ class TaskEngine:
         self._contexts[task_id] = ctx
         self._publish(task_id, {"type": "status", "taskId": task_id, "status": "queued"})
         self._running[task_id] = asyncio.create_task(
-            self._run(task_id, ctx, runner, payload, previous_state)
+            self._run_gated(task_id, ctx, runner, payload, previous_state, project_id)
         )
         return task_id
+
+    def _project_gate(self, project_id: str) -> asyncio.Semaphore:
+        gate = self._project_gates.get(project_id)
+        if gate is None:
+            gate = asyncio.Semaphore(1)
+            self._project_gates[project_id] = gate
+        return gate
+
+    async def _run_gated(self, task_id: str, ctx: TaskContext, runner: Runner,
+                         payload: dict, previous_state: dict | None,
+                         project_id: str) -> None:
+        async with self._global_gate:
+            async with self._project_gate(project_id):
+                await self._run(task_id, ctx, runner, payload, previous_state)
 
     async def _run(self, task_id: str, ctx: TaskContext, runner: Runner,
                    payload: dict, previous_state: dict | None) -> None:

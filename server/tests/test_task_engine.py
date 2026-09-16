@@ -238,3 +238,68 @@ async def test_has_active_task_reports_running_task(env):
     release.set()
     await env["engine"].drain()
     assert env["engine"].has_active_task(env["project_id"]) is False
+
+
+async def test_project_gate_serializes_second_task(tmp_path):
+    db = Database(tmp_path / "gate.sqlite")
+    apply_schema(db)
+    projects = ProjectRepository(db)
+    tasks = TaskRepository(db)
+    logs = TaskLogRepository(db)
+    settings = Settings(_env_file=None, task_global_concurrency=4)
+    engine = TaskEngine(tasks, logs, settings)
+    project_id = projects.create("P")
+
+    order = []
+    release = asyncio.Event()
+
+    async def runner(ctx, payload, previous_state):
+        order.append(payload["name"])
+        await release.wait()
+
+    await engine.submit(project_id=project_id, domain="duplicate",
+                        kind="duplicate-analysis", payload={"name": "first"}, runner=runner)
+    await asyncio.sleep(0)
+    await engine.submit(project_id=project_id, domain="duplicate",
+                        kind="duplicate-analysis", payload={"name": "second"}, runner=runner)
+    await asyncio.sleep(0.05)
+
+    assert order == ["first"], "同一项目同时只允许一个写任务"
+
+    release.set()
+    await engine.drain()
+    assert order == ["first", "second"]
+    db.close()
+
+
+async def test_global_gate_limits_across_projects(tmp_path):
+    db = Database(tmp_path / "gate2.sqlite")
+    apply_schema(db)
+    projects = ProjectRepository(db)
+    tasks = TaskRepository(db)
+    logs = TaskLogRepository(db)
+    settings = Settings(_env_file=None, task_global_concurrency=2)
+    engine = TaskEngine(tasks, logs, settings)
+
+    running = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def runner(ctx, payload, previous_state):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await release.wait()
+        running -= 1
+
+    for index in range(5):
+        await engine.submit(project_id=projects.create(f"P{index}"), domain="duplicate",
+                            kind="duplicate-analysis", payload={}, runner=runner)
+    for _ in range(10):
+        await asyncio.sleep(0.01)
+
+    assert peak == 2, "全局并发上限应生效"
+
+    release.set()
+    await engine.drain()
+    db.close()
