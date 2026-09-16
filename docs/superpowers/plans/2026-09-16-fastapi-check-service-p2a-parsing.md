@@ -860,8 +860,6 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 创建 `server/tests/test_parsing_legacy_doc.py`：
 
 ```python
-import sys
-
 import pytest
 
 from app.infra.parsing import ParsingError
@@ -873,12 +871,11 @@ def test_find_soffice_returns_none_or_str():
     assert find_soffice() is None or isinstance(find_soffice(), str)
 
 
-@pytest.mark.skipif(find_soffice() is None, reason="本机未安装 LibreOffice")
-def test_doc_converts_when_libreoffice_available(tmp_path):
-    # 该用例需要一份真实的 .doc 样本；没有样本时跳过。
-    sample = tmp_path / "a.doc"
-    if not sample.exists():
-        pytest.skip("缺少 .doc 夹具")
+# 裁定 R20：**不要**写「造一个不存在的 .doc 路径再 skip」的用例——它自己构造路径、
+# 自己判定不存在、再跳过自己，在任何机器上都不会执行到断言，属零信息量的死用例。
+# .doc → docx 的真实转换需要一份真实的 .doc 样本，而本机（以及多数 CI）没有
+# LibreOffice，产不出样本，因此**该路径无法在自动化里验证**，如实记为已知缺口
+# （见本计划「完成标准」下方），由装了 LibreOffice 的机器手工验证。
 
 
 def test_missing_libreoffice_raises_parsing_error(tmp_path, monkeypatch):
@@ -964,7 +961,7 @@ def doc_to_markdown(path: Path) -> str:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_legacy_doc.py -v`
-Expected: PASS（本机无 LibreOffice 时 1 skipped + 2 passed）
+Expected: PASS（2 passed——本机无 LibreOffice，`find_soffice()` 返回 None，两个用例都不依赖它）
 
 - [ ] **Step 5: 提交**
 
@@ -1398,6 +1395,7 @@ def test_docx_structure_equivalence(sample_docx):
 - `parse_document()` 对 docx / doc / pdf / xlsx / txt / md 六类输入都能产出 markdown 并落盘，`rejection_check_documents` 行含 `content_hash`。
 - `resolve_parser` 的三段语义（支持 / 回退本地 / 不支持）与现有 `resolveFileParser` 一致；`local` 支持集为 docx/doc/pdf/xlsx/txt/md。
 - 全程无网络请求（MinerU 属 P2c）。
+- **已知验证缺口（裁定 R20）**：`.doc → docx` 的**真实转换**未被自动化覆盖——需要一份真实 `.doc` 样本，而样本要靠 LibreOffice 产出、本机没有。自动化只覆盖 `find_soffice()` 的契约与「LibreOffice 缺失时报 `libreoffice-missing`」。装了 LibreOffice 的机器上应手工验证一次真实 `.doc`。
 - 护栏测试仍全绿：解析库全部位于 `app/infra/parsing/`，`app/domain/**` 无新增依赖。
 
 ## 明确不做（属 P2b / P2c）
