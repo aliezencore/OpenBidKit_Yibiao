@@ -102,9 +102,17 @@ def infra_import_offenders(
 
 
 def _is_foreign_app_target(target: str) -> bool:
-    """命名空间规则（裁定 F1）：以 `app.` 开头、但不以 `app.domain.` 开头的
-    点分目标，即「domain 依赖了另一个 app 子包」，是违规。"""
-    return target.startswith("app.") and not target.startswith("app.domain.")
+    """命名空间规则（裁定 F1）：以 `app.` 开头、但不落在 `app.domain` 命名空间内
+    （既非 `app.domain.` 的子模块、也非裸的 `app.domain` 本身）的点分目标，
+    即「domain 依赖了另一个 app 子包」，是违规。
+
+    裸根 `app.domain` 必须放行：`import app.domain` 与
+    `from app.domain import shared` 解析到的都是域内模块，
+    旧写法 `not target.startswith("app.domain.")` 会把裸根误报为违规（R28）。
+    """
+    return target.startswith("app.") and target != "app.domain" and not target.startswith(
+        "app.domain."
+    )
 
 
 def foreign_app_import_offenders(
@@ -289,6 +297,9 @@ def test_infra_guard_flags_import_statements(source, expected):
         ("from . import something", []),
         # 同前缀不同包：`app.infrastructure` 拦下，但 `app.domain` 绝不误报。
         ("from app.domain.rejection import X", []),
+        # 裸的 domain 根（R28）：解析到域内模块，不得误报。
+        ("import app.domain", []),
+        ("from app.domain import shared", []),
     ],
 )
 def test_foreign_app_guard_flags_sibling_app_imports(source, expected):

@@ -1,7 +1,34 @@
 import sqlite3
 
+import pytest
+
 from app.infra.db.engine import Database
 from app.infra.db.migrate import add_column_if_missing, apply_schema, table_columns
+
+# 在 monkeypatch 动 `app.infra.db.engine.sqlite3.connect` 之前先抓住真函数，
+# 供包装类内部创建真实连接用。
+_REAL_CONNECT = sqlite3.connect
+
+
+class _PragmaFailingConnection:
+    """首次执行 PRAGMA 语句时抛 OperationalError 的连接包装（裁定 F7 回归用）。
+
+    内部持有一个真实 `sqlite3.Connection` 并委托其关闭，保证测试不留真实连接；
+    `row_factory` 等属性赋值按普通属性存储，与 `Database.__init__` 的行为兼容。
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._conn = _REAL_CONNECT(*args, **kwargs)
+        self.close_calls = 0
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.lstrip().upper().startswith("PRAGMA"):
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def close(self):
+        self.close_calls += 1
+        self._conn.close()
 
 
 def make_db(tmp_path):
@@ -125,3 +152,25 @@ def test_foreign_key_violation_raises(tmp_path):
         raise AssertionError("应当因外键约束失败")
 
     db.close()
+
+
+def test_init_closes_connection_when_pragma_fails(tmp_path, monkeypatch):
+    """裁定 F7 回归：__init__ 里任一 PRAGMA 失败必须关闭已建连接再抛出。
+
+    monkeypatch 的是 `app.infra.db.engine` 命名空间里的 `sqlite3.connect`
+    （engine 模块 `import sqlite3`，monkeypatch 会在用例结束后自动还原）。
+    """
+    created: list[_PragmaFailingConnection] = []
+
+    def fake_connect(*args, **kwargs):
+        conn = _PragmaFailingConnection(*args, **kwargs)
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr("app.infra.db.engine.sqlite3.connect", fake_connect)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        Database(tmp_path / "pragma-fail.sqlite")
+
+    assert len(created) == 1
+    assert created[0].close_calls == 1
