@@ -272,6 +272,77 @@ async def test_project_gate_serializes_second_task(tmp_path):
     db.close()
 
 
+async def test_cancelled_while_waiting_on_gate_is_cleaned_up(tmp_path):
+    """R15：在闸门排队期间被取消的任务，其登记必须被清理。
+
+    取消只发生在排队阶段（还没进入 _run），而清理逻辑若只挂在 _run 的
+    finally 上，task_id 就会永久滞留 _running：has_active_task() 永远为真，
+    drain() 也永远不结束。本用例按行为断言（无活跃任务 + drain 能结束），
+    不依赖私有字典的内容。
+    """
+    db = Database(tmp_path / "gate_cancel.sqlite")
+    apply_schema(db)
+    projects = ProjectRepository(db)
+    tasks = TaskRepository(db)
+    logs = TaskLogRepository(db)
+    settings = Settings(_env_file=None, task_global_concurrency=4)
+    engine = TaskEngine(tasks, logs, settings)
+    project_id = projects.create("P")
+
+    release = asyncio.Event()
+    first_started = asyncio.Event()
+    order = []
+
+    async def runner(ctx, payload, previous_state):
+        order.append(payload["name"])
+        first_started.set()
+        await release.wait()
+
+    # 第一个任务占住项目闸门。
+    first_id = await engine.submit(
+        project_id=project_id, domain="duplicate", kind="duplicate-analysis",
+        payload={"name": "first"}, runner=runner)
+    await asyncio.sleep(0)
+    assert first_started.is_set()
+
+    # 第二个任务排在同一项目闸门后面（只阻塞在闸门上，尚未进入 _run）。
+    second_id = await engine.submit(
+        project_id=project_id, domain="duplicate", kind="duplicate-analysis",
+        payload={"name": "second"}, runner=runner)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert order == ["first"], "第二个任务应仍阻塞在闸门上，未开始执行"
+
+    # 取第二个任务自身的 asyncio.Task 句柄以便取消（仅作操作句柄，不作断言）。
+    second_task = engine._running[second_id]
+
+    # 取消仍阻塞在闸门上的第二个任务，模拟外部 CancelledError（如事件循环关闭）。
+    second_task.cancel()
+    try:
+        await second_task
+    except asyncio.CancelledError:
+        pass
+
+    # 放行第一个任务，并等它真正收尾（只用 sleep(0) 握手，不读私有状态）。
+    release.set()
+    for _ in range(50):
+        if tasks.get(first_id)["status"] == "success":
+            break
+        await asyncio.sleep(0)
+    assert tasks.get(first_id)["status"] == "success"
+
+    # 行为断言一（同步、fail fast）：排队期被取消的任务不得让项目永久“有活跃任务”。
+    # 必须放在 drain() 之前：CPython 3.13 的 gather 对“子任务全部已完成”走同步快
+    # 路径，未修复时 drain() 会同步死循环、连 wait_for 都无法超时，先断言才能保证
+    # 回归是「失败」而不是「挂起」。
+    assert engine.has_active_task(project_id) is False, \
+        "排队期被取消的任务不得让 has_active_task 永久为真"
+
+    # 行为断言二：drain() 必须能结束（超时保护，防止任何形式的永不收敛）。
+    await asyncio.wait_for(engine.drain(), timeout=2)
+    db.close()
+
+
 async def test_global_gate_limits_across_projects(tmp_path):
     db = Database(tmp_path / "gate2.sqlite")
     apply_schema(db)

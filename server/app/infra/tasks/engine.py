@@ -70,9 +70,16 @@ class TaskEngine:
     async def _run_gated(self, task_id: str, ctx: TaskContext, runner: Runner,
                          payload: dict, previous_state: dict | None,
                          project_id: str) -> None:
-        async with self._global_gate:
-            async with self._project_gate(project_id):
-                await self._run(task_id, ctx, runner, payload, previous_state)
+        try:
+            async with self._global_gate:
+                async with self._project_gate(project_id):
+                    await self._run(task_id, ctx, runner, payload, previous_state)
+        finally:
+            # 在闸门排队期间被外部取消（如事件循环关闭）时不会进入 _run，
+            # 故登记必须在此兜底清理；否则 task_id 永久滞留 _running，
+            # drain() 的 while 会退化为忙循环，has_active_task() 也永远为真。
+            self._running.pop(task_id, None)
+            self._contexts.pop(task_id, None)
 
     async def _run(self, task_id: str, ctx: TaskContext, runner: Runner,
                    payload: dict, previous_state: dict | None) -> None:
