@@ -88,18 +88,32 @@ class TaskEngine:
         try:
             await runner(ctx, payload, previous_state)
         except (TaskCancelled, asyncio.CancelledError):
+            # 终端刷新：把最后一帧广播进度落库，避免 99% 停在 running/窗口内丢失。
+            self._flush_last_progress(ctx, task_id)
             self._repo.mark_finished(task_id, "cancelled", self._now())
             self._publish(task_id, {"type": "status", "taskId": task_id, "status": "cancelled"})
         except Exception as error:  # noqa: BLE001 —— 任务边界必须记录所有失败
+            self._flush_last_progress(ctx, task_id)
             self._repo.mark_finished(task_id, "error", self._now(), error=str(error))
             self._publish(task_id, {"type": "status", "taskId": task_id,
                                     "status": "error", "error": str(error)})
         else:
+            self._flush_last_progress(ctx, task_id)
             self._repo.mark_finished(task_id, "success", self._now())
             self._publish(task_id, {"type": "status", "taskId": task_id, "status": "success"})
         finally:
             self._contexts.pop(task_id, None)
             self._running.pop(task_id, None)
+
+    def _flush_last_progress(self, ctx: TaskContext, task_id: str) -> None:
+        """终结路径专用：把最后一帧广播进度刷入数据库（裁定 F2）。
+
+        节流只约束中间帧；若末帧落在节流窗口内从未落库，这里强制补写，
+        保证 DB 行的最终 progress 与最后一次广播一致。所有终结结果
+        （success/error/cancelled）都会调用，runner 从未调用 progress 时为 None，不写。
+        """
+        if ctx.last_progress is not None:
+            self._repo.set_progress(task_id, ctx.last_progress, ctx.last_progress_label)
 
     def cancel(self, task_id: str) -> bool:
         ctx = self._contexts.get(task_id)
@@ -117,13 +131,15 @@ class TaskEngine:
         return False
 
     def recover_interrupted(self) -> list[str]:
-        """进程启动时调用：把上次遗留的 running 任务标记为 interrupted。
+        """进程启动时调用：把上次遗留的 running / queued 任务标记为 interrupted。
 
         对齐 spec §6.4 —— 进程重启会中断进行中的任务，靠 checkpoint_json 续跑。
+        queued 也要纳入：进程在任务還排队的阶段被强杀时，那一行会永远停在 queued，
+        list_active 持续返回它、cancel 又清不掉，成为永久幽灵（裁定 F6）。
         """
         interrupted: list[str] = []
         for task in self._repo.list_active():
-            if task["status"] != "running":
+            if task["status"] not in ("running", "queued"):
                 continue
             self._repo.mark_finished(task["task_id"], "interrupted", self._now())
             interrupted.append(task["task_id"])

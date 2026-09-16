@@ -71,10 +71,13 @@ def is_infra_target(target: str) -> bool:
     return target == "app.infra" or target.startswith("app.infra.")
 
 
-def infra_import_offenders(source: str, package_parts: tuple[str, ...]) -> list[str]:
+def infra_import_offenders(
+    source: str, package_parts: tuple[str, ...], filename: str | None = None
+) -> list[str]:
     """返回源码中依赖 `app.infra` 的导入目标（均已解析为绝对点分名）。
 
     `package_parts` 是包含这些语句的文件所在包的分段，仅供相对导入换算使用。
+    `filename` 透传给 `ast.parse`，使语法错误的定位能命名文件（裁定 M26 恢复）。
 
     覆盖两种语句形式，且共用同一个 `is_infra_target` 判定 —— 不引入第二套
     「什么算 infra」的标准：
@@ -84,7 +87,7 @@ def infra_import_offenders(source: str, package_parts: tuple[str, ...]) -> list[
     - `ast.ImportFrom`（`from ...infra.db.engine import X`）：先由
       `absolute_import_target` 把相对目标换算成绝对点分名，再判定。
     """
-    tree = ast.parse(source)
+    tree = ast.parse(source, filename=filename or "<unknown>")
     offenders: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -95,6 +98,54 @@ def infra_import_offenders(source: str, package_parts: tuple[str, ...]) -> list[
             target = absolute_import_target(package_parts, node.level, node.module)
             if target and is_infra_target(target):
                 offenders.append(target)
+    return offenders
+
+
+def _is_foreign_app_target(target: str) -> bool:
+    """命名空间规则（裁定 F1）：以 `app.` 开头、但不以 `app.domain.` 开头的
+    点分目标，即「domain 依赖了另一个 app 子包」，是违规。"""
+    return target.startswith("app.") and not target.startswith("app.domain.")
+
+
+def foreign_app_import_offenders(
+    source: str, package_parts: tuple[str, ...], filename: str | None = None
+) -> list[str]:
+    """命名空间规则：domain 不得 import 任何非 `app.domain.` 的 app 子包。
+
+    取代原先只盯 `app.infra` 的黑名单思路（裁定 F1）。`from app.config import
+    Settings`、`from app import infra`、`import app.infrastructure` 这类「兄弟包」依赖
+    都会落网；而 `from app.domain...` 与域内的相对导入则一律放行。第三方框架仍由
+    `test_domain_does_not_import_frameworks` 的黑名单负责，二者互补。
+
+    - `ast.Import`（`import app.config`）：`alias.name` 已是绝对点分目标，直接判定；
+    - `ast.ImportFrom` 绝对导入（`from app.config import Settings`）：若被导入的
+      `module` 本身就是外来 app 子包（如 `app.config`），整段依赖已坐实，报 `module`
+      即可；若 `module` 不违规（如顶层 `app`），则再逐个检查 `module.<name>` 候选
+      （`from app import infra` 实际加载的是 `app.infra`，必须这样才拦得住）；
+    - `ast.ImportFrom` 相对导入（`from ..shared.protocols import X`）：先由
+      `absolute_import_target` 换算成绝对点分名再判定。
+    """
+    tree = ast.parse(source, filename=filename or "<unknown>")
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_foreign_app_target(alias.name):
+                    offenders.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                if _is_foreign_app_target(node.module):
+                    offenders.append(node.module)
+                else:
+                    for alias in node.names:
+                        if alias.name != "*":
+                            candidate = f"{node.module}.{alias.name}"
+                            if _is_foreign_app_target(candidate):
+                                offenders.append(candidate)
+            elif node.level >= 1:
+                target = absolute_import_target(package_parts, node.level, node.module)
+                if target and _is_foreign_app_target(target):
+                    offenders.append(target)
     return offenders
 
 
@@ -116,10 +167,27 @@ def test_domain_does_not_import_infra():
     offenders = []
     for path in iter_domain_modules():
         source = path.read_text(encoding="utf-8")
-        targets = infra_import_offenders(source, package_parts_for(path))
+        targets = infra_import_offenders(source, package_parts_for(path), filename=str(path))
         offenders.extend(f"{path.name} -> {target}" for target in targets)
 
     assert offenders == [], f"domain 层不得依赖 infra：{offenders}"
+
+
+def test_domain_does_not_import_other_app_packages():
+    """命名空间规则（裁定 F1）：domain 不得 import 任何非 app.domain 的兄弟 app 子包。
+
+    黑名单式的 `is_infra_target` 拦不住 `from app.config import Settings`、
+    `from app import infra` 这类兄弟包依赖；这里用命名空间规则一网打尽。
+    """
+    offenders = []
+    for path in iter_domain_modules():
+        source = path.read_text(encoding="utf-8")
+        targets = foreign_app_import_offenders(
+            source, package_parts_for(path), filename=str(path)
+        )
+        offenders.extend(f"{path.name} -> {target}" for target in targets)
+
+    assert offenders == [], f"domain 层不得依赖其他 app 子包：{offenders}"
 
 
 def test_resolver_keeps_absolute_import_unchanged():
@@ -198,6 +266,34 @@ DOMAIN_SHARED = ("app", "domain", "shared")
 )
 def test_infra_guard_flags_import_statements(source, expected):
     assert infra_import_offenders(source, DOMAIN_SHARED) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # 兄弟包绝对导入：`module` 本身即外来 app 子包，整段依赖坐实，报 module 即可。
+        ("from app.config import Settings", ["app.config"]),
+        # `module` 不违规（顶层 app），须逐个检查 `module.<name>` 才能拦住 app.infra。
+        ("from app import infra", ["app.infra"]),
+        ("import app.infrastructure", ["app.infrastructure"]),
+        ("import app.config.db", ["app.config.db"]),
+        # 域外相对导入（越过 domain 顶层）换算后落到 app.infra，必须拦下。
+        ("from ...infra.db.engine import Database", ["app.infra.db.engine"]),
+        # 框架（第三方）不在本规则管辖范围——交给 FORBIDDEN_ROOTS 黑名单。
+        ("import pydantic", []),
+        ("from fastapi import FastAPI", []),
+        # domain 内部依赖一律放行。
+        ("from app.domain.shared.protocols import TaskContextProtocol", []),
+        ("from app.domain.shared import protocols", []),
+        ("from ..shared.protocols import TaskContextProtocol", []),
+        ("from . import something", []),
+        # 同前缀不同包：`app.infrastructure` 拦下，但 `app.domain` 绝不误报。
+        ("from app.domain.rejection import X", []),
+    ],
+)
+def test_foreign_app_guard_flags_sibling_app_imports(source, expected):
+    result = foreign_app_import_offenders(source, DOMAIN_SHARED)
+    assert sorted(set(result)) == sorted(set(expected)), result
 
 
 class FakeContext:

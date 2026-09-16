@@ -24,11 +24,17 @@ class Database:
             isolation_level=None,
             check_same_thread=False,
         )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            # 任一 PRAGMA 失败（如两个进程同时启动争 WAL 锁）必须关闭已建连接并
+            # 原样抛出，否则连接泄漏且 build_state 的回滚也够不到它（裁定 F7）。
+            self._conn.close()
+            raise
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
         with self._lock:

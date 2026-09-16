@@ -1386,19 +1386,20 @@ class TaskContext:
         now = self._monotonic()
         changed = value != self._last_percent
         elapsed = now - self._last_write_at
-        if changed and elapsed < self._interval:
-            # 节流：百分比变了但间隔未到，仍要透传给订阅者，只是不落库。
-            self._publisher.publish(self.task_id, {
-                "type": "progress", "taskId": self.task_id,
-                "progress": value, "stageLabel": label, "persisted": False,
-            })
-            return
-        self._last_write_at = now
-        self._last_percent = value
-        self._repo.set_progress(self.task_id, value, label)
+        # 裁定 R13（Task 6 评审）：写库条件必须是 `changed and elapsed >= interval`。
+        # 原先写法（`changed and elapsed < interval` 才跳过）会让百分比**未变化**时
+        # 也落到写库分支——runner 在多文件循环里重算进度停在同一个整数上很常见，
+        # 会反复写同一个值。节流只约束中间帧；终态由 `_run` 的 `_flush_last_progress`
+        # 兜底落库（裁定 R25/F2）。
+        persisted = False
+        if changed and elapsed >= self._interval:
+            self._last_write_at = now
+            self._last_percent = value
+            self._repo.set_progress(self.task_id, value, label)
+            persisted = True
         self._publisher.publish(self.task_id, {
             "type": "progress", "taskId": self.task_id,
-            "progress": value, "stageLabel": label, "persisted": True,
+            "progress": value, "stageLabel": label, "persisted": persisted,
         })
 
     def log(self, message: str) -> None:
@@ -2000,7 +2001,9 @@ from app.infra.ai.logging import log_ai_failure
     [
         ('{"a": 1}', {"a": 1}),
         ('```json\n{"a": 1}\n```', {"a": 1}),
-        ("'''{'a': 1}'''", {"a": 1}),
+        # 裁定 R1（Task 9 评审）：围栏剥离只负责去 `'''`，不解析 JS 单引号字面量；
+        # 故此处的围栏内必须是**合法 JSON**。
+        ("'''{\"a\": 1}'''", {"a": 1}),
         ('前言 {"a": {"b": 2}} 后语', {"a": {"b": 2}}),
         ("没有 JSON", None),
         ("", None),
@@ -2446,13 +2449,18 @@ def test_task_endpoints_report_queued_placeholders(client):
     assert client.post("/tasks/missing/cancel").status_code == 404
 
 
-def test_sse_endpoint_streams_heartbeat(client):
-    # 事件投递的确定性验证在 tests/test_events.py（直接驱动生成器）；
-    # 这里用 0.01s 心跳把 HTTP 契约也钉死，不依赖竞态。
-    with client.stream("GET", "/tasks/t-sse/events") as response:
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("text/event-stream")
-        assert next(response.iter_lines()) == ": ping"
+def test_sse_endpoint_streams_heartbeat(tmp_path):
+    # 裁定 R24（Task 10 评审）：**本例不能用 TestClient**。
+    # starlette 1.6.0 的 `_TestClientTransport.handle_request` 会把整段响应体
+    # 缓冲进 BytesIO，只在 more_body=False 后才构造 Response；无限 SSE 流
+    # 永不结束，`client.stream(...).__enter__()` 在任何读取之前就死锁。
+    # （实测 httpx.ASGITransport 同样会缓冲。）因此改用真实回环服务器：
+    # 在测试内起 `uvicorn.Server(port=0)` 的后台任务，用 httpx.AsyncClient
+    # 流式读取首帧，并在收到帧后关停服务器。
+    # **强制**：对流获取加 `asyncio.wait_for` 硬超时，使将来若引入缓冲会
+    # 快速失败而非挂住套件。事件投递的确定性验证在 tests/test_events.py。
+    # 实现见 server/tests/test_api_tasks.py 的同名用例。
+    ...
 
 
 def test_task_endpoint_returns_seeded_task(client):

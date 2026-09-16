@@ -44,6 +44,18 @@ class TaskContext:
         self._last_write_at = float("-inf")
         self._last_percent: int | None = None
         self._cancelled = False
+        # 最近一次广播出去的进度值（节流只拦落库、不拦广播），供任务终结时
+        # 把最后一帧进度刷入数据库（裁定 F2：终端状态必须落库最后一帧）。
+        self._last_broadcast_percent: int | None = None
+        self._last_broadcast_label: str | None = None
+
+    @property
+    def last_progress(self) -> int | None:
+        return self._last_broadcast_percent
+
+    @property
+    def last_progress_label(self) -> str | None:
+        return self._last_broadcast_label
 
     def progress(self, percent: int, label: str | None = None) -> None:
         value = max(0, min(100, int(percent)))
@@ -59,6 +71,8 @@ class TaskContext:
             self._last_write_at = now
             self._last_percent = value
             persisted = True
+        self._last_broadcast_percent = value
+        self._last_broadcast_label = label
         self._publisher.publish(self.task_id, {
             "type": "progress", "taskId": self.task_id,
             "progress": value, "stageLabel": label, "persisted": persisted,

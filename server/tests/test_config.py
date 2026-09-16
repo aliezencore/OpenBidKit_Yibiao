@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from app.config import ModelConfig, Settings, get_settings
 
 
@@ -40,3 +43,26 @@ def test_get_settings_is_cached(monkeypatch):
     assert get_settings() is get_settings()
 
     get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("env_key", "value"),
+    [
+        # 并发下限下界为 1：0 会让 Semaphore(0) 永久阻塞（裁定 F3）。
+        ("YIBIAO_AI_MAX_CONCURRENCY", "0"),
+        ("YIBIAO_TASK_GLOBAL_CONCURRENCY", "0"),
+        ("YIBIAO_CPU_WORKERS", "0"),
+        # SSE 心跳必须为正数。
+        ("YIBIAO_SSE_HEARTBEAT_SECONDS", "0"),
+        # 进度写间隔允许 0（每次都写），但不允许负数。
+        ("YIBIAO_PROGRESS_WRITE_INTERVAL_MS", "-1"),
+        # 模型超时必须为正数。
+        ("YIBIAO_TEXT_MODEL__TIMEOUT_SECONDS", "0"),
+        ("YIBIAO_VISION_MODEL__TIMEOUT_SECONDS", "0"),
+    ],
+)
+def test_config_rejects_invalid_bounds(monkeypatch, env_key, value):
+    monkeypatch.setenv(env_key, value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

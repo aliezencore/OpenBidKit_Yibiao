@@ -152,6 +152,37 @@ async def test_progress_repeated_identical_percent_does_not_write(env):
     assert read(env, task_id)["progress"] == 50
 
 
+async def test_terminal_progress_flush_writes_last_broadcast_value(env):
+    """裁定 F2：节流只约束中间帧，末帧落在窗口内未落库时必须由终结路径补写。
+
+    受控 Clock 让 80、99 两帧都落在节流窗口内（从未落库），但都会被广播。
+    任务成功后，DB 行的 progress 必须等于最后一次广播的 99，而非窗口内最后一帧
+    也未落库的 10。同时仍断言中间帧（80）确实没有被直接落库（节流依然生效）。
+    """
+    async def runner(ctx, payload, previous_state):
+        ctx.progress(10, "a")            # t=0：首帧，changed + 间隔无限 → 落库
+        env["clock"].seconds += 0.05      # 仍在 0.2s 窗口内
+        ctx.progress(80, "b")            # 不落库，仅广播
+        env["clock"].seconds += 0.05      # 仍在窗口内
+        ctx.progress(99, "c")            # 末帧，不落库，仅广播
+
+    task_id = await env["engine"].submit(
+        project_id=env["project_id"], domain="duplicate", kind="duplicate-analysis",
+        payload={}, runner=runner,
+    )
+    await env["engine"].drain()
+
+    progress_events = [event for _, event in env["publisher"].events
+                      if event["type"] == "progress"]
+    persisted = [event["progress"] for event in progress_events if event["persisted"]]
+    broadcast = [event["progress"] for event in progress_events]
+
+    assert read(env, task_id)["status"] == "success"
+    assert read(env, task_id)["progress"] == 99, "终结路径必须把末帧 99 补写进 DB"
+    assert persisted == [10], "窗口内的 80/99 仍不应被节流逻辑直接落库"
+    assert broadcast == [10, 80, 99], "节流只影响落库，不影响实时广播"
+
+
 async def test_checkpoint_persists_state(env):
     async def runner(ctx, payload, previous_state):
         ctx.checkpoint({"stage": "outline", "done": [1, 2]})
@@ -163,6 +194,39 @@ async def test_checkpoint_persists_state(env):
     await env["engine"].drain()
 
     assert read(env, task_id)["checkpoint_json"] == '{"stage": "outline", "done": [1, 2]}'
+
+
+async def test_resume_receives_previous_checkpoint(env):
+    """裁定 F4：checkpoint 续跑是设计 spec §6.4 的唯一入口，必须有测试钉死它。
+
+    提交同 kind 的第一个任务写一个 checkpoint 并跑完；再提交同 kind 的第二个任务，
+    断言其 runner 收到的 previous_state 正是第一个任务落库的 checkpoint。
+    `list_for_project` 按 created_at DESC 排序，故「同 kind 且带 checkpoint 的首行」
+    即最新一个，此即预期行为，本测试一并钉死。
+    """
+    checkpoint = {"stage": "outline", "done": [1, 2]}
+
+    async def first_runner(ctx, payload, previous_state):
+        ctx.checkpoint(checkpoint)
+
+    await env["engine"].submit(
+        project_id=env["project_id"], domain="duplicate", kind="resume-kind",
+        payload={}, runner=first_runner,
+    )
+    await env["engine"].drain()
+
+    seen = {}
+
+    async def second_runner(ctx, payload, previous_state):
+        seen["previous_state"] = previous_state
+
+    await env["engine"].submit(
+        project_id=env["project_id"], domain="duplicate", kind="resume-kind",
+        payload={}, runner=second_runner,
+    )
+    await env["engine"].drain()
+
+    assert seen["previous_state"] == checkpoint
 
 
 async def test_cancel_marks_cancelled_and_stops_runner(env):
@@ -201,20 +265,22 @@ def test_raise_if_cancelled_only_raises_after_mark_cancelled(env):
 
 def test_recover_interrupted_marks_running_tasks(env):
     project_id = env["project_id"]
-    for task_id in ("t1", "t2", "t3"):
+    for task_id in ("t1", "t2", "t3", "t4"):
         env["tasks"].create(task_id=task_id, project_id=project_id, domain="duplicate",
                             kind="duplicate-analysis", payload={},
                             created_at="2026-09-15T00:00:00+00:00")
     env["tasks"].mark_running("t1", "2026-09-15T00:00:00+00:00")
     env["tasks"].mark_running("t2", "2026-09-15T00:00:00+00:00")
     env["tasks"].mark_finished("t3", "success", "2026-09-15T00:00:00+00:00")
+    # t4 保持 queued：进程在任务仍排队时被强杀，同样要被恢复（裁定 F6 / M34）
 
     recovered = env["engine"].recover_interrupted()
 
-    assert set(recovered) == {"t1", "t2"}
+    assert set(recovered) == {"t1", "t2", "t4"}
     assert env["tasks"].get("t1")["status"] == "interrupted"
     assert env["tasks"].get("t2")["status"] == "interrupted"
     assert env["tasks"].get("t3")["status"] == "success"
+    assert env["tasks"].get("t4")["status"] == "interrupted"
 
 
 def test_recover_interrupted_is_noop_when_nothing_running(env):

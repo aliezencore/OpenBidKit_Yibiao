@@ -200,6 +200,9 @@ celerybeat.pid
 .env.secrets
 .dev.vars
 /analytics/scripts/2026-08-26-new-client-investigation/data/
+
+# FastAPI 检查服务（server/）的默认数据根：SQLite 库与 WAL/SHM 伴生文件（裁定 R26）
+server/data/
 .venv
 env/
 venv/

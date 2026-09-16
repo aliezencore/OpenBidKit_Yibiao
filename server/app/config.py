@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +12,8 @@ class ModelConfig(BaseModel):
     api_key: str = ""
     model_name: str = ""
     context_limit: int = 120000
-    timeout_seconds: float = 300.0
+    # 超时必须为正数：0 会让每次模型请求瞬时失败（裁定 F3）。
+    timeout_seconds: float = Field(default=300.0, gt=0)
 
 
 class Settings(BaseSettings):
@@ -25,11 +26,14 @@ class Settings(BaseSettings):
     data_root: Path = Path("data")
     text_model: ModelConfig = ModelConfig()
     vision_model: ModelConfig = ModelConfig()
-    ai_max_concurrency: int = 8
-    task_global_concurrency: int = 4
-    progress_write_interval_ms: int = 200
-    cpu_workers: int = 2
-    sse_heartbeat_seconds: float = 15.0
+    # 并发下限必须为正整数：0 会让 Semaphore(0) 永久阻塞（AI 调用挂死、
+    # 任务永远 queued、drain 不收敛）——配置期就应当直接失败（裁定 F3）。
+    ai_max_concurrency: int = Field(default=8, ge=1)
+    task_global_concurrency: int = Field(default=4, ge=1)
+    # 0 表示「每次进度都落库」，是合法契约，故用 ge=0。
+    progress_write_interval_ms: int = Field(default=200, ge=0)
+    cpu_workers: int = Field(default=2, ge=1)
+    sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
 
     @property
     def db_path(self) -> Path:

@@ -85,6 +85,15 @@ async def _sse_endpoint_streams_heartbeat(settings: Settings) -> None:
     if server_task.done():
         # 启动即失败，抛出真实异常以便排查。
         await server_task
+    if not getattr(server, "servers", None):
+        # 裁定 F10/M44：10s 内端口仍未绑定，应给出明确的启动失败信息并回收任务，
+        # 而不是让下一行的 servers[0] 抛 IndexError 让人摸不着头脑。
+        server_task.cancel()
+        try:
+            await server_task
+        except BaseException:
+            pass
+        pytest.fail("SSE 测试服务器未能在 10s 内完成启动（lifespan 或端口绑定卡住）")
     port = server.servers[0].sockets[0].getsockname()[1]
     url = f"http://127.0.0.1:{port}/tasks/t-sse/events"
 
