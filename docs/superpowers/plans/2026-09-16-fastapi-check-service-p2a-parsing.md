@@ -400,7 +400,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 - Test: `server/tests/test_parsing_spreadsheet.py`
 
 **Interfaces:**
-- Consumes: `ParsingError`
+- Consumes: `openpyxl`（**不**抛 `ParsingError`——归一化在 Task 7 的路由层统一做，见裁定 R12）
 - Produces: `spreadsheet_to_markdown(path: Path) -> str`（每个 sheet 一个 `## <sheet 名>` 标题 + GFM 表格；空 sheet 输出「（空表）」）
 
 - [ ] **Step 1: 写失败的测试**
@@ -1152,6 +1152,23 @@ def test_parse_document_routes_txt(tmp_path):
 def test_parse_document_detects_format(tmp_path):
     p = build_docx(tmp_path / "a.docx", blocks=[("p", "x")])
     assert parse_document(p, provider="local").format_kind == detect_file_format(p).kind
+
+
+def test_parser_exception_is_normalised_to_parsing_error(tmp_path):
+    """裁定 R12：合法 zip 但不是有效 xlsx（如 docx 改名成 .xlsx）时，
+    解析器内部的异常必须被归一为 ParsingError，而不是漏给调用方。"""
+    import zipfile
+
+    from app.domain.shared.errors import ParsingError
+
+    p = tmp_path / "fake.xlsx"
+    with zipfile.ZipFile(p, "w") as archive:
+        archive.writestr("not-a-sheet.txt", "x")
+
+    with pytest.raises(ParsingError) as info:
+        parse_document(p, provider="local")
+
+    assert info.value.code == "parse-failed"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1225,11 +1242,19 @@ def parse_document(path: Path, *, provider: str = "local", include_images: bool 
             path=str(path),
         )
     fmt: FileFormat = detect_file_format(path)
-    if decision.provider == "local":
-        markdown = _parse_locally(path, fmt)
-    else:
-        # MinerU 客户端属 P2c；P2a 阶段请求它会被路由回退到本地，故此处不可达。
-        raise ParsingError("MinerU 解析属 P2c 范围", code="not-implemented", path=str(path))
+    try:
+        if decision.provider == "local":
+            markdown = _parse_locally(path, fmt)
+        else:
+            # MinerU 客户端属 P2c；P2a 阶段请求它会被路由回退到本地，故此处不可达。
+            raise ParsingError("MinerU 解析属 P2c 范围", code="not-implemented", path=str(path))
+    except ParsingError:
+        raise
+    except Exception as error:
+        # 裁定 R12：各格式解析器只负责解析，不各自包 ParsingError；归一化在这里
+        # 一处收口。否则「合法 zip 但不是有效 xlsx」（如 docx 改名成 .xlsx）会漏出
+        # 裸 zipfile.BadZipFile / openpyxl 异常，绕过 API 的错误信封。
+        raise ParsingError(f"文件解析失败：{error}", code="parse-failed", path=str(path)) from error
     label = "local" if decision.fallback_to_local else decision.provider
     return ParsedDocument(markdown=markdown, format_kind=fmt.kind,
                           extension=fmt.extension, parser_label=label)
