@@ -68,10 +68,20 @@ class AiClient:
                 status_code=response.status_code,
             )
         try:
-            return response.json()["choices"][0]["message"]["content"] or ""
+            content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, ValueError, TypeError) as error:
             log_ai_failure("chat", {"type": "shape-error", "body": response.text[:200]})
             raise AiRequestError("模型响应结构不符合预期") from error
+        # content 为 null 是合法形状（tool calls、被过滤的响应），沿用 ""。
+        if content is None:
+            return ""
+        # 返回契约是 str：其余非 str 值（如多段内容网关的 parts 数组、代理返回的对象）
+        # 必须与其它畸形结构一样收敛到常开日志 + AiRequestError，
+        # 否则会在下游 extract_json 的 text.strip() 处以裸 AttributeError 逃逸且无日志。
+        if not isinstance(content, str):
+            log_ai_failure("chat", {"type": "shape-error", "body": response.text[:200]})
+            raise AiRequestError("模型响应结构不符合预期")
+        return content
 
     async def collect_json_response(
         self, messages: list[dict[str, Any]], *, use_vision: bool = False

@@ -188,6 +188,51 @@ async def test_chat_shape_error_raises_ai_request_error_and_logs(body, capsys):
     assert "type=shape-error" in out[0]
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param([{"type": "text", "text": "..."}], id="parts-list"),
+        pytest.param({"a": 1}, id="dict"),
+    ],
+)
+async def test_chat_rejects_non_str_content_and_logs(content, capsys):
+    # R21: chat 的返回契约是 str，且每个失败都必须经 log_ai_failure 落地。
+    # 真值非 str 的 content 两条都违反：修复前它被 `or ""` 原样返回，随后在
+    # collect_json_response -> extract_json -> _strip_wrappers 的 text.strip()
+    # 抛裸 AttributeError 逃逸，且常开日志缺失。
+    # parts-list 是真实形状：多段内容网关/兼容代理把 content 返回成 parts 数组。
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    client = make_client(handler)
+    with pytest.raises(AiRequestError) as info:
+        await client.chat([{"role": "user", "content": "x"}])
+    await client.aclose()
+
+    # 必须是 AiRequestError，而不是裸的 AttributeError / TypeError 等逃逸
+    assert not isinstance(
+        info.value, (AttributeError, TypeError, KeyError, IndexError, ValueError)
+    )
+    assert "模型响应结构" in str(info.value)
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert "type=shape-error" in out[0]
+
+
+async def test_chat_returns_empty_string_when_content_is_null():
+    # R21: content 为 null 是合法形状（tool calls、被过滤的响应），
+    # OpenAI 兼容 API 会这样返回，必须仍然得到 ""，不得被过严的修复改成错误。
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
+
+    client = make_client(handler)
+    text = await client.chat([{"role": "user", "content": "x"}])
+    await client.aclose()
+
+    assert text == ""
+
+
 async def test_vision_request_uses_vision_timeout_not_text_timeout():
     # R19: 每个模型必须用自己的 timeout_seconds。
     # 注意：httpx.MockTransport 不施加真实 socket 超时（time.sleep 不会触发超时），
