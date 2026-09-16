@@ -645,6 +645,20 @@ def test_html_to_markdown_keeps_bold(tmp_path):
 def test_empty_document_yields_empty_string(tmp_path):
     p = build_docx(tmp_path / "empty.docx", blocks=[])
     assert docx_to_markdown(p).strip() == ""
+
+
+def test_include_images_true_is_rejected(tmp_path):
+    """裁定 R2：P2a 不产出图片。mammoth 默认会把整图编成 base64 data URL
+    塞进 markdown，污染 LLM 提示词与正文比对；真正实现属 P2b。
+    本用例把「拒绝」这一行为钉住，避免它被无声移除。"""
+    from app.domain.shared.errors import ParsingError
+
+    p = build_docx(tmp_path / "img.docx", blocks=[("p", "正文")])
+
+    with pytest.raises(ParsingError) as info:
+        docx_to_markdown(p, include_images=True)
+
+    assert info.value.code == "not-implemented"
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
@@ -662,25 +676,26 @@ from __future__ import annotations
 import mammoth
 
 
-def docx_to_html(path, *, include_images: bool = False) -> str:
-    """docx → HTML。mammoth 保留语义（标题/列表/加粗），丢弃样式。"""
+def docx_to_html(path) -> str:
+    """docx → HTML。mammoth 保留语义（标题/列表/加粗），丢弃样式与图片。
+
+    裁定 R14：不带 `include_images` 参数。P2a 里 `docx_to_markdown` 对
+    `include_images=True` 已显式拒绝（R2），带上该参数会让 True 分支成为
+    不可达死代码。P2b 做真实图片占位时再按需要加参数。
+    """
     with open(path, "rb") as handle:
         result = mammoth.convert_to_html(
             handle,
-            convert_image=mammoth.images.img_element(lambda image: {"src": ""})
-            if include_images is False
-            else None,
+            convert_image=mammoth.images.img_element(lambda image: {"src": ""}),
         )
         html = result.value
-    if include_images is False:
-        # mammoth 的空 src 占位仍会产出 <img src="" />；统一剥掉，避免空链接。
-        from bs4 import BeautifulSoup
+    # mammoth 的图片转换器只产出空 src 占位，仍会留下 <img>；统一剥掉，避免空链接。
+    from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(html, "lxml")
-        for img in soup.find_all("img"):
-            img.decompose()
-        html = str(soup)
-    return html
+    soup = BeautifulSoup(html, "lxml")
+    for img in soup.find_all("img"):
+        img.decompose()
+    return str(soup)
 ```
 
 `server/app/infra/parsing/markdown.py`：
@@ -770,7 +785,7 @@ def docx_to_markdown(path: Path, *, include_images: bool = False) -> str:
             code="not-implemented",
             path=str(path),
         )
-    html = docx_to_html(Path(path), include_images=include_images)
+    html = docx_to_html(Path(path))
     html_without_tables, tables = extract_tables(html)
     markdown = html_to_markdown(html_without_tables)
     markdown = restore_tables(markdown, tables)
@@ -780,7 +795,7 @@ def docx_to_markdown(path: Path, *, include_images: bool = False) -> str:
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_docx.py -v`
-Expected: PASS（6 passed）。若 mammoth 对 `add_heading` 产出的标题映射与断言不符（例如产出 `<h1>` 但 markdownify 需要 ATX），按实际输出调整**断言**而不是实现——这一步的验收是结构等价。
+Expected: PASS（7 passed）。若 mammoth 对 `add_heading` 产出的标题映射与断言不符（例如产出 `<h1>` 但 markdownify 需要 ATX），按实际输出调整**断言**而不是实现——这一步的验收是结构等价。
 
 - [ ] **Step 6: 提交**
 
