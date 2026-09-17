@@ -5,6 +5,14 @@ import pytest
 
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.docx_assets import list_media_files
+from app.infra.parsing.docx_assets import (
+    MAX_SECTION_TITLE_LENGTH,
+    build_paragraph_index,
+    extract_nearby_text,
+    extract_section_title,
+    find_paragraph_position,
+    is_heading_paragraph,
+)
 from tests.parsing_fixtures import build_docx_with_images, make_image
 
 
@@ -168,3 +176,98 @@ def test_extract_run_text_ignores_position_offsets():
 def test_extract_run_text_collapses_whitespace():
     block = "<w:p><w:r><w:t>a   \n  b</w:t></w:r></w:p>"
     assert extract_run_text(block) == "a b"
+
+
+def _paragraphs(*specs):
+    """specs: [(text, style_val, bold)] -> 一段 docx XML。"""
+    blocks = []
+    for text, style, bold in specs:
+        style_xml = f'<w:pStyle w:val="{style}"/>' if style else ""
+        bold_xml = "<w:b/>" if bold else ""
+        blocks.append(f"<w:p><w:pPr>{style_xml}</w:pPr><w:r><w:rPr>{bold_xml}</w:rPr><w:t>{text}</w:t></w:r></w:p>")
+    return "<w:body>" + "".join(blocks) + "</w:body>"
+
+
+def test_builds_one_entry_per_paragraph():
+    index = build_paragraph_index(_paragraphs(("甲", "", False), ("乙", "", False)))
+    assert [p.text for p in index.paragraphs] == ["甲", "乙"]
+    assert len(index.positions) == 2
+
+
+def test_heading_by_style_beats_length():
+    long_heading = "很长的一级标题" * 10
+    index = build_paragraph_index(_paragraphs((long_heading, "Heading1", False)))
+    assert is_heading_paragraph(index.paragraphs[0]) is True
+
+
+def test_chinese_numbering_counts_as_heading():
+    index = build_paragraph_index(
+        _paragraphs(("第一章 总体要求", "", False), ("1.2.3 建设目标", "", False),
+                    ("（一）一般要求", "", False), ("一、总则", "", False))
+    )
+    assert all(is_heading_paragraph(p) for p in index.paragraphs)
+
+
+def test_plain_sentence_is_not_a_heading():
+    index = build_paragraph_index(_paragraphs(("本项目采用公开招标方式，投标人须按要求编制投标文件。", "", False)))
+    assert is_heading_paragraph(index.paragraphs[0]) is False
+
+
+def test_coordinates_without_cjk_are_not_headings():
+    """纯数字/无中文的段落不得命中编号规则。"""
+    index = build_paragraph_index(_paragraphs(("1143000 132715", "", False), ("1.2", "", False)))
+    assert all(is_heading_paragraph(p) is False for p in index.paragraphs)
+
+
+def test_over_long_paragraph_is_not_a_heading():
+    text = "第" + "一" * (MAX_SECTION_TITLE_LENGTH + 5)
+    index = build_paragraph_index(_paragraphs((text, "", False)))
+    assert is_heading_paragraph(index.paragraphs[0]) is False
+
+
+def test_section_title_prefers_nearest_heading():
+    index = build_paragraph_index(_paragraphs(("第一章 总则", "", False), ("正文", "", False)))
+    assert extract_section_title(index, 1) == "第一章 总则"
+
+
+def test_section_title_falls_back_to_bold_short_paragraph():
+    index = build_paragraph_index(_paragraphs(("加粗小标题", "", True), ("正文", "", False)))
+    assert extract_section_title(index, 1) == "加粗小标题"
+
+
+def test_section_title_is_none_without_any_candidate():
+    index = build_paragraph_index(_paragraphs(("普通的一段话，不算标题。", "", False)))
+    assert extract_section_title(index, 1) is None
+
+
+def test_nearby_text_prefers_own_paragraph():
+    index = build_paragraph_index(_paragraphs(("上一段", "", False), ("自己的文字", "", False), ("下一段", "", False)))
+    assert extract_nearby_text(index, 1) == "自己的文字"
+
+
+def test_nearby_text_takes_two_before_and_two_after_when_own_is_empty():
+    """顺序是**先近后远**（距离 1、2），不是文档顺序——对齐参考实现的循环。
+
+    参考 `cjs:126-136` 用 `for offset = 1..2` 先取 `position - 1` 再取 `position - 2`，
+    产出 `前二 更前`；照抄即得下面的期望。**不要**因为「文档顺序读起来更顺」
+    就把它改成 `更前 前二`——那会偏离参考，且这条 200 字的上下文提示串
+    顺序差异对下游没有实质影响，没有理由为此产生分歧。
+    """
+    index = build_paragraph_index(_paragraphs(
+        ("更前", "", False), ("前二", "", False), ("", "", False), ("后一", "", False), ("后二", "", False),
+    ))
+    assert extract_nearby_text(index, 2) == "前二 更前 后一 后二"
+
+
+def test_nearby_text_is_truncated():
+    long_text = "字" * 500
+    index = build_paragraph_index(_paragraphs(("", "", False), (long_text, "", False)))
+    assert len(extract_nearby_text(index, 0)) == 200
+
+
+def test_find_paragraph_position_locates_char_index():
+    index = build_paragraph_index(_paragraphs(("甲", "", False), ("乙", "", False)))
+    second_start = index.positions[1][0]
+    assert find_paragraph_position(index, second_start) == 1
+    assert find_paragraph_position(index, index.positions[0][0]) == 0
+    assert find_paragraph_position(index, 10 ** 9) == -1

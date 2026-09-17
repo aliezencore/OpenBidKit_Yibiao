@@ -109,3 +109,116 @@ def extract_run_text(block: str) -> str:
     """
     runs = [unescape_xml(raw) for raw in _RUN_TEXT_RE.findall(block or "")]
     return _WHITESPACE_RE.sub(" ", "".join(runs)).strip()
+
+
+# 中文标书大量使用纯文本编号当章节，并不使用 Word 标题样式（对齐 Node）
+CHAPTER_TEXT_PATTERNS = (
+    re.compile(r"^第[一二三四五六七八九十百千0-9]+[章节篇]"),
+    re.compile(r"^[一二三四五六七八九十]+、"),
+    re.compile(r"^（[一二三四五六七八九十]+）"),
+    re.compile(r"^\d+(\.\d+)*[\s、.]"),
+)
+HEADING_STYLE_PATTERN = re.compile(r"^(heading\s*[1-9]|标题\s*[1-9一二三四五六七八九十])$", re.I)
+# 章节候选必须含中文，否则纯数字/坐标残渣会命中上面的编号规则
+CJK_PATTERN = re.compile(r"[\u4e00-\u9fa5]")
+
+MAX_SECTION_TITLE_LENGTH = 40
+MAX_NEARBY_TEXT_LENGTH = 200
+NEARBY_PARAGRAPH_RADIUS = 2
+
+_PARAGRAPH_RE = re.compile(r"<w:p\b[^>]*>[\s\S]*?</w:p>")
+_PARAGRAPH_STYLE_RE = re.compile(r'<w:pStyle\b[^>]*w:val="([^"]+)"')
+_BOLD_RE = re.compile(r"<w:b\b[^>]*/?>")
+
+
+@dataclass(frozen=True)
+class Paragraph:
+    text: str
+    style_val: str
+    bold: bool
+
+
+@dataclass(frozen=True)
+class ParagraphIndex:
+    paragraphs: list[Paragraph]
+    positions: list[tuple[int, int]]
+
+
+def build_paragraph_index(xml: str) -> ParagraphIndex:
+    """一次性把 XML 切成段落并预计算特征，避免每张图片都重扫全文。"""
+    source = xml or ""
+    paragraphs: list[Paragraph] = []
+    positions: list[tuple[int, int]] = []
+    for match in _PARAGRAPH_RE.finditer(source):
+        block = match.group(0)
+        style = _PARAGRAPH_STYLE_RE.search(block)
+        paragraphs.append(
+            Paragraph(
+                text=extract_run_text(block),
+                style_val=style.group(1) if style else "",
+                bold=bool(_BOLD_RE.search(block)),
+            )
+        )
+        positions.append((match.start(), match.end()))
+    return ParagraphIndex(paragraphs=paragraphs, positions=positions)
+
+
+def find_paragraph_position(index: ParagraphIndex, char_index: int) -> int:
+    """自后向前找包含该偏移的段落；找不到返回 -1（对齐 findParagraphPosition）。"""
+    for position in range(len(index.positions) - 1, -1, -1):
+        start, end = index.positions[position]
+        if start <= char_index < end:
+            return position
+    return -1
+
+
+def is_heading_paragraph(paragraph: Paragraph) -> bool:
+    if not paragraph or not paragraph.text:
+        return False
+    if paragraph.style_val and HEADING_STYLE_PATTERN.match(paragraph.style_val.strip()):
+        return True
+    if len(paragraph.text) > MAX_SECTION_TITLE_LENGTH:
+        return False
+    if not CJK_PATTERN.search(paragraph.text):
+        return False
+    return any(pattern.match(paragraph.text) for pattern in CHAPTER_TEXT_PATTERNS)
+
+
+def extract_section_title(index: ParagraphIndex, position: int) -> str | None:
+    """向前全篇回溯：先找标题样式/编号段落，再退一步找加粗短段落，都没有返回 None。
+
+    **不加**「上一个非空段落」兜底——那会把正文首句当成章节名。
+    """
+    for cursor in range(position - 1, -1, -1):
+        candidate = index.paragraphs[cursor]
+        if candidate.text and is_heading_paragraph(candidate):
+            return candidate.text
+    for cursor in range(position - 1, -1, -1):
+        candidate = index.paragraphs[cursor]
+        if not candidate.text or len(candidate.text) > MAX_SECTION_TITLE_LENGTH:
+            continue
+        if candidate.bold and CJK_PATTERN.search(candidate.text):
+            return candidate.text
+    return None
+
+
+def extract_nearby_text(index: ParagraphIndex, position: int) -> str:
+    """图片所在段落的文本；该段为空时（图片独占段落）取前后各最多 2 个有文本的段落。"""
+    if position < 0:
+        return ""
+    own = index.paragraphs[position].text if position < len(index.paragraphs) else ""
+    if own:
+        return own[:MAX_NEARBY_TEXT_LENGTH]
+
+    parts: list[str] = []
+    # 顺序刻意是「先近后远」——与参考实现（cjs:126-136）的 offset 递增循环一致。
+    # 不是文档顺序；不要为了「读起来更顺」而反转，那会偏离参考。
+    for offset in range(1, NEARBY_PARAGRAPH_RADIUS + 1):
+        before = position - offset
+        if before >= 0 and index.paragraphs[before].text:
+            parts.append(index.paragraphs[before].text)
+    for offset in range(1, NEARBY_PARAGRAPH_RADIUS + 1):
+        after = position + offset
+        if after < len(index.paragraphs) and index.paragraphs[after].text:
+            parts.append(index.paragraphs[after].text)
+    return " ".join(parts)[:MAX_NEARBY_TEXT_LENGTH]
