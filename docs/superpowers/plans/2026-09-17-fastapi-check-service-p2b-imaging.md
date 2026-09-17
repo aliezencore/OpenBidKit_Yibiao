@@ -707,8 +707,17 @@ from app.infra.parsing.docx_assets import (
     collect_vml_occurrences,
 )
 
+# 注（裁定 R10）：`EMU_PER_PX` / `PT_TO_EMU` 只在本文件里用于**换算推导的注释**，
+# 断言一律用字面量。若最终这两个名字确实没被引用，从 import 里去掉即可——
+# **不要**为了让它们「有用」而把断言改回自指的表达式。
 
-def _drawing(embed, *, cx=EMU_PER_PX * 40, cy=EMU_PER_PX * 30, anchor=False):
+
+def _drawing(embed, *, cx=381000, cy=285750, anchor=False):
+    """cx/cy 用**字面量** EMU 值（裁定 R10）。
+
+    写成 `EMU_PER_PX * 40` 会让「40px」这类期望变成自指的：换算常量错掉也照样绿。
+    381000 EMU ÷ 9525 = 40px；285750 ÷ 9525 = 30px——同样由字面量钉住。
+    """
     tag = "wp:anchor" if anchor else "wp:inline"
     return (
         f"<w:p><w:r><w:drawing><{tag}>"
@@ -718,7 +727,7 @@ def _drawing(embed, *, cx=EMU_PER_PX * 40, cy=EMU_PER_PX * 30, anchor=False):
     )
 
 
-RELS = {"rId4": "media/image1.png", "rId5": "media/not-image.txt"}
+RELS = {"rId4": "media/image1.png", "rId5": "embeddings/oleObject1.bin"}
 
 
 def test_drawing_occurrence_carries_geometry_and_placement():
@@ -741,7 +750,14 @@ def test_anchor_placement_is_detected():
     assert collect_drawing_occurrences(xml, RELS, "正文", index)[0].placement == "anchor"
 
 
-def test_drawing_ignores_targets_outside_media():
+def test_drawing_ignores_targets_outside_the_media_directory():
+    """裁定 R9：夹具必须是**真的在 media/ 之外**的目标。
+
+    原夹具用 `media/not-image.txt`——那仍在 `media/` 目录内，`^(word/)?media/` 会放行，
+    参考实现的 `/^media\\//` 同样放行，所以那条用例期望 `[]` 却会拿到 1 条，必失败；
+    而且它表达的也不是它声称的语义。改用 `embeddings/oleObject1.bin`——
+    既不在 `media/`，也不在 `word/media/`，才是真正的负例。
+    """
     xml = _drawing("rId5")
     index = build_paragraph_index(xml)
     assert collect_drawing_occurrences(xml, RELS, "正文", index) == []
@@ -765,8 +781,12 @@ def test_vml_occurrence_reads_size_from_shape_style():
     assert len(occurrences) == 1
     assert occurrences[0].media_name == "media/image1.png"
     assert occurrences[0].placement == "inline"          # VML 一律 inline
-    assert occurrences[0].width == round(80 * PT_TO_EMU / EMU_PER_PX)
-    assert occurrences[0].height == round(20 * PT_TO_EMU / EMU_PER_PX)
+    # 裁定 R10：用**字面量**期望，不要把期望写成与实现同式的表达式——
+    # 写成 `round(80 * PT_TO_EMU / EMU_PER_PX)` 是自指的：把 EMU_PER_PX 改成
+    # 1000 之类的错值，该断言仍会通过，两个换算常量实际无人钉住。
+    # 推导：80pt × 12700(EMU/pt) ÷ 9525(EMU/px) = 106.67 → 107；20pt 同法 = 26.67 → 27。
+    assert occurrences[0].width == 107
+    assert occurrences[0].height == 27
 
 
 def test_classify_asset_kind():
