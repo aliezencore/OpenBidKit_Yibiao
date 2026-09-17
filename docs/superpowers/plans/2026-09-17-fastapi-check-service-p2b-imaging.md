@@ -1121,7 +1121,16 @@ def extract_docx_visual_assets(docx_path: Path) -> DocxVisualAssets:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（T5 新增 3 个 → 累计 36 passed）
+Expected: PASS（本文件原 38 个 + 本任务新增）
+
+> **附录（裁定 R16，实现后补记）**：实现者交付了 **5** 个用例而不是上面列的 3 个，并给出了经变异验证的理由，**裁定采纳**：
+>
+> 1. `test_header_part_uses_its_own_relationships_and_label` —— 本任务的行为规格有一半是**页眉页脚**，而上面的 3 个用例对那部分**零覆盖**。该用例实测发现 python-docx 产出的两份关系表里存在**同名不同义的 rId**（正文 `rId1 → ../customXml/item1.xml`、页眉 `rId1 → media/image2.png`），若实现把正文的关系表套给页眉，页眉那条出现位置会被**静默丢弃**。它的期望值**独立从 zip 的页眉关系表读取**（不复用被测模块），因此不循环。代码见 `tests/test_parsing_docx_assets.py`。
+> 2. `test_part_without_rels_degrades_to_empty_instead_of_raising` —— 覆盖「有图片引用、却没有关系表」的退化路径（python-docx 对纯文字页眉正是这样产出）。
+>
+> **同时它证明了上面 `test_occurrence_label_defaults_to_body` 无法判别**：把 `location_hint` 硬编码成 `"正文"`，该用例**照样绿**（它只断言集合 `{"正文"}`，而夹具里只有正文一张图）。真正钉住 label 派生的是附录第 1 条。原始用例按 R16 保留（无害），但它**不再是 label 行为的依据**。
+>
+> 另记：`_rewrite_zip_entry` 刻意**写到新路径**而非用 `os.replace` 原地替换——后者在 Windows 上会间歇性抛 `PermissionError: [WinError 5]`（杀软/索引占用），会让用例随机红。
 
 - [ ] **Step 5: 全量套件确认无回归**
 
