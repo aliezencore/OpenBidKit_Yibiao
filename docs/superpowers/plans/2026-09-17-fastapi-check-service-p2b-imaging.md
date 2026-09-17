@@ -1247,6 +1247,22 @@ def test_compute_target_size_never_upscales():
 def test_compute_target_size_handles_bad_input():
     assert compute_target_size(0, 0, 400) == (1, 1)
     assert compute_target_size(100, 100, 0) == (100, 100)
+
+
+def test_compute_target_size_rounds_half_up_like_the_reference():
+    """裁定 R17：`.5` 临界必须 half-up——这是对齐参考 `Math.round` 的钉子。"""
+    # 8000 → 4000 的缩放系数恰为 0.5：6001×0.5 = 3000.5 → 3001（half-up）
+    assert compute_target_size(6001, 8000, 4000) == (3001, 4000)
+
+
+def test_compute_target_size_scales_both_axes():
+    """裁定 R18：两条轴**同时**缩小此前无用例（原用例只缩一边）。"""
+    assert compute_target_size(1000, 800, 400) == (400, 320)
+
+
+def test_compute_target_size_at_the_limit_does_not_shrink():
+    """裁定 R18：最长边恰好等于上限时不缩（`longest <= edge` 的含等号语义）。"""
+    assert compute_target_size(400, 200, 400) == (400, 200)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1267,6 +1283,7 @@ resolveImagePlan），这样策略可以脱离真实图片单测，也不会与�
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -1342,7 +1359,15 @@ def resolve_image_plan(data: bytes, *, max_passthrough_bytes: int | None = None)
 
 
 def compute_target_size(width: int, height: int, max_edge: int) -> tuple[int, int]:
-    """等比缩放到最长边不超过 max_edge；**不放大**（对齐 computeTargetSize）。"""
+    """等比缩放到最长边不超过 max_edge；**不放大**（对齐 computeTargetSize）。
+
+    裁定 R17：用 `math.floor(x + 0.5)` 而不是内置 `round()`。
+    Python 的 `round()` 是 **half-even**（银行家舍入：`round(3000.5) == 3000`），
+    而参考实现的 `Math.round` 是 **half-up**（`Math.round(3000.5) === 3001`）。
+    两者只在缩放值**恰好落 .5** 时分道扬镳（如 `6001×8000, edge=4000` →
+    py 3000 / js 3001）。按「与参考行为对齐」的验收标准，这里对齐参考。
+    **不要**改回 `round()`——那会重新引入 1px 的平台性偏离。
+    """
     safe_width = max(1, int(width or 0))
     safe_height = max(1, int(height or 0))
     edge = int(max_edge or 0)
@@ -1350,12 +1375,19 @@ def compute_target_size(width: int, height: int, max_edge: int) -> tuple[int, in
     if edge <= 0 or longest <= edge:
         return safe_width, safe_height
     scale = edge / longest
-    return max(1, round(safe_width * scale)), max(1, round(safe_height * scale))
+    return max(1, math.floor(safe_width * scale + 0.5)), max(1, math.floor(safe_height * scale + 0.5))
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（21 passed）
+Expected: PASS（本文件全部用例；参数化展开后约 32 项。原稿写的「21 passed」是笔误）
+
+> **附录（裁定 R18，实现后补记）**：实现者补了三条上面没列的用例，理由经变异验证，**采纳**：
+> 1. 「`max_passthrough_bytes` 为 0/负数 = 无上限」这条**子分支**原稿漏了（只覆盖了「传上限」与「不传」两种情况，而「传 0」与「不传」是不同代码路径）。
+> 2. 两条轴**同时**缩小的用例（原用例只缩一边）。
+> 3. 最长边**恰等于**上限时不缩（`longest <= edge` 的含等号语义）。
+>
+> 上面已把这三条并入 Step 1 的用例清单；代码见 `tests/test_image_plan.py`。
 
 - [ ] **Step 5: 提交**
 
