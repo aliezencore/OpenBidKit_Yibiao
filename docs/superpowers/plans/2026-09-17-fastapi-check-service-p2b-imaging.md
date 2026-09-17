@@ -277,7 +277,9 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 - Consumes: 无
 - Produces: `parse_relationships(xml: str) -> dict[str, str]`（`Id -> Target`，Target 去掉前导 `/`）；`unescape_xml(text: str) -> str`；`extract_run_text(block: str) -> str`
 
-**为什么 `extract_run_text` 只拼 `<w:t>`**：现有实现（`docxVisualAssetExtractor.cjs:48`）刻意不整段剥标签——`<wp:posOffset>1143000</wp:posOffset>` 这类坐标的**数字本身就是元素文本**，剥完标签会留下 `1143000 132715` 这种残渣，既污染喂给模型的上下文，又会被章节编号规则误判成章节。这条注释必须随代码保留。
+**为什么 `extract_run_text` 只拼 `<w:t>`**：现有实现（`docxVisualAssetExtractor.cjs:48`）刻意不整段剥标签——`<wp:posOffset>1143000</wp:posOffset>` 这类坐标的**数字本身就是元素文本**，剥完标签会留下一串数字残渣（本任务夹具里是 `1143000132715`，无空白直接首尾相接），既污染喂给模型的上下文，又可能被章节编号规则误判成章节。这条注释必须随代码保留。
+
+> 裁定 R6（T2 评审指出，供 T3 注意）：残渣要**真的**触发章节规则 `^\d+(\.\d+)*[\s、.]`，数字后必须跟分隔符——所以 T3 的夹具**刻意**保留带空格的形式 `"1143000 132715"`，**不要**改成无空格版，否则那条负例什么也证明不了。T3 实现侧的 `CJK_PATTERN` 兜底（含中文才认编号）同样要在，两条防线都不能少。
 
 - [ ] **Step 1: 写失败的测试**
 
