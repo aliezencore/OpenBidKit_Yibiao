@@ -815,6 +815,28 @@ def test_classify_asset_kind_boundaries_are_inclusive():
     assert classify_asset_kind(500, 650, "inline") == "page-scan"
 
 
+def test_drawing_asset_kind_depends_on_argument_order():
+    """裁定 R15：钉住传给 `classify_asset_kind` 的 **width/height 顺序**。
+
+    普通夹具（如 40×30）两个维度都低于阈值，交换 width/height 完全不改变分类结果，
+    所以「分类发生了」被钉住了、「顺序对不对」没有。要让两种顺序产生**不同**结果，
+    必须选一对**跨阈值**的尺寸：600×660 时 `(600>=500 且 660>=650)` 为真 → `page-scan`，
+    而交换后 `(660>=500 且 600>=650)` 为假 → `standalone`。这才叫钉住顺序。
+    """
+    xml = (
+        "<w:p><w:r><w:drawing><wp:inline>"
+        '<a:blip r:embed="rId4"/>'
+        '<wp:extent cx="5715000" cy="6286500"/>'   # 600px × 660px（宽略小于高）
+        "</wp:inline></w:drawing></w:r></w:p>"
+    )
+    index = build_paragraph_index(xml)
+
+    occurrence = collect_drawing_occurrences(xml, RELS, "正文", index)[0]
+
+    assert (occurrence.width, occurrence.height) == (600, 660)
+    assert occurrence.asset_kind == "page-scan"
+
+
 def test_drawing_with_reversed_extent_attributes_swaps_width_and_height():
     """裁定 R12：**钉住参考实现自带的缺陷，不要「顺手修」**。
 
