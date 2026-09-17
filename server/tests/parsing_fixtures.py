@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from PIL import Image
 
 
 def build_docx(
@@ -36,5 +37,33 @@ def build_docx(
             cells = rendered.add_row().cells
             for index, value in enumerate(row):
                 cells[index].text = value
+    doc.save(path)
+    return path
+
+
+def make_image(path, *, size=(40, 30), color=(200, 30, 30), fmt="PNG"):
+    """用 Pillow 造一张合法图片。P2b 起测试可以自己产图，不再需要手搓字节。"""
+    Image.new("RGB", size, color).save(path, format=fmt)
+    return path
+
+
+def build_docx_with_images(path, *, blocks=None, images=None, image_paragraph=True):
+    """blocks: [(kind, text)]；images: [图片路径]，每张插入一个段落。
+
+    image_paragraph=True 时图片独占一个段落（这是真实标书里最常见的情形，
+    也才能触发 extract_nearby_text 的「前后各取 2 段」分支）。
+    """
+    doc = Document()
+    for kind, text in blocks or []:
+        if kind == "h1":
+            doc.add_heading(text, level=1)
+        elif kind == "h2":
+            doc.add_heading(text, level=2)
+        else:
+            doc.add_paragraph(text)
+    for image_path in images or []:
+        doc.add_picture(str(image_path))
+        if not image_paragraph:
+            doc.paragraphs[-1].add_run(" 随图文字")
     doc.save(path)
     return path
