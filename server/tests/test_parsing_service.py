@@ -63,6 +63,27 @@ def test_content_hash_and_chars_describe_the_markdown(tmp_path):
     assert saved.content_chars == len(markdown)
 
 
+def test_content_hash_is_recomputable_from_file_bytes(tmp_path):
+    """裁定 R25：产物哈希必须能从产物自身的**字节**复算，且在任意平台都成立。
+
+    必须用 `read_bytes()` 取哈希，不能用 `read_text()`：`read_text` 的通用换行会把
+    CRLF 翻回 LF，从而把 Windows 上 `write_text` 的换行翻译问题掩盖掉——那正是
+    查重（P3）直接对 `.md` 取字节哈希时会踩的坑。
+    """
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    saved = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+
+    raw = Path(saved.markdown_path).read_bytes()
+    hash_from_bytes = hashlib.sha256(raw).hexdigest()
+    assert hash_from_bytes == saved.content_hash, (
+        f"文件字节哈希 {hash_from_bytes} != 记录的 content_hash {saved.content_hash}"
+    )
+
+
 def test_copies_the_original_upload(tmp_path):
     data_root = tmp_path / "data"
     source = _upload(tmp_path)

@@ -60,7 +60,7 @@ def save_uploaded_document(
     copied_path = uploads_dir / f"{document_id}{parsed.extension}"
 
     # 3) 落盘：正文与原件副本
-    markdown_path.write_text(parsed.markdown, encoding="utf-8")
+    markdown_path.write_text(parsed.markdown, encoding="utf-8", newline="\n")
     shutil.copyfile(source_path, copied_path)
 
     return SavedDocument(
