@@ -132,6 +132,12 @@ rejection_check_documents(
   parser_label TEXT, sort_order INTEGER DEFAULT 0, imported_at TEXT, updated_at TEXT,
   PRIMARY KEY (project_id, document_id))
 
+-- 缺口（2026-09-17 记）：上面这张表全是**通用文档字段**（没有一列是废标项特有的），
+-- 而查重（P3）同样需要「哪个文件、哪份 markdown、哪个 hash」的簿记，本 spec 却**没有**
+-- 给查重定义对应表。裁定 R24 把 P2a 的职责定为「落盘 + 算哈希 + 返回 SavedDocument」，
+-- 数据库行留给 P3/P4 在各自域表里写；因此 P3 需要自己决定是复用这张表的形状、
+-- 还是抽一张中性的 documents 表。**这一决定不能拖到 P3 实现中途再做。**
+
 rejection_check_extraction(
   project_id TEXT PK, status TEXT DEFAULT 'idle', content TEXT DEFAULT '',
   source TEXT, tender_signature TEXT, error TEXT, updated_at TEXT)
@@ -496,7 +502,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | # | 计划 | 产出（可独立验证） | 能力 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端跑通 `collect_json_response` 的成功与修复路径；「domain 不 import 框架」护栏生效 | 纯本地 | — | **已完成**（22 提交 / 123 测试） |
-| P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown 并落盘（`content_hash` 入库）；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **计划已写** |
+| P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown；`save_uploaded_document()` 落盘正文与原件副本并返回**含 `content_hash` 的 `SavedDocument`**；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **执行中（8/9）** |
 | P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | 计划待写 |
 | P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | 计划待写 |
 | P3 | 标书查重领域 + 查重闭环 | 上传招标 / 投标文件 → 跑查重 → 看结果 → 导 Excel（**零模型依赖**，可端到端验证） | 纯本地 | P1、P2a、P2b（图片重复比对需图片提取） | — |

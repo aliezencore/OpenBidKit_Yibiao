@@ -1355,24 +1355,282 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 
 ---
 
-### Task 8: 存储集成与「上传 → 解析 → 落盘」服务入口
+### Task 8: 解析落盘服务（写入文件 + 返回值对象）
 
 **Files:**
 - Create: `server/app/infra/parsing/service.py`
-- Modify: `server/app/infra/repositories/projects.py`（或新增 `documents.py` 仓储）
 - Test: `server/tests/test_parsing_service.py`
 
 **Interfaces:**
-- Consumes: `parse_document`、`Database`、`apply_schema`
-- Produces: `save_uploaded_document(state, project_id, source_path, role) -> dict`（落盘 markdown 到 `<data_root>/projects/<project_id>/documents/<document_id>.md`，写 `rejection_check_documents` 行，返回该行 dict）
+- Consumes: `parse_document`、`ParsedDocument`、`ParsingError`
+- Produces:
+  - `SavedDocument`（frozen dataclass）：`document_id: str`、`project_id: str`、`role: str`、`source: str`、`file_name: str`、`source_path: str`、`markdown_path: str`、`content_hash: str`、`content_chars: int`、`parser_label: str`、`format_kind: str`、`extension: str`
+  - `save_uploaded_document(*, data_root: Path, project_id: str, source_path: Path, role: str, source: str = "upload", provider: str = "local") -> SavedDocument`
 
-**说明**：spec §5.3 的落盘布局与 §5.2 的 `rejection_check_documents` 列。本任务把「上传」从「HTTP 接收」中解耦出来——HTTP 路由属后续计划。
+**落盘布局**（spec §5.3）：
+```
+<data_root>/projects/<project_id>/documents/<document_id>.md   ← 正文
+<data_root>/projects/<project_id>/uploads/<document_id><ext>   ← 原件副本
+```
 
-- [ ] **Step 1: 写失败的测试**（断言：markdown 文件生成且内容正确、库行含 `content_hash`/`content_chars`/`parser_label`、重复上传产生不同 `document_id`、`role` 可为 tender/bid）
+**裁定 R24（本任务的关键决定，务必遵守）**：本任务**不写任何数据库表**。
+理由：① P2a 的 schema 只有 `projects` / `tasks` / `task_logs` 三张表，`rejection_check_documents` 属 **P4**，此刻不存在；② 让**共享的解析层**去写某个检查域的表是分层错误，查重（P3）同样需要文档簿记，而 spec 目前**没有**给它定义表；③ 因此把「落盘 + 算哈希」与「记进哪个域的表」分开——**前者属 P2a，后者属 P3/P4**。
+`SavedDocument` 的字段就是域表要写的列，调用方直接落库即可（`rejection_check_documents` 的列形状见 spec §5.2，与本 dataclass 一一对应）。
+
+- [ ] **Step 1: 写失败的测试**
+
+创建 `server/tests/test_parsing_service.py`：
+
+```python
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from app.domain.shared.errors import ParsingError
+from app.infra.parsing.service import SavedDocument, save_uploaded_document
+from tests.parsing_fixtures import build_docx
+
+ROLE_TENDER = "tender"
+ROLE_BID = "bid"
+
+
+def _upload(tmp_path, *, name="招标文件.docx", blocks=(("h1", "第一章"), ("p", "正文"))):
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir(exist_ok=True)
+    return build_docx(source_dir / name, blocks=list(blocks))
+
+
+def test_returns_saved_document_value_object(tmp_path):
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    saved = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+
+    assert isinstance(saved, SavedDocument)
+    assert saved.project_id == "p1"
+    assert saved.role == ROLE_TENDER
+    assert saved.source == "upload"
+    assert saved.file_name == "招标文件.docx"
+    assert saved.parser_label == "local"
+    assert saved.format_kind == "docx"
+    assert saved.extension == ".docx"
+    assert saved.document_id, "document_id 不能为空"
+
+
+def test_writes_markdown_under_project_scoped_path(tmp_path):
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    saved = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+
+    expected = data_root / "projects" / "p1" / "documents" / f"{saved.document_id}.md"
+    assert Path(saved.markdown_path) == expected
+    assert expected.exists()
+    assert "第一章" in expected.read_text(encoding="utf-8")
+
+
+def test_content_hash_and_chars_describe_the_markdown(tmp_path):
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    saved = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+
+    markdown = Path(saved.markdown_path).read_text(encoding="utf-8")
+    assert saved.content_hash == hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    assert saved.content_chars == len(markdown)
+
+
+def test_copies_the_original_upload(tmp_path):
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    saved = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+
+    copied = Path(saved.source_path)
+    assert copied.exists()
+    assert copied.parent == data_root / "projects" / "p1" / "uploads"
+    assert copied.name == f"{saved.document_id}.docx"
+    assert copied.read_bytes() == source.read_bytes()
+
+
+def test_two_uploads_of_the_same_file_get_distinct_ids(tmp_path):
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    first = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+    second = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_BID
+    )
+
+    assert first.document_id != second.document_id
+    assert Path(first.markdown_path).exists()
+    assert Path(second.markdown_path).exists()
+    # 内容相同 → 哈希相同：哈希是本体的指纹，不是槽位编号
+    assert first.content_hash == second.content_hash
+    assert second.role == ROLE_BID
+
+
+def test_projects_are_isolated(tmp_path):
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    a = save_uploaded_document(
+        data_root=data_root, project_id="p1", source_path=source, role=ROLE_TENDER
+    )
+    b = save_uploaded_document(
+        data_root=data_root, project_id="p2", source_path=source, role=ROLE_TENDER
+    )
+
+    assert Path(a.markdown_path).parent == data_root / "projects" / "p1" / "documents"
+    assert Path(b.markdown_path).parent == data_root / "projects" / "p2" / "documents"
+
+
+def test_parse_failure_leaves_no_artifacts(tmp_path):
+    """裁定 R24：落盘前必须先把解析做完。解析失败时不得留下半成品目录或文件。"""
+    data_root = tmp_path / "data"
+    bad = tmp_path / "broken.xlsx"
+    bad.write_bytes(b"PK\x03\x04" + b"\x00" * 32)  # zip 魔数正确、内容不是 xlsx
+
+    with pytest.raises(ParsingError) as info:
+        save_uploaded_document(
+            data_root=data_root, project_id="p1", source_path=bad, role=ROLE_TENDER
+        )
+
+    assert info.value.code == "parse-failed"
+    documents_dir = data_root / "projects" / "p1" / "documents"
+    assert not documents_dir.exists() or list(documents_dir.iterdir()) == []
+    uploads_dir = data_root / "projects" / "p1" / "uploads"
+    assert not uploads_dir.exists() or list(uploads_dir.iterdir()) == []
+
+
+def test_missing_source_raises_and_leaves_no_artifacts(tmp_path):
+    data_root = tmp_path / "data"
+
+    with pytest.raises(Exception):
+        save_uploaded_document(
+            data_root=data_root,
+            project_id="p1",
+            source_path=tmp_path / "nope.docx",
+            role=ROLE_TENDER,
+        )
+
+    documents_dir = data_root / "projects" / "p1" / "documents"
+    assert not documents_dir.exists() or list(documents_dir.iterdir()) == []
+```
+
 - [ ] **Step 2: 跑测试确认失败**
-- [ ] **Step 3: 实现**（`hashlib.sha256` 算 content_hash；`uuid4().hex[:12]` 生成 document_id；复制原文件到 `<data_root>/projects/<id>/uploads/` 以便复现）
-- [ ] **Step 4: 全量套件确认通过且无回归**
-- [ ] **Step 5: 提交** `feat(server): 上传→解析→落盘服务入口（P2a Task 8）`
+
+Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_service.py -v`
+Expected: FAIL，`ModuleNotFoundError: No module named 'app.infra.parsing.service'`
+
+- [ ] **Step 3: 写实现**
+
+创建 `server/app/infra/parsing/service.py`：
+
+```python
+from __future__ import annotations
+
+import hashlib
+import shutil
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.infra.parsing.router import parse_document
+
+
+@dataclass(frozen=True)
+class SavedDocument:
+    """落盘结果。字段与域表要写的列一一对应（spec §5.2），由调用方落库。"""
+
+    document_id: str
+    project_id: str
+    role: str
+    source: str
+    file_name: str
+    source_path: str
+    markdown_path: str
+    content_hash: str
+    content_chars: int
+    parser_label: str
+    format_kind: str
+    extension: str
+
+
+def save_uploaded_document(
+    *,
+    data_root: Path,
+    project_id: str,
+    source_path: Path,
+    role: str,
+    source: str = "upload",
+    provider: str = "local",
+) -> SavedDocument:
+    """解析 → 落盘 markdown → 复制原件 → 返回值对象。**不写数据库**（裁定 R24）。
+
+    顺序很关键（裁定 R24）：**先解析、后落盘**。解析失败时抛 `ParsingError`，
+    此时一个字节都没写过，因此不会留下半成品目录——`test_parse_failure_leaves_no_artifacts`
+    钉住这一点。若反过来先建目录再解析，失败就会留下空目录与已复制的原件。
+    """
+    data_root = Path(data_root)
+    source_path = Path(source_path)
+
+    # 1) 解析（失败即抛，此时尚未写任何文件）
+    parsed = parse_document(source_path, provider=provider)
+
+    # 2) 生成 id 与目标路径
+    document_id = uuid.uuid4().hex[:12]
+    project_dir = data_root / "projects" / project_id
+    documents_dir = project_dir / "documents"
+    uploads_dir = project_dir / "uploads"
+    documents_dir.mkdir(parents=True, exist_ok=True)
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    markdown_path = documents_dir / f"{document_id}.md"
+    copied_path = uploads_dir / f"{document_id}{parsed.extension}"
+
+    # 3) 落盘：正文与原件副本
+    markdown_path.write_text(parsed.markdown, encoding="utf-8")
+    shutil.copyfile(source_path, copied_path)
+
+    return SavedDocument(
+        document_id=document_id,
+        project_id=project_id,
+        role=role,
+        source=source,
+        file_name=source_path.name,
+        source_path=str(copied_path),
+        markdown_path=str(markdown_path),
+        content_hash=hashlib.sha256(parsed.markdown.encode("utf-8")).hexdigest(),
+        content_chars=len(parsed.markdown),
+        parser_label=parsed.parser_label,
+        format_kind=parsed.format_kind,
+        extension=parsed.extension,
+    )
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_service.py -v`
+Expected: PASS（8 passed）
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add server/app/infra/parsing/service.py server/tests/test_parsing_service.py
+git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 解析落盘服务，写入正文与原件并返回值对象（P2a Task 8）"
+```
 
 ---
 
@@ -1406,7 +1664,7 @@ def test_docx_structure_equivalence(sample_docx):
 ## 完成标准
 
 - `cd server && .venv/Scripts/python.exe -m pytest -q` 全绿（P1 的 123 个 + P2a 新增）。
-- `parse_document()` 对 docx / doc / pdf / xlsx / txt / md 六类输入都能产出 markdown 并落盘，`rejection_check_documents` 行含 `content_hash`。
+- `parse_document()` 对 docx / doc / pdf / xlsx / txt / md 六类输入都能产出 markdown；`save_uploaded_document()` 把正文与原件副本落到 `<data_root>/projects/<project_id>/` 下并返回含 `content_hash` 的 `SavedDocument`。**数据库行由 P3/P4 在各自的域表里写**（裁定 R24）。
 - `resolve_parser` 的三段语义（支持 / 回退本地 / 不支持）与现有 `resolveFileParser` 一致；`local` 支持集为 docx/doc/pdf/xlsx/txt/md。
 - 全程无网络请求（MinerU 属 P2c）。
 - **已知验证缺口（裁定 R20）**：`.doc → docx` 的**真实转换**未被自动化覆盖——需要一份真实 `.doc` 样本，而样本要靠 LibreOffice 产出、本机没有。自动化只覆盖 `find_soffice()` 的契约与「LibreOffice 缺失时报 `libreoffice-missing`」。装了 LibreOffice 的机器上应手工验证一次真实 `.doc`。
