@@ -484,8 +484,18 @@ def test_coordinates_without_cjk_are_not_headings():
 
 
 def test_over_long_paragraph_is_not_a_heading():
-    text = "第" + "一" * (MAX_SECTION_TITLE_LENGTH + 5)
+    """裁定 R8：夹具必须**同时**命中编号规则与长度上限，否则长度守卫无人钉住。
+
+    原夹具 `"第" + "一"*45` 末尾没有「章/节/篇」，压根不匹配
+    `^第[…]+[章节篇]`——于是它靠「编号不匹配」通过，删掉长度检查也照样绿。
+    改写后的段落以「第一章 」开头（命中编号规则）且长度远超 40，所以
+    只有长度守卫能把它挡下来。
+    """
+    text = "第一章 " + "很长的正文内容" * 10
+    assert len(text) > MAX_SECTION_TITLE_LENGTH
+
     index = build_paragraph_index(_paragraphs((text, "", False)))
+
     assert is_heading_paragraph(index.paragraphs[0]) is False
 
 
