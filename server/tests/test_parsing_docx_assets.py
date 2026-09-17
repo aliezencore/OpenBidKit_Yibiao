@@ -130,6 +130,17 @@ def test_unescapes_the_five_entities():
     assert unescape_xml("a&lt;b&gt;c&amp;d&quot;e&apos;f") == "a<b>c&d\"e'f"
 
 
+def test_entity_replacement_is_single_pass():
+    """裁定 R5：**替换顺序必须被钉住**。
+
+    上一条用例在正反两种顺序下都通过（`c&amp;d` 两种顺序结果相同），所以
+    「`&lt;`/`&gt;` 先于 `&amp;`」这一关键顺序此前无任何保护。顺序反了会让
+    `&amp;lt;` 二次反转义成 `<`（本应是字面量 `&lt;`），是把文档里的
+    「&lt;」显示成「<」这类静默损坏。这条断言就是那个钉子。
+    """
+    assert unescape_xml("&amp;lt;") == "&lt;"
+
+
 def test_extract_run_text_joins_only_visible_runs():
     block = (
         '<w:p><w:r><w:t>第一</w:t></w:r>'
