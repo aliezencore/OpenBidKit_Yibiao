@@ -510,10 +510,17 @@ def test_nearby_text_prefers_own_paragraph():
 
 
 def test_nearby_text_takes_two_before_and_two_after_when_own_is_empty():
+    """顺序是**先近后远**（距离 1、2），不是文档顺序——对齐参考实现的循环。
+
+    参考 `cjs:126-136` 用 `for offset = 1..2` 先取 `position - 1` 再取 `position - 2`，
+    产出 `前二 更前`；照抄即得下面的期望。**不要**因为「文档顺序读起来更顺」
+    就把它改成 `更前 前二`——那会偏离参考，且这条 200 字的上下文提示串
+    顺序差异对下游没有实质影响，没有理由为此产生分歧。
+    """
     index = build_paragraph_index(_paragraphs(
         ("更前", "", False), ("前二", "", False), ("", "", False), ("后一", "", False), ("后二", "", False),
     ))
-    assert extract_nearby_text(index, 2) == "更前 前二 后一 后二"
+    assert extract_nearby_text(index, 2) == "前二 更前 后一 后二"
 
 
 def test_nearby_text_is_truncated():
@@ -639,6 +646,8 @@ def extract_nearby_text(index: ParagraphIndex, position: int) -> str:
         return own[:MAX_NEARBY_TEXT_LENGTH]
 
     parts: list[str] = []
+    # 顺序刻意是「先近后远」——与参考实现（cjs:126-136）的 offset 递增循环一致。
+    # 不是文档顺序；不要为了「读起来更顺」而反转，那会偏离参考。
     for offset in range(1, NEARBY_PARAGRAPH_RADIUS + 1):
         before = position - offset
         if before >= 0 and index.paragraphs[before].text:
