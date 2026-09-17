@@ -742,6 +742,9 @@ def test_drawing_occurrence_carries_geometry_and_placement():
     assert occurrences[0].placement == "inline"
     assert (occurrences[0].width, occurrences[0].height) == (40, 30)
     assert occurrences[0].location_hint == "正文"
+    # 裁定 R11：`asset_kind` 此前在所有 occurrence 用例里都没被断言，
+    # 于是「按 width/height 分类」这行接线（含传参顺序）毫无钉子。
+    assert occurrences[0].asset_kind == "standalone"
 
 
 def test_anchor_placement_is_detected():
@@ -795,6 +798,44 @@ def test_classify_asset_kind():
     assert classify_asset_kind(100, 100, "inline") == "standalone"
     assert classify_asset_kind(100, 100, "anchor") == "standalone"
     assert classify_asset_kind(100, 100, "") == "unknown"
+
+
+def test_classify_asset_kind_requires_both_thresholds():
+    """裁定 R11：上面的用例钉不住「双阈值是与、且用 >=」。
+
+    原用例的四个尺寸里两个都达标、两个都不达标——`and` 换成 `or` 结果完全一样，
+    所以「必须两者都达标」这层语义此前无人钉住。这里用**单边达标**的尺寸把它钉死。
+    """
+    assert classify_asset_kind(600, 100, "inline") == "standalone"   # 只有宽达标
+    assert classify_asset_kind(100, 700, "inline") == "standalone"   # 只有高达标
+
+
+def test_classify_asset_kind_boundaries_are_inclusive():
+    """裁定 R11：阈值是 `>=`，不是 `>`——恰好等于阈值必须算 page-scan。"""
+    assert classify_asset_kind(500, 650, "inline") == "page-scan"
+
+
+def test_drawing_with_reversed_extent_attributes_swaps_width_and_height():
+    """裁定 R12：**钉住参考实现自带的缺陷，不要「顺手修」**。
+
+    `_EXTENT_REVERSED_RE` 在 `cx`/`cy` 出现顺序颠倒时，group(1) 其实是 `cy`、
+    group(2) 是 `cx`，而取值处固定把 group(1) 当 width——于是宽高被**转置**。
+    参考实现（`cjs:161,165-166`）有**完全相同**的行为，按「与参考行为对齐」的
+    验收标准本任务**不改**。这条用例的作用就是把现状钉住：谁若将来修正它，
+    会看到这条失败，从而必须显式决定「偏离参考」而不是静默改掉。
+    """
+    xml = (
+        "<w:p><w:r><w:drawing><wp:inline>"
+        '<a:blip r:embed="rId4"/>'
+        '<wp:extent cy="285750" cx="381000"/>'   # 刻意逆序
+        "</wp:inline></w:drawing></w:r></w:p>"
+    )
+    index = build_paragraph_index(xml)
+
+    occurrence = collect_drawing_occurrences(xml, RELS, "正文", index)[0]
+
+    # 逆序分支下宽高被转置：width 取到的是 cy(30px)，height 取到的是 cx(40px)
+    assert (occurrence.width, occurrence.height) == (30, 40)
 
 
 def test_occurrence_uses_surrounding_paragraphs_for_context():
