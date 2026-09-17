@@ -1344,13 +1344,13 @@ def _parse_locally(path: Path, fmt: FileFormat) -> str:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_router.py -v`
-Expected: PASS（8 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add server/app/infra/parsing/router.py server/tests/test_parsing_router.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 解析路由与统一入口 parse_document（P2a Task 6）"
+git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 解析路由与统一入口 parse_document（P2a Task 7）"
 ```
 
 ---
