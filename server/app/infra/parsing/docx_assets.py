@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,3 +71,41 @@ def list_media_files(docx_path: Path) -> list[MediaFile]:
                 )
             )
     return media
+
+
+_RELATIONSHIP_RE = re.compile(r"<Relationship\b[^>]*>")
+_RELATIONSHIP_ID_RE = re.compile(r'\bId="([^"]+)"')
+_RELATIONSHIP_TARGET_RE = re.compile(r'\bTarget="([^"]+)"')
+_RUN_TEXT_RE = re.compile(r"<w:t\b[^>]*>([\s\S]*?)</w:t>")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+_ENTITIES = (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"), ("&quot;", '"'), ("&apos;", "'"))
+
+
+def parse_relationships(xml: str) -> dict[str, str]:
+    """`Id -> Target`，Target 去掉前导 `/`（对齐 parseRelationships）。"""
+    relationships: dict[str, str] = {}
+    for tag in _RELATIONSHIP_RE.findall(xml or ""):
+        identifier = _RELATIONSHIP_ID_RE.search(tag)
+        target = _RELATIONSHIP_TARGET_RE.search(tag)
+        if identifier and target:
+            relationships[identifier.group(1)] = target.group(1).lstrip("/")
+    return relationships
+
+
+def unescape_xml(text: str) -> str:
+    result = text or ""
+    for entity, character in _ENTITIES:
+        result = result.replace(entity, character)
+    return result
+
+
+def extract_run_text(block: str) -> str:
+    """只拼接 `<w:t>`（可见文本）。
+
+    **不要**改成整段剥标签：`<wp:posOffset>1143000</wp:posOffset>` 这类坐标的数字
+    本身就是元素文本，剥完标签会留下数字残渣，既污染喂给模型的上下文，
+    又会被章节编号规则（如 `^\\d+(\\.\\d+)*[\\s、.]`）误判成章节标题。
+    """
+    runs = [unescape_xml(raw) for raw in _RUN_TEXT_RE.findall(block or "")]
+    return _WHITESPACE_RE.sub(" ", "".join(runs)).strip()

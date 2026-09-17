@@ -101,3 +101,59 @@ def test_nested_media_paths_are_skipped(tmp_path):
 
     assert "media/nested/deep.png" not in names
     assert "media/image1.png" in names
+
+
+from app.infra.parsing.docx_assets import extract_run_text, parse_relationships, unescape_xml
+
+
+def test_parses_relationship_id_to_target():
+    xml = (
+        '<Relationships>'
+        '<Relationship Id="rId4" Type="t" Target="media/image1.png"/>'
+        '<Relationship Id="rId5" Type="t" Target="/word/media/image2.jpeg"/>'
+        '</Relationships>'
+    )
+
+    rels = parse_relationships(xml)
+
+    assert rels["rId4"] == "media/image1.png"
+    assert rels["rId5"] == "word/media/image2.jpeg"  # 前导 / 被去掉
+
+
+def test_ignores_relationship_without_id_or_target():
+    xml = '<Relationship Type="t" Target="x"/><Relationship Id="rId1"/>'
+
+    assert parse_relationships(xml) == {}
+
+
+def test_unescapes_the_five_entities():
+    assert unescape_xml("a&lt;b&gt;c&amp;d&quot;e&apos;f") == "a<b>c&d\"e'f"
+
+
+def test_extract_run_text_joins_only_visible_runs():
+    block = (
+        '<w:p><w:r><w:t>第一</w:t></w:r>'
+        '<w:r><w:t xml:space="preserve"> 段 </w:t></w:r>'
+        '<w:r><w:t>文字</w:t></w:r></w:p>'
+    )
+
+    assert extract_run_text(block) == "第一 段 文字"
+
+
+def test_extract_run_text_ignores_position_offsets():
+    """坐标是元素文本，绝不能被当成可见文字——否则会污染上下文并被误判成章节编号。"""
+    block = (
+        '<w:p><wp:posOffset>1143000</wp:posOffset>'
+        '<w:r><w:t>真正的正文</w:t></w:r>'
+        '<wp:posOffset>132715</wp:posOffset></w:p>'
+    )
+
+    text = extract_run_text(block)
+
+    assert text == "真正的正文"
+    assert "1143000" not in text
+
+
+def test_extract_run_text_collapses_whitespace():
+    block = "<w:p><w:r><w:t>a   \n  b</w:t></w:r></w:p>"
+    assert extract_run_text(block) == "a b"
