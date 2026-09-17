@@ -311,6 +311,17 @@ def test_unescapes_the_five_entities():
     assert unescape_xml("a&lt;b&gt;c&amp;d&quot;e&apos;f") == "a<b>c&d\"e'f"
 
 
+def test_entity_replacement_is_single_pass():
+    """裁定 R5：**替换顺序必须被钉住**。
+
+    上一条用例在正反两种顺序下都通过（`c&amp;d` 两种顺序结果相同），所以
+    「`&lt;`/`&gt;` 先于 `&amp;`」这一关键顺序此前无任何保护。顺序反了会让
+    `&amp;lt;` 二次反转义成 `<`（本应是字面量 `&lt;`），是把文档里的
+    「&lt;」显示成「<」这类静默损坏。这条断言就是那个钉子。
+    """
+    assert unescape_xml("&amp;lt;") == "&lt;"
+
+
 def test_extract_run_text_joins_only_visible_runs():
     block = (
         '<w:p><w:r><w:t>第一</w:t></w:r>'
@@ -391,7 +402,7 @@ def extract_run_text(block: str) -> str:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（累计 11 passed）
+Expected: PASS（T2 新增 7 个 → 累计 14 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -639,7 +650,7 @@ def extract_nearby_text(index: ParagraphIndex, position: int) -> str:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（累计 24 passed）
+Expected: PASS（T3 新增 13 个 → 累计 26 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -877,7 +888,7 @@ def collect_vml_occurrences(xml: str, relationships: dict[str, str],
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（累计 31 passed）
+Expected: PASS（T4 新增 7 个 → 累计 33 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -1006,12 +1017,12 @@ def extract_docx_visual_assets(docx_path: Path) -> DocxVisualAssets:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（累计 34 passed）
+Expected: PASS（T5 新增 3 个 → 累计 36 passed）
 
 - [ ] **Step 5: 全量套件确认无回归**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest -q`
-Expected: 189 + 34 = 223 全绿
+Expected: 全绿（P2a 的 189 + P2b 新增）
 
 - [ ] **Step 6: 提交**
 
@@ -1707,7 +1718,7 @@ Expected: PASS（8 passed）。若 `test_media_without_an_occurrence_is_still_st
 - [ ] **Step 5: 全量套件确认无回归**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest -q`
-Expected: 全绿（189 + 34 + 21 + 8 + 8 = 260）
+Expected: 全绿（以实际收集数为准）
 
 - [ ] **Step 6: 提交**
 
