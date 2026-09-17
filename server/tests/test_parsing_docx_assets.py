@@ -451,3 +451,150 @@ def test_occurrence_uses_surrounding_paragraphs_for_context():
 
     assert occurrence.section_title == "第一章 总体方案"
     assert "这是图后的说明文字。" in occurrence.nearby_text
+
+
+from app.infra.parsing.docx_assets import extract_docx_visual_assets
+
+
+def test_extracts_occurrences_and_media_together(tmp_path):
+    first = make_image(tmp_path / "a.png", size=(40, 30))
+    second = make_image(tmp_path / "b.png", size=(50, 25))
+    source = build_docx_with_images(
+        tmp_path / "two.docx", blocks=[("p", "正文")], images=[first, second]
+    )
+
+    assets = extract_docx_visual_assets(source)
+
+    assert len(assets.media_files) == 2
+    assert len(assets.occurrences) == 2
+    media_names = {item.media_name for item in assets.occurrences}
+    assert media_names == {item.media_name for item in assets.media_files}
+
+
+def test_occurrence_label_defaults_to_body(tmp_path):
+    image = make_image(tmp_path / "a.png")
+    source = build_docx_with_images(tmp_path / "one.docx", images=[image])
+
+    assets = extract_docx_visual_assets(source)
+
+    assert {item.location_hint for item in assets.occurrences} == {"正文"}
+
+
+def test_media_count_equals_distinct_media_files(tmp_path):
+    """同一张图插入两次时：媒体文件只有一个，但出现位置有两个。"""
+    image = make_image(tmp_path / "same.png")
+    source = build_docx_with_images(tmp_path / "dup.docx", images=[image, image])
+
+    assets = extract_docx_visual_assets(source)
+
+    assert len(assets.media_files) == 1
+    assert len(assets.occurrences) == 2
+    assert assets.occurrences[0].media_name == assets.occurrences[1].media_name
+
+
+# --- 以下两条不在 task-5-brief 的清单里，是为补齐 brief 行为规格中
+# --- 「页眉页脚」与「缺 .rels 退化」两处零覆盖而补的钉子。
+# --- 上面 3 条（brief 原文）里，`test_occurrence_label_defaults_to_body` 断言
+# --- label == "正文"：把 `location_hint` 硬编码成 "正文" 它照样绿，钉不住派生。
+
+
+def _docx_with_header_image(path, *, body_image, header_image):
+    """正文一张图 + 页眉一张图；两部分的 rId 映射由 python-docx 各自独立发放。"""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("正文段落")
+    doc.add_picture(str(body_image))
+    doc.sections[0].header.paragraphs[0].add_run().add_picture(str(header_image))
+    doc.save(path)
+    return path
+
+
+def _first_relationship_target(path, part):
+    """独立从 zip 里读某个 part 的 .rels 的第一个 Target（不复用被测模块）。"""
+    import re
+
+    with zipfile.ZipFile(path) as archive:
+        rels_xml = archive.read(part).decode("utf-8")
+    return re.search(r'Target="([^"]+)"', rels_xml).group(1).lstrip("/")
+
+
+def test_header_part_uses_its_own_relationships_and_label(tmp_path):
+    """裁定：页眉必须用**它自己的**关系表与段落索引，label 由 part 类型派生。
+
+    实测 python-docx 产出的两份关系表里存在**同名不同义**的 rId：
+    正文 `rId1 -> ../customXml/item1.xml`，页眉 `rId1 -> media/image2.png`。
+    若实现把正文的关系表套给页眉，页眉的 `rId1` 会解析成非媒体目标而被丢弃，
+    于是下面「页眉」那条出现位置拿不到——这正是必须逐 part 构造的原因。
+    """
+    body = make_image(tmp_path / "body.png", size=(40, 30), color=(200, 30, 30))
+    header = make_image(tmp_path / "hdr.png", size=(60, 20), color=(30, 30, 200))
+    source = _docx_with_header_image(
+        tmp_path / "two-parts.docx", body_image=body, header_image=header
+    )
+
+    assets = extract_docx_visual_assets(source)
+
+    assert sorted(item.location_hint for item in assets.occurrences) == ["正文", "页眉"]
+    by_label = {item.location_hint: item.media_name for item in assets.occurrences}
+    # 期望值独立来自 zip 里的页眉关系表，不是同一个调用的产物
+    assert by_label["页眉"] == _first_relationship_target(
+        source, "word/_rels/header1.xml.rels"
+    )
+    assert by_label["正文"] != by_label["页眉"]
+    assert len(assets.media_files) == 2
+
+
+def _rewrite_zip_entry(source, target, entry, content):
+    """把 source 复制成 target，并把其中一个条目替换为 content。
+
+    刻意**写到新路径**而不是原地替换：`os.replace` 覆盖 temp 目录里的 .docx
+    在 Windows 上会间歇性抛 `PermissionError: [WinError 5]`（杀软/索引占用，
+    与代码无关），原地替换会让这条用例变成随机红。
+    """
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(
+        target, "w", zipfile.ZIP_DEFLATED
+    ) as target_zip:
+        for item in source_zip.infolist():
+            payload = content if item.filename == entry else source_zip.read(item.filename)
+            target_zip.writestr(item, payload)
+    return target
+
+
+def test_part_without_rels_degrades_to_empty_instead_of_raising(tmp_path):
+    """裁定：缺 `.rels` 的 part 不是错误——关系表退化为空 dict，图片报为空出现位置。
+
+    实测 python-docx 对**纯文字页眉**正是这样产出：`word/header1.xml` 存在，
+    但 `word/_rels/header1.xml.rels` 不存在。这里再把该页眉换成一段引用
+    `rId1` 的 VML 图片，构造出「有图片引用、却没有关系表」的情形——
+    必须安安静静地不产生出现位置，而不是抛异常（也不许瞎编一个 media_name）。
+    """
+    from docx import Document
+
+    image = make_image(tmp_path / "body.png", size=(40, 30))
+    base = tmp_path / "text-header.docx"
+    doc = Document()
+    doc.add_paragraph("正文段落")
+    doc.add_picture(str(image))
+    doc.sections[0].header.paragraphs[0].text = "纯文字页眉"
+    doc.save(base)
+
+    # 先钉住前提，否则「not raising」会因为夹具根本没造出页眉而假绿
+    with zipfile.ZipFile(base) as archive:
+        assert "word/header1.xml" in archive.namelist()
+        assert "word/_rels/header1.xml.rels" not in archive.namelist()
+
+    source = _rewrite_zip_entry(
+        base,
+        tmp_path / "with-vml-header.docx",
+        "word/header1.xml",
+        "<w:hdr><w:p><w:r><w:pict>"
+        '<v:shape style="width:80pt;height:20pt;">'
+        '<v:imagedata r:id="rId1"/>'
+        "</v:shape></w:pict></w:r></w:p></w:hdr>",
+    )
+
+    assets = extract_docx_visual_assets(source)
+
+    assert [item.location_hint for item in assets.occurrences] == ["正文"]
+    assert len(assets.media_files) == 1

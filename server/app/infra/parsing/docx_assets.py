@@ -328,3 +328,54 @@ def extract_nearby_text(index: ParagraphIndex, position: int) -> str:
         if after < len(index.paragraphs) and index.paragraphs[after].text:
             parts.append(index.paragraphs[after].text)
     return " ".join(parts)[:MAX_NEARBY_TEXT_LENGTH]
+
+
+_HEADER_FOOTER_RE = re.compile(r"^word/(header\d*|footer\d*)\.xml$")
+
+
+@dataclass(frozen=True)
+class DocxVisualAssets:
+    occurrences: list[AssetOccurrence]
+    media_files: list[MediaFile]
+
+
+def extract_docx_visual_assets(docx_path: Path) -> DocxVisualAssets:
+    """正文 + 页眉页脚的出现位置，加上 word/media 下的全部媒体文件。
+
+    每个部分用**自己的**关系表与段落索引：页眉的 `rId4` 与正文的 `rId4`
+    是两套不同的映射，共用会把图片位置指错。
+    """
+    docx_path = Path(docx_path)
+    with open_docx_zip(docx_path) as archive:
+        names = archive.namelist()
+        if "word/document.xml" not in names:
+            raise ParsingError(
+                "DOCX 缺少 word/document.xml，无法提取图片",
+                code="docx-open-failed",
+                path=str(docx_path),
+            )
+
+        def read_text(name: str) -> str:
+            return archive.read(name).decode("utf-8") if name in names else ""
+
+        parts: list[tuple[str, str, dict[str, str]]] = [
+            ("正文", "word/document.xml", parse_relationships(read_text("word/_rels/document.xml.rels"))),
+        ]
+        for name in names:
+            match = _HEADER_FOOTER_RE.match(name)
+            if not match:
+                continue
+            stem = match.group(1)
+            label = "页眉" if stem.startswith("header") else "页脚"
+            parts.append((label, name, parse_relationships(read_text(f"word/_rels/{stem}.xml.rels"))))
+
+        occurrences: list[AssetOccurrence] = []
+        for label, part_name, relationships in parts:
+            xml = read_text(part_name)
+            if not xml:
+                continue
+            index = build_paragraph_index(xml)
+            occurrences.extend(collect_drawing_occurrences(xml, relationships, label, index))
+            occurrences.extend(collect_vml_occurrences(xml, relationships, label, index))
+
+    return DocxVisualAssets(occurrences=occurrences, media_files=list_media_files(docx_path))
