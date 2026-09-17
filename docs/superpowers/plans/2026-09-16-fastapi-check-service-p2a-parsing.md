@@ -1508,10 +1508,10 @@ def test_parse_failure_leaves_no_artifacts(tmp_path):
         )
 
     assert info.value.code == "parse-failed"
-    documents_dir = data_root / "projects" / "p1" / "documents"
-    assert not documents_dir.exists() or list(documents_dir.iterdir()) == []
-    uploads_dir = data_root / "projects" / "p1" / "uploads"
-    assert not uploads_dir.exists() or list(uploads_dir.iterdir()) == []
+    # 裁定 R26：**不要**写成 `not dir.exists() or list(dir.iterdir()) == []` —— 那个 `or`
+    # 会让「目录已建但为空」也算通过，于是把 mkdir 挪到解析之前该用例照样绿，与
+    # 「不留半成品」的声明自相矛盾（实现者用变异实测证实）。断言到「项目目录根本不存在」。
+    assert not (data_root / "projects" / "p1").exists()
 
 
 def test_missing_source_raises_and_leaves_no_artifacts(tmp_path):
@@ -1601,7 +1601,13 @@ def save_uploaded_document(
     copied_path = uploads_dir / f"{document_id}{parsed.extension}"
 
     # 3) 落盘：正文与原件副本
-    markdown_path.write_text(parsed.markdown, encoding="utf-8")
+    # 裁定 R25：必须固定换行符。`write_text` 默认按平台翻译换行，Windows 上 
+ 会变成
+    # 
+，于是 content_hash（对内存文本算的）与「磁盘文件的字节哈希」不一致——
+    # P3 查重若自行重读 .md 算哈希就会恒不等。固定为 
+ 后两边一致，且跨平台可复现。
+    markdown_path.write_text(parsed.markdown, encoding="utf-8", newline="\n")
     shutil.copyfile(source_path, copied_path)
 
     return SavedDocument(
