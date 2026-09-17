@@ -1380,7 +1380,12 @@ def compute_target_size(width: int, height: int, max_edge: int) -> tuple[int, in
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Expected: PASS（本文件全部用例；参数化展开后约 32 项。原稿写的「21 passed」是笔误）
+Expected: PASS（本文件全部用例；参数化展开后 **34** 项。原稿写的「21 passed」是笔误）
+
+> **实现后补记（裁定 R19/R20）**：
+>
+> - **R19**：`test_compute_target_size_scales_both_axes` 在实现轮里**已经加过**（brief 原稿漏了），因此不要重复声明同名函数（会 shadow／F811，且收集数不变）。全量实测 **266**，不是 267。
+> - **R20**：`test_compute_target_size_at_the_limit_does_not_shrink` 钉的是「恰在上限时既不缩也不改形状」这一**契约**，但**钉不住 `longest <= edge` 与 `longest < edge` 的区别**——恰在上限时 `scale = 1.0`，两条分支产出相同，该区分**不可观测**。不要为它设计变异探针（会得到等效变异体，白费一轮）。总代码覆盖实为 34 项。
 
 > **附录（裁定 R18，实现后补记）**：实现者补了三条上面没列的用例，理由经变异验证，**采纳**：
 > 1. 「`max_passthrough_bytes` 为 0/负数 = 无上限」这条**子分支**原稿漏了（只覆盖了「传上限」与「不传」两种情况，而「传 0」与「不传」是不同代码路径）。
