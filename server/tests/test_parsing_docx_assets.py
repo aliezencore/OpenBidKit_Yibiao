@@ -1,4 +1,5 @@
 import hashlib
+import zipfile
 
 import pytest
 
@@ -32,9 +33,16 @@ def test_content_hash_is_sha256_of_bytes(tmp_path):
 
     media = list_media_files(source)
 
-    for item in media:
-        assert item.content_hash == hashlib.sha256(item.data).hexdigest()
-        assert item.content_hash != ""
+    assert media, "夹具应产出至少一张图片，空循环不算覆盖"
+    # 独立从 zip 读出原始字节做基准，不复用被测模块给出的 item.data/hash，
+    # 否则断言退化成「自己等自己」（裁定 R4）。
+    with zipfile.ZipFile(source) as archive:
+        for item in media:
+            stored = archive.read("word/" + item.media_name)
+            assert item.content_hash == hashlib.sha256(item.data).hexdigest()
+            assert item.content_hash != ""
+            assert item.data == stored
+            assert item.content_hash == hashlib.sha256(stored).hexdigest()
 
 
 def test_mime_type_comes_from_extension(tmp_path):
@@ -56,8 +64,6 @@ def test_no_media_means_empty_list(tmp_path):
 
 def test_missing_document_xml_raises(tmp_path):
     """裁定：docx 不是有效 zip、或缺 word/document.xml 时，抛 ParsingError 而非裸异常。"""
-    import zipfile
-
     broken = tmp_path / "broken.docx"
     with zipfile.ZipFile(broken, "w") as archive:
         archive.writestr("not-word.txt", "x")
@@ -66,3 +72,32 @@ def test_missing_document_xml_raises(tmp_path):
         list_media_files(broken)
 
     assert info.value.code == "docx-open-failed"
+
+
+def test_not_a_zip_raises(tmp_path):
+    """裁定 R4：扩展名是 .docx 但内容根本不是 zip 时，同样归一为 ParsingError。"""
+    impostor = tmp_path / "not-a-zip.docx"
+    impostor.write_bytes(b"this is not a zip archive, just plain text")
+
+    with pytest.raises(ParsingError) as info:
+        list_media_files(impostor)
+
+    assert info.value.code == "docx-open-failed"
+
+
+def test_nested_media_paths_are_skipped(tmp_path):
+    """裁定 R4：word/media/a/b.png 不是标准布局要跳过，同一 zip 里的一级条目仍要保留。"""
+    source = _docx_with_two_images(tmp_path)
+    nested_bytes = make_image(tmp_path / "deep.png", size=(8, 8)).read_bytes()
+
+    with zipfile.ZipFile(source, "a") as archive:
+        archive.writestr("word/media/nested/deep.png", nested_bytes)
+
+    # 先确认追加真的落进 zip，否则下面的「不在清单里」会因为夹具失效而假绿。
+    with zipfile.ZipFile(source) as archive:
+        assert "word/media/nested/deep.png" in archive.namelist()
+
+    names = [item.media_name for item in list_media_files(source)]
+
+    assert "media/nested/deep.png" not in names
+    assert "media/image1.png" in names
