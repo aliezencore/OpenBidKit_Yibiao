@@ -76,6 +76,16 @@ def test_docx_structure_survives_parsing(tmp_path):
     lines = markdown.splitlines()
 
     # 标题：数量与相对层级。层级深度可与生成器不同，相对顺序必须一致。
+    # 钉「相对层级 + 顺序」，不钉绝对深度（spec §8.5 允许层级深度不同）：
+    # 先按文档序收集每个标题的深度，再各自减去自身最小值后逐位比对，
+    # 整体平移不改变归一化序列（允许），重排/错级则必定不等（拒绝）。
+    # 过滤器用 `startswith("#")`：本样本的生成器只产出 1-3 级标题，
+    # `####…` 不会出现，故不会误收更深的标题。
+    levels = [len(line) - len(line.lstrip("#")) for line in lines if line.startswith("#")]
+    assert len(levels) == H1_COUNT + H2_COUNT + H3_COUNT
+    declared = [1] * H1_COUNT + [2] * H2_COUNT + [3] * H3_COUNT
+    assert [lv - min(levels) for lv in levels] == [lv - min(declared) for lv in declared]
+
     h1 = [line for line in lines if line.startswith("# ")]
     h2 = [line for line in lines if line.startswith("## ")]
     h3 = [line for line in lines if line.startswith("### ")]
