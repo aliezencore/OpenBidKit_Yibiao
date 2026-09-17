@@ -65,6 +65,22 @@ def test_parse_document_detects_format(tmp_path):
     assert parse_document(p, provider="local").format_kind == detect_file_format(p).kind
 
 
+def test_parse_document_forwards_include_images_to_docx(tmp_path):
+    """裁定 R23：include_images 必须转发到 docx 路径，而不是被静默丢弃。
+
+    转发后由 docx 侧的 R2 守卫拒绝，调用方拿到 not-implemented；
+    若参数被丢弃，这里会「成功返回 markdown」而不是抛错——该用例即失败。
+    """
+    from app.domain.shared.errors import ParsingError
+
+    p = build_docx(tmp_path / "a.docx", blocks=[("p", "正文")])
+
+    with pytest.raises(ParsingError) as info:
+        parse_document(p, provider="local", include_images=True)
+
+    assert info.value.code == "not-implemented"
+
+
 def test_parser_exception_is_normalised_to_parsing_error(tmp_path):
     """裁定 R12：合法 zip 但不是有效 xlsx（如 docx 改名成 .xlsx）时，
     解析器内部的异常必须被归一为 ParsingError，而不是漏给调用方。"""

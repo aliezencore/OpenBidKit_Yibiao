@@ -61,7 +61,7 @@ def parse_document(path: Path, *, provider: str = "local", include_images: bool 
     fmt: FileFormat = detect_file_format(path)
     try:
         if decision.provider == "local":
-            markdown = _parse_locally(path, fmt)
+            markdown = _parse_locally(path, fmt, include_images=include_images)
         else:
             # MinerU 客户端属 P2c；P2a 阶段请求它会被路由回退到本地，故此处不可达。
             raise ParsingError("MinerU 解析属 P2c 范围", code="not-implemented", path=str(path))
@@ -77,7 +77,7 @@ def parse_document(path: Path, *, provider: str = "local", include_images: bool 
                           extension=fmt.extension, parser_label=label)
 
 
-def _parse_locally(path: Path, fmt: FileFormat) -> str:
+def _parse_locally(path: Path, fmt: FileFormat, *, include_images: bool = False) -> str:
     if fmt.kind == "txt":
         return read_text_with_encoding(path) + "\n"
     if fmt.kind == "markdown":
@@ -85,7 +85,10 @@ def _parse_locally(path: Path, fmt: FileFormat) -> str:
     if fmt.kind == "xlsx":
         return spreadsheet_to_markdown(path)
     if fmt.kind == "docx":
-        return docx_to_markdown(path)
+        # 裁定 R23：include_images 只在 docx 路径有意义——R2 在 docx_to_markdown
+        # 里对 include_images=True 显式拒绝；不转发就等于静默丢弃该参数，调用方
+        # 会误以为已请求到图片。其余格式解析器的签名刻意收窄，故不加该参数。
+        return docx_to_markdown(path, include_images=include_images)
     if fmt.kind == "doc":
         return legacy_doc_to_markdown(path)
     if fmt.kind == "pdf":
