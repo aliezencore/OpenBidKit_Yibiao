@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import hashlib
+import shutil
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.infra.parsing.router import parse_document
+
+
+@dataclass(frozen=True)
+class SavedDocument:
+    """落盘结果。字段与域表要写的列一一对应（spec §5.2），由调用方落库。"""
+
+    document_id: str
+    project_id: str
+    role: str
+    source: str
+    file_name: str
+    source_path: str
+    markdown_path: str
+    content_hash: str
+    content_chars: int
+    parser_label: str
+    format_kind: str
+    extension: str
+
+
+def save_uploaded_document(
+    *,
+    data_root: Path,
+    project_id: str,
+    source_path: Path,
+    role: str,
+    source: str = "upload",
+    provider: str = "local",
+) -> SavedDocument:
+    """解析 → 落盘 markdown → 复制原件 → 返回值对象。**不写数据库**（裁定 R24）。
+
+    顺序很关键（裁定 R24）：**先解析、后落盘**。解析失败时抛 `ParsingError`，
+    此时一个字节都没写过，因此不会留下半成品目录——`test_parse_failure_leaves_no_artifacts`
+    钉住这一点。若反过来先建目录再解析，失败就会留下空目录与已复制的原件。
+    """
+    data_root = Path(data_root)
+    source_path = Path(source_path)
+
+    # 1) 解析（失败即抛，此时尚未写任何文件）
+    parsed = parse_document(source_path, provider=provider)
+
+    # 2) 生成 id 与目标路径
+    document_id = uuid.uuid4().hex[:12]
+    project_dir = data_root / "projects" / project_id
+    documents_dir = project_dir / "documents"
+    uploads_dir = project_dir / "uploads"
+    documents_dir.mkdir(parents=True, exist_ok=True)
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    markdown_path = documents_dir / f"{document_id}.md"
+    copied_path = uploads_dir / f"{document_id}{parsed.extension}"
+
+    # 3) 落盘：正文与原件副本
+    markdown_path.write_text(parsed.markdown, encoding="utf-8")
+    shutil.copyfile(source_path, copied_path)
+
+    return SavedDocument(
+        document_id=document_id,
+        project_id=project_id,
+        role=role,
+        source=source,
+        file_name=source_path.name,
+        source_path=str(copied_path),
+        markdown_path=str(markdown_path),
+        content_hash=hashlib.sha256(parsed.markdown.encode("utf-8")).hexdigest(),
+        content_chars=len(parsed.markdown),
+        parser_label=parsed.parser_label,
+        format_kind=parsed.format_kind,
+        extension=parsed.extension,
+    )
