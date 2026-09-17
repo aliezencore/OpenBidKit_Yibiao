@@ -202,6 +202,112 @@ def extract_section_title(index: ParagraphIndex, position: int) -> str | None:
     return None
 
 
+EMU_PER_PX = 9525
+PT_TO_EMU = 12700
+PAGE_SCAN_MIN_WIDTH_PX = 500
+PAGE_SCAN_MIN_HEIGHT_PX = 650
+
+_DRAWING_RE = re.compile(r"<w:drawing>[\s\S]*?</w:drawing>")
+_BLIP_EMBED_RE = re.compile(r'\ba:blip\b[^>]*\br:embed="([^"]+)"|r:embed="([^"]+)"')
+_ANCHOR_RE = re.compile(r"<wp:anchor\b")
+_EXTENT_RE = re.compile(r'<wp:extent\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"')
+_EXTENT_REVERSED_RE = re.compile(r'<wp:extent\b[^>]*\bcy="(\d+)"[^>]*\bcx="(\d+)"')
+_VML_RE = re.compile(r'<v:imagedata\b[^>]*\br:id="([^"]+)"[^>]*/?>')
+_VML_STYLE_WIDTH_RE = re.compile(r"width:([\d.]+)pt", re.I)
+_VML_STYLE_HEIGHT_RE = re.compile(r"height:([\d.]+)pt", re.I)
+_MEDIA_TARGET_RE = re.compile(r"^(word/)?media/")
+
+
+@dataclass(frozen=True)
+class AssetOccurrence:
+    media_name: str
+    relationship_id: str
+    placement: str
+    width: int
+    height: int
+    asset_kind: str
+    location_hint: str
+    nearby_text: str
+    section_title: str | None
+
+
+def classify_asset_kind(width: int, height: int, placement: str) -> str:
+    if width >= PAGE_SCAN_MIN_WIDTH_PX and height >= PAGE_SCAN_MIN_HEIGHT_PX:
+        return "page-scan"
+    if placement in ("inline", "anchor"):
+        return "standalone"
+    return "unknown"
+
+
+def _is_media_target(target: str | None) -> bool:
+    return bool(target) and bool(_MEDIA_TARGET_RE.match(target))
+
+
+def _occurrence(media_name: str, relationship_id: str, placement: str,
+                width: int, height: int, part_label: str,
+                index: ParagraphIndex, char_index: int) -> AssetOccurrence:
+    position = find_paragraph_position(index, char_index)
+    return AssetOccurrence(
+        media_name=media_name,
+        relationship_id=relationship_id,
+        placement=placement,
+        width=width,
+        height=height,
+        asset_kind=classify_asset_kind(width, height, placement),
+        location_hint=part_label,
+        nearby_text=extract_nearby_text(index, position),
+        section_title=extract_section_title(index, position),
+    )
+
+
+def collect_drawing_occurrences(xml: str, relationships: dict[str, str],
+                                part_label: str, index: ParagraphIndex) -> list[AssetOccurrence]:
+    source = xml or ""
+    occurrences: list[AssetOccurrence] = []
+    for match in _DRAWING_RE.finditer(source):
+        block = match.group(0)
+        embed = _BLIP_EMBED_RE.search(block)
+        relationship_id = embed.group(1) or embed.group(2) if embed else None
+        if not relationship_id:
+            continue
+        target = relationships.get(relationship_id)
+        if not _is_media_target(target):
+            continue
+        placement = "anchor" if _ANCHOR_RE.search(block) else "inline"
+        extent = _EXTENT_RE.search(block) or _EXTENT_REVERSED_RE.search(block)
+        width = height = 0
+        if extent:
+            width = round(int(extent.group(1)) / EMU_PER_PX)
+            height = round(int(extent.group(2)) / EMU_PER_PX)
+        occurrences.append(_occurrence(
+            target.replace("word/", "", 1), relationship_id, placement,
+            width, height, part_label, index, match.start(),
+        ))
+    return occurrences
+
+
+def collect_vml_occurrences(xml: str, relationships: dict[str, str],
+                            part_label: str, index: ParagraphIndex) -> list[AssetOccurrence]:
+    source = xml or ""
+    occurrences: list[AssetOccurrence] = []
+    for match in _VML_RE.finditer(source):
+        target = relationships.get(match.group(1))
+        if not _is_media_target(target):
+            continue
+        # VML 尺寸在外层 v:shape 的 style 里，单位 pt
+        shape_start = source.rfind("<v:shape", 0, match.start())
+        style_block = source[shape_start:match.start()] if shape_start >= 0 else ""
+        width_pt = float(_VML_STYLE_WIDTH_RE.search(style_block).group(1)) if _VML_STYLE_WIDTH_RE.search(style_block) else 0.0
+        height_pt = float(_VML_STYLE_HEIGHT_RE.search(style_block).group(1)) if _VML_STYLE_HEIGHT_RE.search(style_block) else 0.0
+        occurrences.append(_occurrence(
+            target.replace("word/", "", 1), match.group(1), "inline",
+            round(width_pt * PT_TO_EMU / EMU_PER_PX),
+            round(height_pt * PT_TO_EMU / EMU_PER_PX),
+            part_label, index, match.start(),
+        ))
+    return occurrences
+
+
 def extract_nearby_text(index: ParagraphIndex, position: int) -> str:
     """图片所在段落的文本；该段为空时（图片独占段落）取前后各最多 2 个有文本的段落。"""
     if position < 0:

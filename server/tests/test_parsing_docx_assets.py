@@ -14,6 +14,13 @@ from app.infra.parsing.docx_assets import (
     is_heading_paragraph,
 )
 from tests.parsing_fixtures import build_docx_with_images, make_image
+from app.infra.parsing.docx_assets import (
+    EMU_PER_PX,
+    PT_TO_EMU,
+    classify_asset_kind,
+    collect_drawing_occurrences,
+    collect_vml_occurrences,
+)
 
 
 def _docx_with_two_images(tmp_path):
@@ -281,3 +288,108 @@ def test_find_paragraph_position_locates_char_index():
     assert find_paragraph_position(index, second_start) == 1
     assert find_paragraph_position(index, index.positions[0][0]) == 0
     assert find_paragraph_position(index, 10 ** 9) == -1
+
+
+# 注（裁定 R10）：`EMU_PER_PX` / `PT_TO_EMU` 只在本文件里用于**换算推导的注释**，
+# 断言一律用字面量。若最终这两个名字确实没被引用，从 import 里去掉即可——
+# **不要**为了让它们「有用」而把断言改回自指的表达式。
+
+
+def _drawing(embed, *, cx=381000, cy=285750, anchor=False):
+    """cx/cy 用**字面量** EMU 值（裁定 R10）。
+
+    写成 `EMU_PER_PX * 40` 会让「40px」这类期望变成自指的：换算常量错掉也照样绿。
+    381000 EMU ÷ 9525 = 40px；285750 ÷ 9525 = 30px——同样由字面量钉住。
+    """
+    tag = "wp:anchor" if anchor else "wp:inline"
+    return (
+        f"<w:p><w:r><w:drawing><{tag}>"
+        f'<a:blip r:embed="{embed}"/>'
+        f'<wp:extent cx="{cx}" cy="{cy}"/>'
+        f"</{tag}></w:drawing></w:r></w:p>"
+    )
+
+
+RELS = {"rId4": "media/image1.png", "rId5": "embeddings/oleObject1.bin"}
+
+
+def test_drawing_occurrence_carries_geometry_and_placement():
+    xml = _drawing("rId4")
+    index = build_paragraph_index(xml)
+
+    occurrences = collect_drawing_occurrences(xml, RELS, "正文", index)
+
+    assert len(occurrences) == 1
+    assert occurrences[0].media_name == "media/image1.png"
+    assert occurrences[0].relationship_id == "rId4"
+    assert occurrences[0].placement == "inline"
+    assert (occurrences[0].width, occurrences[0].height) == (40, 30)
+    assert occurrences[0].location_hint == "正文"
+
+
+def test_anchor_placement_is_detected():
+    xml = _drawing("rId4", anchor=True)
+    index = build_paragraph_index(xml)
+    assert collect_drawing_occurrences(xml, RELS, "正文", index)[0].placement == "anchor"
+
+
+def test_drawing_ignores_targets_outside_the_media_directory():
+    """裁定 R9：夹具必须是**真的在 media/ 之外**的目标。
+
+    原夹具用 `media/not-image.txt`——那仍在 `media/` 目录内，`^(word/)?media/` 会放行，
+    参考实现的 `/^media\\//` 同样放行，所以那条用例期望 `[]` 却会拿到 1 条，必失败；
+    而且它表达的也不是它声称的语义。改用 `embeddings/oleObject1.bin`——
+    既不在 `media/`，也不在 `word/media/`，才是真正的负例。
+    """
+    xml = _drawing("rId5")
+    index = build_paragraph_index(xml)
+    assert collect_drawing_occurrences(xml, RELS, "正文", index) == []
+
+
+def test_drawing_ignores_unknown_relationship():
+    xml = _drawing("rId99")
+    index = build_paragraph_index(xml)
+    assert collect_drawing_occurrences(xml, RELS, "正文", index) == []
+
+
+def test_vml_occurrence_reads_size_from_shape_style():
+    xml = (
+        '<w:p><w:r><w:pict><v:shape style="width:80pt;height:20pt;">'
+        '<v:imagedata r:id="rId4"/></v:shape></w:pict></w:r></w:p>'
+    )
+    index = build_paragraph_index(xml)
+
+    occurrences = collect_vml_occurrences(xml, RELS, "页眉", index)
+
+    assert len(occurrences) == 1
+    assert occurrences[0].media_name == "media/image1.png"
+    assert occurrences[0].placement == "inline"          # VML 一律 inline
+    # 裁定 R10：用**字面量**期望，不要把期望写成与实现同式的表达式——
+    # 写成 `round(80 * PT_TO_EMU / EMU_PER_PX)` 是自指的：把 EMU_PER_PX 改成
+    # 1000 之类的错值，该断言仍会通过，两个换算常量实际无人钉住。
+    # 推导：80pt × 12700(EMU/pt) ÷ 9525(EMU/px) = 106.67 → 107；20pt 同法 = 26.67 → 27。
+    assert occurrences[0].width == 107
+    assert occurrences[0].height == 27
+
+
+def test_classify_asset_kind():
+    assert classify_asset_kind(600, 700, "inline") == "page-scan"
+    assert classify_asset_kind(600, 700, "anchor") == "page-scan"
+    assert classify_asset_kind(100, 100, "inline") == "standalone"
+    assert classify_asset_kind(100, 100, "anchor") == "standalone"
+    assert classify_asset_kind(100, 100, "") == "unknown"
+
+
+def test_occurrence_uses_surrounding_paragraphs_for_context():
+    """图片独占段落时，上下文来自前后段落，而不是坐标残渣。"""
+    blocks = (
+        "<w:p><w:r><w:t>第一章 总体方案</w:t></w:r></w:p>"
+        + _drawing("rId4")
+        + "<w:p><w:r><w:t>这是图后的说明文字。</w:t></w:r></w:p>"
+    )
+    index = build_paragraph_index(blocks)
+
+    occurrence = collect_drawing_occurrences(blocks, RELS, "正文", index)[0]
+
+    assert occurrence.section_title == "第一章 总体方案"
+    assert "这是图后的说明文字。" in occurrence.nearby_text
