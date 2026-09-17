@@ -328,6 +328,25 @@ def test_drawing_occurrence_carries_geometry_and_placement():
     assert occurrences[0].asset_kind == "standalone"
 
 
+def test_drawing_asset_kind_depends_on_argument_order():
+    """裁定 R15：钉住 `classify_asset_kind` 收到的 **width/height 传参顺序**。
+
+    上一条用例虽然断言了 `asset_kind == "standalone"`，但它的几何夹具是 40×30，
+    两个维度都低于阈值，宽高互换后结果仍是 `standalone`——传参顺序**依然**无人钉住。
+    这里改用跨阈值的一对尺寸，让两种顺序互为反例：
+    600×660 时 `(600>=500 and 660>=650)` 为真 → `page-scan`；
+    互换后 `(660>=500 and 600>=650)` 为假 → `standalone`。
+    EMU 由字面量给出：5715000 ÷ 9525 = 600，6286500 ÷ 9525 = 660。
+    """
+    xml = _drawing("rId4", cx=5715000, cy=6286500)
+    index = build_paragraph_index(xml)
+
+    occurrences = collect_drawing_occurrences(xml, RELS, "正文", index)
+
+    assert (occurrences[0].width, occurrences[0].height) == (600, 660)
+    assert occurrences[0].asset_kind == "page-scan"
+
+
 def test_anchor_placement_is_detected():
     xml = _drawing("rId4", anchor=True)
     index = build_paragraph_index(xml)
