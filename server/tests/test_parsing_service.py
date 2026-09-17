@@ -185,3 +185,30 @@ def test_missing_source_raises_and_leaves_no_artifacts(tmp_path):
 
     documents_dir = data_root / "projects" / "p1" / "documents"
     assert not documents_dir.exists() or list(documents_dir.iterdir()) == []
+
+
+def test_invalid_project_id_rejected(tmp_path):
+    """裁定 P2a 终审 F1：project_id 必须是安全单段路径，否则拒绝而非目录穿越。
+
+    project_id 校验在解析与落盘之前，故即便源文件合法、解析会成功，非法 id 也先抛错。
+    """
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    for bad in ["..", "a/b", "a\\b", "/abs", "C:\\abs", ""]:
+        with pytest.raises(ParsingError) as info:
+            save_uploaded_document(
+                data_root=data_root, project_id=bad, source_path=source, role=ROLE_TENDER
+            )
+        assert info.value.code == "invalid-project-id", f"project_id={bad!r}"
+
+
+def test_legitimate_project_id_accepted(tmp_path):
+    """合法 id（含 hex 形式）不被净化误伤；既有 happy-path 用例已覆盖 p1，这里补 hex。"""
+    data_root = tmp_path / "data"
+    source = _upload(tmp_path)
+
+    saved = save_uploaded_document(
+        data_root=data_root, project_id="a1b2c3d4e5f6", source_path=source, role=ROLE_TENDER
+    )
+    assert saved.project_id == "a1b2c3d4e5f6"

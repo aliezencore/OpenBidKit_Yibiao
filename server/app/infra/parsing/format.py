@@ -85,5 +85,3 @@ def detect_file_format(path: Path) -> FileFormat:
         if not _has_magic(path, _OLE_MAGIC):
             raise ParsingError("文件解析失败：不是有效的 Word 97-2003 文档", code="format-mismatch", path=str(path))
         return FileFormat("doc", extension, _MIME["doc"])
-
-    raise ParsingError(f"未知的文件格式：{extension}", code="unknown-format", path=str(path))

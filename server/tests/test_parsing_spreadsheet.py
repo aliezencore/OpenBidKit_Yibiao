@@ -1,3 +1,4 @@
+import pytest
 from openpyxl import Workbook
 
 from app.infra.parsing.spreadsheet import spreadsheet_to_markdown
@@ -56,3 +57,26 @@ def test_pipe_in_cell_is_escaped(tmp_path):
     text = spreadsheet_to_markdown(p)
 
     assert "a\\|b" in text
+
+
+def test_load_workbook_failure_propagates_original_error(tmp_path, monkeypatch):
+    """裁定 P2a 终审 F4：load_workbook 抛异常时，必须透传原始异常而非 NameError。
+
+    原代码 `finally: wb.close()` 在 load_workbook 失败时因 wb 未绑定而抛 NameError，
+    掩盖真实异常。修复后 wb 先置 None，finally 仅在非 None 时关闭。
+    """
+    class _CustomOpenError(Exception):
+        pass
+
+    def _boom(*args, **kwargs):
+        raise _CustomOpenError("cannot open workbook")
+
+    monkeypatch.setattr(
+        "app.infra.parsing.spreadsheet.load_workbook", _boom
+    )
+    # 入口文件存在即可；load_workbook 已被替换，不会真正读取内容。
+    p = tmp_path / "broken.xlsx"
+    p.write_bytes(b"")
+
+    with pytest.raises(_CustomOpenError, match="cannot open workbook"):
+        spreadsheet_to_markdown(p)

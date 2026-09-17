@@ -39,12 +39,11 @@ def resolve_parser(path: Path, provider: str) -> ParserDecision:
     path = Path(path)
     fmt = detect_file_format(path)
     provider = provider or "local"
-    mineru_supports = provider in _MINERU_PROVIDERS and fmt.kind in ("pdf",)
     local_supports = provider == "local" and fmt.kind in _LOCAL_SUPPORTED_KINDS
-    requested_supported = local_supports or mineru_supports
-    if requested_supported:
+    if local_supports:
         return ParserDecision(provider, provider, fmt.extension, True, False)
     if provider != "local" and fmt.kind in _LOCAL_SUPPORTED_KINDS:
+        # P2a 阶段：MinerU 等非 local 提供方统一回退到本地（计划既定行为）。
         return ParserDecision("local", provider, fmt.extension, True, True)
     return ParserDecision(provider, provider, fmt.extension, False, False)
 
@@ -63,7 +62,10 @@ def parse_document(path: Path, *, provider: str = "local", include_images: bool 
         if decision.provider == "local":
             markdown = _parse_locally(path, fmt, include_images=include_images)
         else:
-            # MinerU 客户端属 P2c；P2a 阶段请求它会被路由回退到本地，故此处不可达。
+            # MinerU 客户端属 P2c，是 P2c 的官方接入点。P2a 阶段所有 supported 的
+            # 请求都会被 `resolve_parser` 路由回本地（`decision.provider == "local"`），
+            # 故此处不可达；保留作为 P2c 的占位与不变式守卫。若 P2c 引入「本地不支持、
+            # 仅它支持」的格式，这条分支才会真正触发。
             raise ParsingError("MinerU 解析属 P2c 范围", code="not-implemented", path=str(path))
     except ParsingError:
         raise

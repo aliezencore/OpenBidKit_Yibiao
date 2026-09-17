@@ -36,6 +36,19 @@ def test_doc_detected_by_extension_only(tmp_path):
     assert detect_file_format(p).kind == "doc"
 
 
+def test_doc_without_ole_magic_raises(tmp_path):
+    """钉住 .doc 的 OLE 魔数校验（裁定 P2a 终审 F7）。
+
+    原 test_doc_detected_by_extension_only 写入的已是正确 OLE 魔数，删掉校验也会过；
+    此用例显式写一个**非 OLE** 的 .doc，要求它报 format-mismatch，锁住校验逻辑。
+    """
+    p = tmp_path / "a.doc"
+    p.write_bytes(b"not an ole compound file at all")
+    with pytest.raises(ParsingError) as info:
+        detect_file_format(p)
+    assert info.value.code == "format-mismatch"
+
+
 def test_unknown_extension_raises_parsing_error(tmp_path):
     p = tmp_path / "a.exe"
     p.write_bytes(b"MZ")

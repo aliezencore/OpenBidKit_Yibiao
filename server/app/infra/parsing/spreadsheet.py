@@ -30,13 +30,17 @@ def spreadsheet_to_markdown(path: Path) -> str:
     数值按 openpyxl 原样转字符串（100 → `100`、200.5 → `200.5`），
     不做千分位或货币格式化——那是显示层的事，比对层不需要。
     """
-    wb = load_workbook(path, data_only=True, read_only=True)
+    wb = None
     sections: list[str] = []
     try:
+        wb = load_workbook(path, data_only=True, read_only=True)
         for sheet in wb.worksheets:
             rows = [list(row) for row in sheet.iter_rows(values_only=True)]
             body = f"## {sheet.title}\n\n{_render_table(rows)}"
             sections.append(body)
     finally:
-        wb.close()
+        # 若 load_workbook 本身抛异常，wb 仍为 None——此时不能引用 wb.close()，
+        # 否则会把真实的 openpyxl 异常掩盖成 NameError。
+        if wb is not None:
+            wb.close()
     return "\n\n".join(sections) + "\n"

@@ -37,7 +37,10 @@ def doc_to_docx(path: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
         [soffice, "--headless", "--convert-to", "docx", "--outdir", str(output_dir), str(path)],
-        capture_output=True, text=True, timeout=180, check=False,
+        # 只用 .returncode 与产物是否存在做判据，stdout/stderr 从不读取；故不使用
+        # text=True，避免 cp936 等 locale 下遇到不可解码字节时抛 UnicodeDecodeError，
+        # 否则转换即便成功（returncode==0）也会被误报成 parse-failed（裁定 P2a 终审 F5）。
+        capture_output=True, timeout=180, check=False,
     )
     produced = output_dir / (path.stem + ".docx")
     if completed.returncode != 0 or not produced.exists():

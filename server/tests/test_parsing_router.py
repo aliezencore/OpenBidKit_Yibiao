@@ -18,6 +18,30 @@ def test_mineru_falls_back_to_local_for_docx(tmp_path):
     assert decision.fallback_to_local is True
 
 
+def test_mineru_falls_back_to_local_for_pdf(tmp_path):
+    """裁定 P2a 终审 F2：mineru + pdf 不再「声明支持又拒绝」，而是回退本地并成功解析。
+
+    原代码里 `mineru_supports` 让 resolve_parser 给 pdf+mineru 返回 supported=True，
+    而 parse_document 的 else 分支却又抛 not-implemented——自相矛盾。移除特例后，
+    mineru 一律回退本地（本地支持 pdf），决议与执行一致。
+    """
+    import fitz
+
+    p = tmp_path / "a.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "body text", fontsize=12)
+    doc.save(p)
+    doc.close()
+
+    decision = resolve_parser(p, provider="mineru-agent-api")
+    assert (decision.provider, decision.supported, decision.fallback_to_local) == ("local", True, True)
+
+    result = parse_document(p, provider="mineru-agent-api")
+    assert result.format_kind == "pdf"
+    assert result.parser_label == "local"
+    assert "body text" in result.markdown
+
+
 def test_unsupported_extension_raises(tmp_path):
     from app.domain.shared.errors import ParsingError
 

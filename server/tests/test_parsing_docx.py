@@ -1,5 +1,6 @@
 import pytest
 
+from app.domain.shared.errors import ParsingError
 from app.infra.parsing.docx import docx_to_markdown
 from app.infra.parsing.markdown import (
     extract_tables,
@@ -144,3 +145,27 @@ def test_extract_tables_ignores_table_without_rows():
 
     assert tables == []
     assert "x" in html_without_tables
+
+
+def test_corrupt_docx_raises_conversion_error(tmp_path, monkeypatch):
+    """裁定 P2a 终审 F3：mammoth 对损坏 docx 不抛异常、只在 messages 报 error。
+
+    无法确定性地造出 mammoth 必然报 error 的 docx，故按裁定允许的口径：monkeypatch
+    `mammoth.convert_to_html`（即实现实际调用的名字）返回一个带 error message 的结果，
+    钉住「有 error 就抛 ParsingError(code="docx-conversion-failed")」的守卫。
+    """
+    import mammoth
+    from types import SimpleNamespace
+
+    class _FakeResult:
+        value = ""
+        messages = [SimpleNamespace(type="error", message="corrupt document")]
+
+    monkeypatch.setattr(mammoth, "convert_to_html", lambda *a, **k: _FakeResult())
+
+    p = build_docx(tmp_path / "corrupt.docx", blocks=[("p", "正文")])
+
+    with pytest.raises(ParsingError) as info:
+        docx_to_markdown(p)
+
+    assert info.value.code == "docx-conversion-failed"
