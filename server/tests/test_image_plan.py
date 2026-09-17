@@ -105,3 +105,14 @@ def test_compute_target_size_scales_both_axes():
 
 def test_compute_target_size_keeps_an_exact_fit_unchanged():
     assert compute_target_size(1000, 400, 1000) == (1000, 400)
+
+
+def test_compute_target_size_rounds_half_up_like_the_reference():
+    """裁定 R17：`.5` 临界必须 half-up——这是对齐参考 `Math.round` 的钉子。"""
+    # 8000 → 4000 的缩放系数恰为 0.5：6001×0.5 = 3000.5 → 3001（half-up）
+    assert compute_target_size(6001, 8000, 4000) == (3001, 4000)
+
+
+def test_compute_target_size_at_the_limit_does_not_shrink():
+    """裁定 R18：最长边恰好等于上限时不缩（`longest <= edge` 的含等号语义）。"""
+    assert compute_target_size(400, 200, 400) == (400, 200)

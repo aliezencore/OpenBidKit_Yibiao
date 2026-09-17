@@ -12,6 +12,7 @@ P4 可以照搬参考实现的判定与文案。所以**不要**因为「Pillow 
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -95,4 +96,9 @@ def compute_target_size(width: int, height: int, max_edge: int) -> tuple[int, in
     if edge <= 0 or longest <= edge:
         return safe_width, safe_height
     scale = edge / longest
-    return max(1, round(safe_width * scale)), max(1, round(safe_height * scale))
+    # 取整刻意用 half-up 的 `floor(x + 0.5)`，**不是**内置 `round()`：Python 的 `round()`
+    # 是 half-even（`round(3000.5) == 3000`），而参考实现的 `Math.round` 是 half-up
+    # （`Math.round(3000.5) === 3001`）。两者只在缩放值恰好落 .5 时分道扬镳
+    # （如 6001×8000、edge=4000 → py 3000 / js 3001）。按「行为对齐参考」的验收标准，
+    # 这里对齐参考。**不要**改回 `round()`——那会重新引入 1px 的平台性偏离。
+    return max(1, math.floor(safe_width * scale + 0.5)), max(1, math.floor(safe_height * scale + 0.5))
