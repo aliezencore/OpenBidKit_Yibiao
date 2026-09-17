@@ -268,7 +268,7 @@ __all__ = ["ParsingError"]
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_format.py -v`
-Expected: PASS（8 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 6: 提交**
 
@@ -1173,10 +1173,15 @@ def test_mineru_falls_back_to_local_for_docx(tmp_path):
 
 
 def test_unsupported_extension_raises(tmp_path):
+    from app.domain.shared.errors import ParsingError
+
     p = tmp_path / "a.exe"
     p.write_bytes(b"MZ")
-    with pytest.raises(Exception):
+    # 裁定 R22：用 pytest.raises(Exception) 不能钉住「必须是 ParsingError」——
+    # 任何异常（连 NameError）都能让它变绿。断言到具体类型与码。
+    with pytest.raises(ParsingError) as info:
         resolve_parser(p, provider="local")
+    assert info.value.code == "unsupported-extension"
 
 
 def test_parse_document_routes_docx(tmp_path):
@@ -1188,6 +1193,15 @@ def test_parse_document_routes_docx(tmp_path):
     assert result.format_kind == "docx"
     assert result.parser_label == "local"
     assert "标题" in result.markdown
+
+
+# 注（裁定 R22）：`supported=False` 这条分支**当前不可达**——`detect_file_format`
+# 只返回 docx/doc/txt/markdown/pdf/xlsx 六种 kind，而它们恰好构成
+# `_LOCAL_SUPPORTED_KINDS` 的全部；于是 provider == "local" 时 supported 必为真，
+# provider != "local" 时必走「回退本地」，结果为真。故 `parse_document` 里
+# `if not decision.supported: raise ParsingError(code="parser-unsupported")`
+# 是**防御性死分支**，保留作为 `ParserDecision` 不变式的守卫，但**不写用例**
+# （写了必然失败）。若 P2c 引入一个「本地不支持、它才支持」的格式，该分支自然可达。
 
 
 def test_parse_document_routes_txt(tmp_path):
@@ -1330,7 +1344,7 @@ def _parse_locally(path: Path, fmt: FileFormat) -> str:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd server && .venv/Scripts/python.exe -m pytest tests/test_parsing_router.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（8 passed）
 
 - [ ] **Step 5: 提交**
 
