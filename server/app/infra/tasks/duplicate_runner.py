@@ -3,10 +3,10 @@
 对齐参考实现 `client/electron/services/duplicateCheckService.cjs` 的
 `runAnalysisTask`（:2775-2866）与 `run`（:2720-2772）两处，本模块负责：
 
-- **并行时序**：content 段先 `create_task` 起飞（不 await），metadata 段 await 完成，
-  再把 outline/content/image 三段置 `running, progress=1` 并广播「等待正文内容用于…」，
-  最后 `asyncio.gather` 并行跑后三段。metadata 与 content **并行**是本任务的时序核心
-  （参考 :2733-2738）。
+- **并行时序**：`content_extraction` 角色先 `create_task` 起飞（不 await），
+  `metadata_extraction` 角色 await 完成，再把 outline/content/image 三段置
+  `running, progress=1` 并广播「等待正文内容用于…」，最后 `asyncio.gather` 并行跑后三段。
+  两个提取角色**并行**是本任务的时序核心（参考 :2733-2738）。
 - **幂等**：四段全 `success` 且四段签名都等于本次签名、且 `payload.force` 非真 →
   直接报 100 并返回，**不重跑**（参考 :2799-2807）。
 - **签名作废**：开跑前签名与库里的不一致（或 `force`）→ 清空四段状态与全部结果表。
@@ -20,7 +20,31 @@
 （:2798），即磁盘上的工作区快照。`previous_state` 本阶段**不参与**任何判定
 （它留给将来的断点续跑）。
 
-**P3a 边界**：四段算法由 `_stub_sections()` 占位，只返回空的 `SectionOutput`，
+**⚠ 五角色 vs 四段状态机（fix-round 1 / T4-1，这是 fix 的核心）**：参考实现是
+**四个不同的函数**——`runContentExtraction`（:2302，共享上游）与
+`runOutlineAnalysis` / `runContentDuplicateAnalysis` / `runImageDuplicateAnalysis`
+（:2412 / :2504 / :2632，一起进 `Promise.all`，:2745-2749）。`sections` 是**注入的
+runner 映射**，它的 key 因此是**五个角色**：
+
+| runner key | 状态行 | 说明 |
+|---|---|---|
+| `content_extraction` | **不写** | 产出 `outline`/`content`/`image` 三段共享的正文产物 |
+| `metadata_extraction` | **不写** | 产出元数据行；其状态并入 `metadata` 段的 stats |
+| `outline` / `content` / `image` | 各写一行 | 三段真正的分析状态机 |
+
+而**四段状态机 `ANALYSIS_SECTIONS` 仍是四个**（`metadata`/`outline`/`content`/`image`）：
+只有后三个角色写段状态行，`metadata` 段的状态由**主编排**依据「两个提取角色是否成功」
+写终态，两个提取角色的统计并入它的 `stats`（对齐参考 :2337 / :2382 把
+`contentExtraction` / `metadataExtraction` 都写进 `metadataAnalysis` 的 stats）。
+
+首版把「正文提取」与「正文比对」压进同一个 `content` 键，后果是编排器把 content
+runner **跑两次**（一次当提取、一次当比对），第二次还把自己的输出当上游。
+**同一角色每轮必须恰好跑一次**由 `test_each_role_runner_runs_exactly_once_per_round` 钉住。
+
+**异常安全（fix-round 1 / F1）**：参考实现在 `run` 外层有 `catch` 写错误态
+（:2756-2760）。本实现的对应契约写在 `_guarded_call` 上——见该方法的 docstring。
+
+**P3a 边界**：五个角色由 `_stub_sections()` 占位，只返回空的 `SectionOutput`，
 不产结果行、也不写四张结果表；`SectionRunContext` 的形状是给 P3b–P3d 往里填的。
 """
 
@@ -36,6 +60,38 @@ from app.domain.duplicate.progress import latest_analysis_message, overall_progr
 from app.domain.duplicate.signature import compute_analysis_signature
 from app.domain.duplicate.state import ANALYSIS_SECTIONS, SectionState
 from app.infra.repositories.duplicate import DuplicateRepository
+from app.infra.tasks.context import TaskCancelled  # noqa: F401  (对外再导出，便于调用方一并捕获)
+
+_UNSET: Any = object()
+"""「未携带」哨兵：与 `DuplicateRepository.save_section` 用的是**同一种语义**
+（那边是 `duplicate.py:29` 的私有 `_UNSET`）。这里只能自己定义一个——
+仓储的哨兵是模块私有的，导入它会把两个模块的实现细节绑在一起。
+
+语义（见 `save_section` 的 docstring）：字段为 `_UNSET` → **不传**该 kwarg，
+仓储保留旧值；显式传 `None` → 写 NULL。
+"""
+
+# 五个 **runner 角色**（`sections` 的 key）。注意与四段**状态机** `ANALYSIS_SECTIONS`
+# 的区别，见模块 docstring 的表格。
+CONTENT_EXTRACTION = "content_extraction"
+METADATA_EXTRACTION = "metadata_extraction"
+
+# ⚠ 这两个常量**不是同类**：`ANALYSIS_SECTIONS` 是**状态行**的键（4 个，
+# 其中 `metadata` 由主编排写终态，**没有 runner**）；`ANALYSIS_RUNNER_ROLES` 是
+# **runner 角色**的键（5 个，其中两个提取角色**不写状态行**）。
+#
+# 首版把角色写成 `(CONTENT_EXTRACTION, METADATA_EXTRACTION, *ANALYSIS_SECTIONS)`，
+# 于是多出一个 `"metadata"` 角色：注入 stub 时 `sections` 里会有一个永远不会被调用的
+# `metadata` runner（`_stub_sections` 照它造了 6 个 stub）。这是**键集合的错**，
+# 不是计数断言太严——已由 `test_runner_roles_are_exactly_five_without_metadata`
+# 钉住。两者必须各自显式列出。
+ANALYSIS_RUNNER_ROLES: tuple[str, ...] = (
+    CONTENT_EXTRACTION, METADATA_EXTRACTION, "outline", "content", "image")
+
+# 由 runner 角色产出的**依赖产物字段名**（`SectionRunContext.with_dependency` 的名字）。
+# 对齐参考 :2741 的 `const contentFiles = await contentPromise;` ——
+# 后三段的共同上游就是 `content_extraction` 的返回产物。
+CONTENT_FILES_DEPENDENCY = "content_files"
 
 
 def _utc_now() -> str:
@@ -44,15 +100,45 @@ def _utc_now() -> str:
 
 @dataclass(frozen=True)
 class SectionOutput:
-    """单段分析的产出。
+    """单段（或单个提取角色）分析的产出。
 
-    `stats` 写进该段的 `stats_json`（P3a 为空 dict）；`rows` 是**按表名分组**的结果行
-    （P3a 为空 dict），由 P3b–P3d 的段实现填充后交给编排层落库。P3a 只检查「有没有行」
-    来决定是否落库——空的 `rows` 即「不写结果表」。
+    - `stats`：落进该段的 `stats_json`（P3a 为空 dict）；提取角色的 `stats` 由编排层
+      并入 `metadata` 段的 stats。
+    - `rows`：**按表名分组**的结果行（P3a 为空 dict），由 P3b–P3d 的段实现填充后
+      交给编排层落库。P3a 只检查「有没有行」来决定是否落库——空的 `rows` 即「不写结果表」。
+    - `failed`：段实现**自己声明失败**的钩子。
+
+    `failed` 的地位（fix-round 1 / F7 订正）：它**不在** Task 4 的冻结接口里
+    （冻结的是 `stats`/`rows` 两个字段与默认值）。`_output_failed` 用
+    `getattr(output, "failed", False)` 读取它，故旧构造（只给 `stats`/`rows`）不受影响；
+    这里把它显式声明为第三个字段，是为了让「P3a 的失败分支不可达」这件事
+    **在接口上可见**，而不是一个藏在 `getattr` 默认值里的幽灵。
+    P3a 的 stub 不设它，故四段终态当前**只可能是 `success`**（见 `_output_failed`）。
     """
 
     stats: dict[str, Any] = field(default_factory=dict)
     rows: dict[str, list] = field(default_factory=dict)
+    failed: bool = False
+
+
+def content_output_of(content_files: Any) -> "SectionOutput | None":
+    """从「后三段的 `content_files` 上游」还原出 `content_extraction` 角色的产出。
+
+    这是一个**刻意的形状约定**（fix-round 1 / F2）：参考实现里 `contentFiles` 就是
+    `runContentExtraction(...)` 的返回值，即提取角色的产出本身（:2741）。
+    但本实现的 `SectionRunContext` 是**为 P3b–P3d 设计的形状**，
+    它的 `content_files` 字段将来要装的是「可被三个分析角色消费的正文产物」
+    （markdown 路径 / 文本），**不一定等于**提取角色的 `SectionOutput`。
+
+    故这里把「上游 → 提取角色产出」的解读收进一个函数：P3b 真正定义
+    `content_files` 的形状时，只改这一处即可。P3a 的 stub 让两者恒等
+    （`SectionOutput` 原样透传），所以现状是精确的。
+
+    返回 `None` 表示正文不可用（提取失败或上游不是产出对象）——
+    此时不产生任何「提取失败」的误判（失败判定由 `_guarded_call` 转出的
+    `failed` 产出负责）。
+    """
+    return content_files if isinstance(content_files, SectionOutput) else None
 
 
 @dataclass(frozen=True)
@@ -121,7 +207,12 @@ class _MappingFileRef:
 
 
 def _file_ref(item: Any) -> Any:
-    """dict 包成属性视图；已是带属性的对象（如 P3b 的 dataclass）原样透传。"""
+    """dict 包成属性视图；其余（带属性的对象，或非 Mapping 的意外值）原样透传。
+
+    **已知局限（fix-round 1 / F8）**：非 Mapping 也非「带属性对象」的项（如 `42`）
+    在这里被原样透传，签名函数对它的属性全取 `None` —— 不同的错误项会**折叠成同一个
+    签名**。上游保证文件项是 dict，故按已知局限登记，见 `_bid_files` 的 docstring。
+    """
     if isinstance(item, Mapping):
         return _mapping_file_ref(item)
     return item
@@ -146,7 +237,15 @@ def _tender_files(payload: Mapping[str, Any]) -> list[Any]:
 
 
 def _bid_files(payload: Mapping[str, Any]) -> list[Any]:
-    """取投标文件：非数组按空列表处理（对齐 `Array.isArray(payload.bidFiles) ? … : []`）。"""
+    """取投标文件：非数组按空列表处理（对齐 `Array.isArray(payload.bidFiles) ? … : []`）。
+
+    **已知局限（fix-round 1 / F8）**：这里保留了 `file` 的真值（`if file`），却没有
+    检查 `file` 是不是 `Mapping`。列表里放非 dict 项（如 `bidFiles=[42]`）时，
+    `_file_ref` 原样透传 `42`，签名函数对它的三个属性全取到 `None`
+    —— 于是 `[42]` 与 `[43]` 会算出**同一个签名**，幂等会把「文件已换」误判成「没变」。
+    上游（HTTP 入口 / 任务入队）保证文件项是 dict，故本阶段按**已知局限**登记而不是
+    加一层形状校验；折叠点就在 `_file_ref` 的 `return item`（那里有对应注释）。
+    """
     raw_bid = payload.get("bidFiles")
     if not isinstance(raw_bid, list):
         return []
@@ -157,29 +256,38 @@ def _payload_files(payload: Mapping[str, Any] | None) -> list[Any]:
     """参与分析的全部文件：`[...tenderFiles, ...bidFiles].filter(Boolean)`。
 
     对齐 :2721-2724。`filter(Boolean)` 去掉 falsy 项（`None` / 空串 / `0`）。
+
+    **非 `Mapping` 的载荷按空处理（fix-round 1 / F8）**：原实现写的是 `payload or {}`，
+    它对 `[1, 2]` 这类**非空**列表毫无作用——`data.get` 会直接抛 `AttributeError`。
+    现在显式判类型：不是 `Mapping` 就当作空载荷（`_tender_files` / `_bid_files` 都容错），
+    与「缺失文件键」的行为一致。**不抛错**是有意的：本层的职责是编排，
+    载荷形状的校验属于 HTTP/任务入口；编排出错会把四个角色卡在 running（见 F1）。
     """
-    data = payload or {}
+    data = payload if isinstance(payload, Mapping) else {}
     return [*_tender_files(data), *_bid_files(data)]
 
 
 def _stub_sections() -> dict[str, SectionRunner]:
-    """四段占位实现（P3a）：做完即返回空的 stats/rows。
+    """五个角色的占位实现（P3a）：做完即返回空的 `SectionOutput`。
 
     它**不写库**——段状态一律由主编排统一落库，stub 只负责「跑完并交回产出」。
     段内进度不在这里报：段状态由主编排统一写入后按 `overall_progress` 折算，
     两处各写一套会互相覆盖、把进度推成非单调。
+
+    返回的五个键是**角色**，不是四段：`content_extraction` 与 `metadata_extraction`
+    是提取阶段，后三个才是四段状态机里的段（见模块 docstring 的表格）。
     """
 
     def make(section: str) -> SectionRunner:
         async def run_section(section_ctx: SectionRunContext) -> SectionOutput:
-            # 交还一次控制权：create_task 起的 content 任务要有机会被调度，
+            # 交还一次控制权：create_task 起的 content_extraction 角色要有机会被调度，
             # 「并行」才在事件循环里真实发生（串行化后时序用例就该变红）。
             await asyncio.sleep(0)
             return SectionOutput()
 
         return run_section
 
-    return {section: make(section) for section in ANALYSIS_SECTIONS}
+    return {role: make(role) for role in ANALYSIS_RUNNER_ROLES}
 
 
 class DuplicateAnalysisRunner:
@@ -200,6 +308,9 @@ class DuplicateAnalysisRunner:
         self._repo = repo
         self._sections = dict(sections) if sections is not None else _stub_sections()
         self._now = now_fn
+        # 本编排器**自己起的**任务（目前只有 `content_extraction`）。F6 的收口需要它：
+        # `_drain_pending_tasks` 只能动自己的任务，绝不能碰调用方的任务。
+        self._own_tasks: list["asyncio.Task[Any]"] = []
         # 注入 reader 的**唯一目的**是让「过期签名丢弃」可测：测试无需 monkeypatch
         # 任何内部方法，只要给一个受控的取值函数即可。开跑前的判据与跑完后的校验
         # **都**走这一个入口，否则丢弃用例会退化成对 repo 实现的测试。
@@ -211,7 +322,7 @@ class DuplicateAnalysisRunner:
                        previous_state: dict | None) -> None:
         # `previous_state` 刻意不参与任何判定（幂等/作废都读仓储，见模块 docstring）。
         project_id = ctx.project_id
-        data = payload or {}
+        data = payload if isinstance(payload, Mapping) else {}
         all_files = _payload_files(data)
         signature = compute_analysis_signature([_file_ref(item) for item in all_files])
 
@@ -230,62 +341,133 @@ class DuplicateAnalysisRunner:
         tender_files = _tender_files(data)
         bid_files = _bid_files(data)
 
-        # metadata 与 content **并行**：content 先起飞、不 await。
-        # 参考实现 :2733-2738 是
+        try:
+            await self._orchestrate(ctx, project_id, signature, all_files,
+                                    tender_files, bid_files)
+        except (asyncio.CancelledError, TaskCancelled):
+            # 协作式取消：不是错误，必须原样传出（吞掉会让 TaskEngine 以为任务正常结束）。
+            # 但**段的定位**不能因此丢掉：先把还没到终态的段收成 error，再抛出。
+            # 这里**不**调 `ctx.raise_if_cancelled()`（收尾路径要尽力做完，见
+            # `_fail_pending_sections` 的说明）。
+            self._fail_pending_sections(ctx, project_id, "任务已取消")
+            raise
+        except Exception as error:  # noqa: BLE001 —— 顶层兜底，见 F1
+            # 顶层兜底：参考实现在 `run` 外层有 `catch` 写错误态（:2756-2760）。
+            # 走到这里说明异常发生在编排体**之外**的契约之外的位置（编排体自己的异常
+            # 已在 `_orchestrate` 内被逐角色收成 error 终态，不会再冒到这里）。
+            # 无论如何都不能让四段停在 `running`：把还没到终态的段标成 error。
+            message = str(error) or type(error).__name__
+            ctx.log(f"标书查重分析异常中断：{message}")
+            self._fail_pending_sections(ctx, project_id, message)
+        finally:
+            # F6：无论走哪条路径，都不留下「异常从未被取回」的任务。
+            await self._drain_pending_tasks()
+
+    async def _orchestrate(self, ctx, project_id: str, signature: str,
+                           all_files: Sequence[Any], tender_files: Sequence[Any],
+                           bid_files: Sequence[Any]) -> None:
+        """编排主体：起两个提取角色 → 置三段 running → 并行跑后三段 → 写终态。
+
+        本方法内的任何异常都已被逐角色/逐段收成**该角色或该段的 error 终态**
+        （见 `_guarded_call`），因此外层不需要再为「某个段炸了」兜底。
+        """
+        # `content_extraction` 与 `metadata_extraction` **并行**：content 先起飞、
+        # 不 await。参考实现 :2733-2738 是
         #   const contentPromise = runContentExtraction(...);   // 不 await
         #   const metadataFiles  = await runMetadataExtraction(...);
-        #   updateOutlineAnalysis({... '等待正文内容用于目录分析' ...});   // ← 后三段的 running
-        #   const contentFiles   = await contentPromise;
-        # 注意顺序：后三段的 running 写在 content 收尾**之前**（Node 里 content 也早已
+        # 注意顺序：后三段的 running 写在提取角色收尾**之前**（Node 里 content 也早已
         # settled —— 实测 Node 的 `await metadata` 会跑完 content 的微任务链）。
         # 也就是说「等待正文内容」是一条**元数据阶段结束**的广播，并不等于「正文还没提取完」；
         # 第 4 条行为要求的正是这条文案本身，而不是 content 的未完成态。
-        content_task = asyncio.ensure_future(
-            self._run_section(ctx, project_id, "content", signature, all_files,
-                              tender_files, bid_files))
-        metadata_output = await self._run_section(
-            ctx, project_id, "metadata", signature, all_files, tender_files, bid_files)
+        #
+        # `ensure_future` 而非裸 await：两者共用 `_guarded_call` 的
+        # 「异常 → 角色 error 终态」契约，串行/并行只是调度方式不同（见 F4 的并发用例）。
+        ctx.raise_if_cancelled()
+        content_task = asyncio.ensure_future(self._guarded_call(
+            ctx, project_id, CONTENT_EXTRACTION, signature, all_files,
+            tender_files, bid_files))
+        self._own_tasks.append(content_task)  # 供 F6 的收口取回
+        metadata_output = await self._guarded_call(
+            ctx, project_id, METADATA_EXTRACTION, signature, all_files,
+            tender_files, bid_files)
 
         # 元数据落定后，后三段进入 running 并广播「等待正文内容用于…」。
-        # 这次写**刻意不带签名**——参考实现在这里把签名一起写死，但那样会让后三段在
-        # 「还没跑完」时就已经带上本轮签名；一旦用户恶意卡在 content 之后改文件，
-        # 下一次运行会把这些半成品行误判成「已完成」而跳过重跑（幂等判据比对签名）。
+        # 这次写**刻意不带签名**——这是与参考实现的一处**有意偏离**，理由如下。
+        #
+        # 参考实现里这三段的签名来自 `createInitialOutlineAnalysis` /
+        # `createInitialContentAnalysis` / `createInitialImageAnalysis`
+        # （:2140-2186，三个函数都把 `signature` 写进**初始值**），随后
+        # `run` 里那三次 `updateOutlineAnalysis(...)` / `updateContentAnalysis(...)` /
+        # `updateImageAnalysis(...)`（:2735-2737）只是把 `status/progress/message`
+        # 盖上去，**并没有在这里补签名**（签名早在建初始值时就在对象里了）。
+        # fix-round 1 / F5 订正：原报告把来源写成 :2735-2737 的 update 调用，**那是错的**。
+        #
+        # 于是参考实现的语义是「后三段在**还没跑完**时就已经带上本轮签名」。
+        # 这会与幂等判据形成真实的危险组合：一旦某段把 status 写成 success
+        # （半成品也算 success），下一次运行就会因「签名匹配 + status=success」而跳过重跑。
+        #
+        # **F5 订正的第二点**：这个危害在当前 P3a 里**尚不可达**——`_stub_sections()`
+        # 不写任何段状态（段状态一律由主编排统一落库），而幂等判据要求
+        # `status == 'success'`。也就是说危险是在 **P3b 的段实现自己把状态写成 success**
+        # 之后才成立的，本阶段只是**提前拆掉**了这个组合条件，属于防御性偏离；
+        # 原报告说「P3a 的 stub 会把它写成 success」是**过早的**，同样订正。
+        #
         # 不带签名后，这些行必然命中幂等判据的 `signature != signature` 分支而重跑。
         # 运行中段的进度/文案照旧落库，只是不冒充「本轮结果」。
+        ctx.raise_if_cancelled()
         for section, purpose in (("outline", "目录分析"), ("content", "正文比对"),
                                  ("image", "图片比对")):
             self._save_section(ctx, project_id, section, status="running", progress=1,
                                message=f"元数据提取完成，等待正文内容用于{purpose}")
 
-        content_output = await content_task
-        metadata_failed = (self._output_failed(metadata_output)
-                           or self._output_failed(content_output))
+        # 正文提取的产出（或它的异常）在这里收口。**即使提取炸了也要 await 它**：
+        # 不 await 就取不回产出，后三段的 `content_files` 上游也会是空的。
+        content_files = await self._resolve_content_files(
+            ctx, project_id, content_task)
 
         # 后三段并行跑（对齐 :2745-2749 的 Promise.all）。正文产物是它们的共同上游。
         # 注意**先跑完、再落库**：写段状态一律排在签名校验之后（见下），
         # 否则「过期签名丢弃」这条路径会先写出去一批段行再回滚不掉。
-        extra = {"content_files": [content_output]}
+        #
+        # `return_exceptions=True` 是 F1 的核心：默认的 `gather` 会把第一个异常向上抛、
+        # **同时取消兄弟任务**——兄弟的异常连同终态一起丢掉，四段就永远停在 running。
+        # 逐角色收异常后，每个段都能拿到自己的 error 终态（见 `_guarded_call`）。
         gather_outputs = await asyncio.gather(*[
-            self._run_section(ctx, project_id, section, signature, all_files,
-                              tender_files, bid_files, extra_ctx=extra)
+            self._guarded_call(ctx, project_id, section, signature, all_files,
+                               tender_files, bid_files,
+                               extra_ctx={CONTENT_FILES_DEPENDENCY: content_files})
             for section in ("outline", "content", "image")
-        ])
+        ], return_exceptions=True)
 
         # 签名校验（对齐 :2856-2859 的 isCurrentDuplicateCheckSignature）：用户若已改动
         # 文件，这一轮结果整体作废、**一个段行都不写**（连 metadata 的终态也不写）。
+        ctx.raise_if_cancelled()
         if self._signature_reader(project_id) != signature:
             ctx.log("文件已变更，本次分析结果已丢弃。")
             return
 
+        self._commit_terminal_states(
+            ctx, project_id, signature, metadata_output, content_files, gather_outputs)
+
+    def _commit_terminal_states(self, ctx, project_id: str, signature: str,
+                               metadata_output: SectionOutput, content_files: Any,
+                               gather_outputs: Sequence[Any]) -> None:
+        """写四段终态（签名已确认是本轮的）。"""
+        ctx.raise_if_cancelled()
+        metadata_failed = (self._output_failed(metadata_output)
+                           or self._output_failed(content_output_of(content_files)))
+        metadata_stats = self._merge_metadata_stats(
+            metadata_output, content_files)
         self._save_section(
             ctx, project_id, "metadata",
             status="error" if metadata_failed else "success", progress=100,
             message="部分文件提取失败" if metadata_failed else "元数据分析完成",
-            signature=signature, stats=metadata_output.stats)
+            signature=signature, stats=metadata_stats)
         self._persist_rows(project_id, "metadata", metadata_output)
 
         failed = metadata_failed
         for section, output in zip(("outline", "content", "image"), gather_outputs):
+            output = self._as_output(output)
             section_failed = self._output_failed(output)
             failed = failed or section_failed
             self._save_section(
@@ -297,6 +479,148 @@ class DuplicateAnalysisRunner:
 
         ctx.progress(overall_progress(self._section_states(project_id)))
         ctx.log("标书查重分析完成，部分结果失败。" if failed else "标书查重分析完成。")
+
+    def _merge_metadata_stats(self, metadata_output: SectionOutput,
+                              content_files: Any) -> dict[str, Any]:
+        """把**两个提取角色**的状态并入 `metadata` 段的 stats。
+
+        对齐参考 `:2337` / `:2382` —— `contentExtraction` 与 `metadataExtraction`
+        都写进 `metadataAnalysis` 的 stats，而这两个提取角色**不写自己的状态行**
+        （见模块 docstring 的表格）。参考写的是完整对象
+        （`{status, completed, total}` + `files`/结果行）；P3b 的提取角色把结果行填进
+        `rows` 后，这里应改为把 `status`/`completed`/`total` 一并塞进子统计。
+
+        **P3a 的确切行为**：`stats` 是浅合并——`metadata_extraction` 的 stats 原样作基底
+        （P3a 为空 dict），`content_extraction` 的产出挂到 `content_extraction` 键下
+        （P3a 为 `{}`）。合并结果**恒为 dict**：`_save_section` 的 stats 语义是
+        字典更新（`dict.update`），塞子统计前必须先有基底。
+        """
+        merged: dict[str, Any] = dict(metadata_output.stats or {})
+        content_output = content_output_of(content_files)
+        if content_output is not None:
+            merged["content_extraction"] = dict(content_output.stats or {})
+        return merged
+
+    # ------------------------------------------------------------ 异常安全
+
+    async def _guarded_call(self, ctx, project_id: str, role: str, signature: str,
+                            all_files: Sequence[Any], tender_files: Sequence[Any],
+                            bid_files: Sequence[Any],
+                            extra_ctx: Mapping[str, Any] | None = None) -> Any:
+        """跑一个角色；**异常不向上抛**，而是转成该角色产出的 `SectionOutput`。
+
+        这是 F1 的契约：`content_extraction` / `metadata_extraction` 两个提取角色
+        **不写自己的状态行**，所以它们的异常在此被就地转成
+        「`failed` 为真的 `SectionOutput`」，由 `_commit_terminal_states` 写进
+        `metadata` 段的**终态**——这正是参考实现 `catch`（:2756-2760）写
+        `status: 'error'` 的对应物。后三个段角色本来就各自有状态行，
+        它们的异常同样在 `_guarded_call` 内转成 error 产出，再由编排层写成
+        该段的 `error` 终态。
+
+        返回值是 `SectionOutput`（失败时是 `failed=True` 的产出）；唯一会**抛出**的是
+        取消（`asyncio.CancelledError` / `TaskCancelled`），那是控制流而非段失败，
+        由调用链的 `finally` 取回。
+
+        `ctx.raise_if_cancelled()` **在 try 之内**：它抛的 `TaskCancelled` 与段实现抛的
+        取消是同一类控制流。若把它放在 try 外，`content_extraction` 任务里的取消
+        就会从一个**没人 await 的任务**里逃出去 —— 那正是 `Task exception was never
+        retrieved` 的来源（实测踩到过）。放进 try 后，取消被原样 `raise` 出协程，
+        由 `_orchestrate` / `__call__` 的 `finally`（`_drain_pending_tasks`）取回。
+        """
+        try:
+            ctx.raise_if_cancelled()
+            output = await self._run_section(
+                ctx, project_id, role, signature, all_files, tender_files, bid_files,
+                extra_ctx=extra_ctx)
+        except (asyncio.CancelledError, TaskCancelled):
+            # 取消是控制流，不是段失败：必须原样传出（吞掉会让 TaskEngine 以为任务正常结束）。
+            # 取回由 `_drain_pending_tasks` 负责（F6）。
+            raise
+        except Exception as error:  # noqa: BLE001 —— 段级兜底
+            # 段异常 → 该角色的失败产出（终态由 `_commit_terminal_states` 写）。
+            return self._failure_output(error)
+        return output
+
+    @staticmethod
+    def _failure_output(error: BaseException) -> SectionOutput:
+        """把段异常转成 `failed` 的产出（异常原文进 `stats.error`，供终态文案与排障）。"""
+        message = str(error) or type(error).__name__
+        return SectionOutput(stats={"error": message}, failed=True)
+
+    @staticmethod
+    def _as_output(output: Any) -> SectionOutput:
+        """把 gather 结果（`SectionOutput` 或异常对象）统一成产出对象。"""
+        if isinstance(output, BaseException):
+            return DuplicateAnalysisRunner._failure_output(output)
+        return output if output is not None else SectionOutput()
+
+    async def _resolve_content_files(self, ctx, project_id: str,
+                                     content_task: "asyncio.Task[Any]") -> Any:
+        """收口 `content_extraction` 角色：产出或异常，二者必居其一。
+
+        `content_task` 上是 `_guarded_call` 的结果，所以：
+        - 正常 → 产出对象；
+        - 段内抛错 → 已转成 `failed` 产出（不是异常）；
+        - 取消 → `CancelledError`，原样抛出（由外层收成 error 终态）；
+        - `BaseException` 子类 → 原样抛出。
+
+        返回 `None` 表示**正文不可用**：后三段的 `content_files` 上游按 `[]` 注入。
+        """
+        try:
+            return await content_task
+        except BaseException as error:  # noqa: BLE001 —— 见 docstring 的分支说明
+            # 这里**只**兜 BaseException 子类；普通 Exception 已在 `_guarded_call` 内
+            # 转成 failed 产出，不会走到这里。`CancelledError` 一并收成段 error 终态：
+            # 这一轮已经写不完整了，但段不能停在 running。
+            ctx.log(f"正文内容提取失败：{str(error) or type(error).__name__}")
+            return None
+
+    def _fail_pending_sections(self, ctx, project_id: str, message: str) -> None:
+        """把仍处于非终态的段写成 `error`（顶层兜底用，F1）。
+
+        **不在这里调 `raise_if_cancelled()`**：本方法是「收尾」路径，已经在异常处理
+        之中，再抛一次取消会把「把段收成终态」这件唯一要做的事也打断，
+        四段停留在 running —— 这正是 F1 要根除的状态。收尾路径要尽力做完。
+        """
+        states = self._section_states(project_id)
+        for section in ANALYSIS_SECTIONS:
+            state = states.get(section)
+            if state is not None and state.status in ("success", "error"):
+                continue  # 已有终态，别覆盖
+            self._save_section(ctx, project_id, section, status="error", progress=100,
+                               message=message, stats=_UNSET)
+        ctx.progress(overall_progress(self._section_states(project_id)))
+
+    async def _drain_pending_tasks(self) -> None:
+        """取消并取回本编排器自己起的任务，杜绝 `Task exception was never retrieved`（F6）。
+
+        `asyncio.gather(..., return_exceptions=True)` 只覆盖它自己那批；早退路径
+        （取消传播、过期签名丢弃、顶层异常）下 `content_extraction` 可能还在飞，
+        此时没人取它的结果 —— 它一旦带着 `TaskCancelled` / 别的异常结束，
+        asyncio 就会在 GC 时报「never retrieved」。这里把它**取消 + 取回**：
+
+        - `cancel()`：把它从挂起态推进到结束（不取消的话，一个阻塞在真实 I/O 上的
+          提取任务会一直挂着，本轮早已判定为不完整）。
+        - `gather(..., return_exceptions=True)`：取回一次即「已检索」。
+          **取消也算取回**：`CancelledError` 不会因为 `return_exceptions=True`
+          变成结果值（asyncio 会把它继续向外传），所以额外用 `task.exception()`
+          兜一次 —— 对未取消的任务它返回异常对象（即「已检索」）。
+
+        **只处理 `self._own_tasks`**：首版写成「当前任务之外的所有存活任务」，
+        那会把**调用方的任务**（集成时就是 TaskEngine 跑的 runner 任务）一起取消、
+        连自己的关闭流程都打断。这条边界是本 fix 的第二处修正。
+        """
+        pending = [task for task in self._own_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        # 取回即「已检索」。已取消的任务其异常已被 gather 消费；
+        # 对未取消但已结束的，`exception()` 再兜一次（返回 None 表示正常结束）。
+        for task in self._own_tasks:
+            if task.done() and not task.cancelled():
+                task.exception()
+        self._own_tasks = [task for task in self._own_tasks if not task.done()]
 
     # ---------------------------------------------------------------- 判定
 
@@ -337,9 +661,16 @@ class DuplicateAnalysisRunner:
         """段失败判定。
 
         参考实现按「逐文件结果的 `status === 'error'`」判失败（:2739 / :2751）；
-        P3a 的 `SectionOutput` 契约里只有 `stats`/`rows`，没有逐文件状态，
-        故本阶段的判据是「段实现自己声明失败」（`SectionOutput` 上没有该字段时为假）。
-        P3b–P3d 把逐文件状态填进产出后，这里应扩展为「任一文件 error」。
+        P3a 只有段实现自己声明的 `SectionOutput.failed` 与 `_guarded_call` 转出的
+        失败产出（段抛异常）。
+
+        **P3a 的失败分支不可达（fix-round 1 / F7，这是已知且刻意的边界）**：
+        `_stub_sections()` 恒返回 `SectionOutput()`（`failed=False`），
+        所以只要**没有段抛异常**，四段终态就一定是 `success`。
+        异常路径现在是可达的（F1 修好之后），但「逐文件失败」这条路要等 P3b–P3d
+        把逐文件状态填进产出、并把 `failed` 接上「任一文件 error」才可达。
+        用例 `test_failure_branch_is_unreachable_in_p3a` 显式钉住这个事实——
+        将来谁把 `failed` 接上了，那条用例会变红并提醒他去更新这里的说明与调用方契约。
         """
         return bool(getattr(output, "failed", False))
 
@@ -379,16 +710,21 @@ class DuplicateAnalysisRunner:
 
     # ---------------------------------------------------------------- 段执行
 
-    async def _run_section(self, ctx, project_id: str, section: str, signature: str,
+    async def _run_section(self, ctx, project_id: str, role: str, signature: str,
                            all_files: Sequence[Any], tender_files: Sequence[Any],
                            bid_files: Sequence[Any],
                            extra_ctx: Mapping[str, Any] | None = None) -> SectionOutput:
-        """跑一段并把产出交回主编排；段状态落库由主编排统一负责。"""
-        runner = self._sections.get(section)
+        """跑一个角色并把产出交回主编排；状态落库由主编排统一负责。
+
+        `role` 是**五角色**之一（`ANALYSIS_RUNNER_ROLES`），同时作为
+        `SectionRunContext.section` 传下去 —— 提取角色因此也能从上下文里认出自己
+        （它们不写状态行，但需要知道自己是谁、该产出什么）。
+        """
+        runner = self._sections.get(role)
         if runner is None:
-            raise ValueError(f"未知的分析段：{section}")
+            raise ValueError(f"未知的分析角色：{role}")
         section_ctx = SectionRunContext(
-            project_id=project_id, section=section, ctx=ctx,
+            project_id=project_id, section=role, ctx=ctx,
             files=list(all_files), bid_files=list(bid_files),
             tender_files=list(tender_files), signature=signature)
         for name, value in (extra_ctx or {}).items():
@@ -397,17 +733,41 @@ class DuplicateAnalysisRunner:
         return output if output is not None else SectionOutput()
 
     def _save_section(self, ctx, project_id: str, section: str, *, status: str,
-                      progress: int, message: str, signature: str | None = None,
-                      stats: Any = None) -> None:
+                      progress: int, message: str, signature: Any = _UNSET,
+                      stats: Any = _UNSET) -> None:
         """写一段状态并立刻按四段整体重算进度（对齐 `notifyTask` :2831-2851）。
 
         签名作为「本轮结果」的标记**每段都要写**（对齐 `updateAnalysisField`
         :2264-2280 每段都带 `signature`），幂等判据依赖它。
+
+        **逐字段的「未携带 vs 显式值」语义（fix-round 1 / F3）**：
+        `stats` 与 `signature` 在本方法里是**哨兵默认值**，只有调用方真的传了才转发给
+        `repo.save_section`——不传即「保留库里的旧值」。这与仓储的
+        `signature`/`stats`/`started_at` 三分语义严格对齐（`duplicate.py:291-313`）。
+
+        首版写的是 `stats=stats if stats is not None else {}`，那等于**每次写段状态
+        都把 stats 砸成 `{}`**：P3b 的段实现若在中途写了进度类 stats、终态不写，
+        那些 stats 会被静默抹掉。现在改成：
+        - 不传 `stats` → 仓储保留旧值（`_UNSET`）；
+        - 显式传 `stats=None` → 写 NULL（本编排器不这么做，但保留该能力）；
+        - 传字典 → 落库。
+
+        `signature` 同理：不传即保留旧值。**注意**：本编排器的三个调用点全部显式传
+        `signature`（显式 `None` 也是显式），因为那三行 running 的语义正是
+        「把签名写成 NULL」而不是「保留上一次的签名」——见 `_orchestrate` 的注释。
+        `status`/`progress`/`message` 在仓储上没有哨兵语义（必填），故本方法也不给哨兵。
+
+        `stats` 的本阶段形状仍是 dict 更新语义（浅合并，key 覆盖），`_UNSET`
+        只影响「写不写」，不改变写入的值。
         """
+        extra: dict[str, Any] = {}
+        if stats is not _UNSET:
+            extra["stats"] = stats
+        if signature is not _UNSET:
+            extra["signature"] = signature
         self._repo.save_section(
             project_id, section, status=status, progress=progress, message=message,
-            signature=signature, stats=stats if stats is not None else {},
-            updated_at=self._now())
+            updated_at=self._now(), **extra)
         states = self._section_states(project_id)
         ctx.progress(overall_progress(states), latest_analysis_message(states))
 
