@@ -176,6 +176,23 @@ def test_init_closes_connection_when_pragma_fails(tmp_path, monkeypatch):
     assert created[0].close_calls == 1
 
 
+DUPLICATE_INDEXES = (
+    "idx_duplicate_check_files_role_order",
+    "idx_duplicate_check_content_files_status",
+    "idx_duplicate_check_metadata_file_order",
+    "idx_duplicate_check_metadata_key",
+    "idx_duplicate_check_outline_file_order",
+    "idx_duplicate_check_outline_normalized",
+    "idx_duplicate_check_outline_groups_order",
+    "idx_duplicate_check_outline_pairwise_score",
+    "idx_duplicate_check_content_duplicates_order",
+    "idx_duplicate_check_content_occ_file",
+    "idx_duplicate_check_duplicate_images_hash",
+    "idx_duplicate_check_duplicate_images_order",
+    "idx_duplicate_check_image_occ_file",
+)
+
+
 DUPLICATE_TABLES = (
     "duplicate_check_meta",
     "duplicate_check_files",
@@ -193,27 +210,37 @@ DUPLICATE_TABLES = (
 )
 
 
+def _duplicate_object_count(db):
+    return db.query_one(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE name LIKE 'duplicate_check_%'"
+    )["c"]
+
+
 def test_duplicate_tables_exist(tmp_path):
-    db = Database(tmp_path / "t.sqlite")
+    db = make_db(tmp_path)
     apply_schema(db)
     names = {row["name"] for row in db.query(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     missing = [t for t in DUPLICATE_TABLES if t not in names]
     assert missing == [], f"缺表：{missing}"
 
+    db.close()
+
 
 def test_duplicate_check_tasks_is_not_created(tmp_path):
     """任务统一收归 tasks 表（spec §5.1），不得再建 domain 私有任务表。"""
-    db = Database(tmp_path / "t.sqlite")
+    db = make_db(tmp_path)
     apply_schema(db)
     names = {row["name"] for row in db.query(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "duplicate_check_tasks" not in names
 
+    db.close()
+
 
 def test_duplicate_check_meta_is_project_scoped(tmp_path):
     """不复用 CHECK(id=1)，改 UNIQUE(project_id)，能容纳两个项目各一行。"""
-    db = Database(tmp_path / "t.sqlite")
+    db = make_db(tmp_path)
     apply_schema(db)
     db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p1','a','t')")
     db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p2','b','t')")
@@ -223,29 +250,66 @@ def test_duplicate_check_meta_is_project_scoped(tmp_path):
             "VALUES (?, 'now', 'now')", (pid,))
     assert db.query_one("SELECT COUNT(*) AS c FROM duplicate_check_meta")["c"] == 2
 
+    db.close()
+
 
 def test_duplicate_section_rows_are_project_scoped(tmp_path):
-    """analysis_sections 同理：section 变成 (project_id, section) 联合主键。"""
-    db = Database(tmp_path / "t.sqlite")
+    """analysis_sections 同理：section 变成 (project_id, section) 联合主键。
+
+    两个项目各插一行、且用**同一个 section='metadata'**：若退回单例
+    `section TEXT PRIMARY KEY`，第二行必然撞主键而红。
+    """
+    db = make_db(tmp_path)
     apply_schema(db)
     db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p1','a','t')")
+    db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p2','b','t')")
     db.execute(
         "INSERT INTO duplicate_check_analysis_sections"
         "(project_id, section, status, message, updated_at) "
         "VALUES ('p1','metadata','running','', 'now')")
-    row = db.query_one("SELECT status FROM duplicate_check_analysis_sections")
+    db.execute(
+        "INSERT INTO duplicate_check_analysis_sections"
+        "(project_id, section, status, message, updated_at) "
+        "VALUES ('p2','metadata','done','', 'now')")
+    assert db.query_one(
+        "SELECT COUNT(*) AS c FROM duplicate_check_analysis_sections")["c"] == 2
+    row = db.query_one(
+        "SELECT status FROM duplicate_check_analysis_sections WHERE project_id = 'p1'")
     assert row["status"] == "running"
+
+    db.close()
 
 
 def test_duplicate_files_role_order_index(tmp_path):
-    db = Database(tmp_path / "t.sqlite")
+    db = make_db(tmp_path)
     apply_schema(db)
     idx = {row["name"] for row in db.query(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     assert "idx_duplicate_check_files_role_order" in idx
 
+    db.close()
+
+
+def test_duplicate_tables_and_indexes_all_exist(tmp_path):
+    """13 张表 + DUPLICATE_INDEXES 里列出的索引必须全部落在 sqlite_master。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    names = {row["name"] for row in db.query("SELECT name FROM sqlite_master")}
+    missing_indexes = [i for i in DUPLICATE_INDEXES if i not in names]
+    assert missing_indexes == [], f"缺索引：{missing_indexes}"
+
+    db.close()
+
 
 def test_apply_schema_is_idempotent_with_duplicate_tables(tmp_path):
-    db = Database(tmp_path / "t.sqlite")
+    """第二次 apply_schema 不抛，且 sqlite_master 里的 duplicate_check_* 对象数不增。"""
+    db = make_db(tmp_path)
     apply_schema(db)
-    apply_schema(db)  # 不抛
+    before = _duplicate_object_count(db)
+    assert before > 0
+
+    apply_schema(db)
+
+    assert _duplicate_object_count(db) == before
+
+    db.close()
