@@ -54,6 +54,17 @@ def test_analysis_progress_matches_reference_on_garbage_progress():
     assert analysis_progress(_s("running", progress="abc")) == 0
 
 
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), "1e400"])
+def test_analysis_progress_non_finite_falls_back_without_raising(value):
+    """非有限值不得抛异常。
+
+    `int(float("inf"))` 抛的是 `OverflowError`，**不是** `ValueError`/`TypeError`；
+    只捕后两者的实现会在这里崩掉。参考实现的 `Math.min(Infinity, 99)` 得 99、不抛，
+    故我们至少不能抛，统一回落 0（并登记为偏离的一部分）。
+    """
+    assert analysis_progress(_s("running", progress=value)) == 0
+
+
 @pytest.mark.parametrize("value,expected", [
     (0, 0), (25, 25), (50, 50), (75, 75),
     # 修正计划笔误：`running` 的 progress 在 analysisProgress 里被 clamp 到上限 99

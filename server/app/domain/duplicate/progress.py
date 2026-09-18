@@ -27,7 +27,10 @@ def _parse_progress(value: Any) -> int:
     """
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # `OverflowError`：`float("inf")` / `float("1e400")` 无法转成 int。
+        # 参考实现里 `Math.min(Infinity, 99)` 得 99（不是 NaN，也不抛），
+        # 但 Python 侧无法无异常地表达，故并入「不可解析」回落 0。
         return 0
 
 
