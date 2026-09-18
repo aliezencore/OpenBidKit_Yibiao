@@ -54,9 +54,11 @@ def analysis_progress(state: SectionState | None) -> int: ...
     # 逐字对齐 :2229-2233：None→0；success/error→100；否则 clamp(progress, 0, 99)
 
 def overall_progress(states: Mapping[str, SectionState | None]) -> int: ...
-    # 逐字对齐 :2235-2242：四段等权平均，**向下取整**（Math.round 对 .5 上取，
-    # 但四段整数平均的 .5 只可能出现在…→ 见 Task 4 的边界用例）
-    # 顺序固定 metadata, outline, content, image
+    # 逐字对齐 :2235-2242：四段等权平均后 **Math.round（.5 上取）**。
+    # ⚠ 本仓已核实参考实现用的是 `Math.round`（duplicateCheckService.cjs:2242），
+    #   不是 floor。JS `Math.round(0.5) === 1` 而 Python `round(0.5) === 0`，
+    #   故实现**必须**用 `math.floor(x + 0.5)`（与 P2b 的 `half_up` 同一约定）。
+    #   顺序固定 metadata, outline, content, image；缺段按 0 计。
 
 def latest_analysis_message(states: Mapping[str, SectionState | None]) -> str: ...
     # 逐字对齐 :2245-2251：image → content → outline → metadata → '标书查重分析运行中。'
@@ -782,7 +784,11 @@ def test_analysis_progress_pending_keeps_progress():
 
 
 @pytest.mark.parametrize("value,expected", [
-    (0, 0), (25, 25), (50, 50), (75, 75), (100, 100),
+    (0, 0), (25, 25), (50, 50), (75, 75),
+    # ⚠ (100, 100) 是**错的**：running 被 :2232 的 Math.min(..., 99) 压在 99，
+    #   四段等权平均 = 99。已用 Node 实测参考实现坐实（Math.round(396/4) === 99）。
+    #   要得 100 必须四段 status 为 success/error。见 T3 报告 §2.x。
+    (100, 99),
 ])
 def test_overall_progress_equal_weight_four_sections(value, expected):
     states = {k: _s("running", progress=value)
@@ -989,13 +995,34 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
     - `__init__(self, *, repo: DuplicateRepository, sections: Mapping[str, SectionRunner] | None = None, now_fn=_utc_now, signature_reader: Callable[[str], str | None] | None = None)`
       - `signature_reader(project_id) -> str | None` 默认读 `repo.get_meta(project_id)["current_signature"]`。**存在的唯一理由是让「过期签名丢弃」可测**——测试注入一个受控的 reader，不需要 monkeypatch 内部方法。
     - `async def __call__(self, ctx, payload, previous_state) -> None`（即 `Runner` 协议）
-    - 默认 `sections` 为 `_stub_sections()`（四段占位实现）
-  - `def _stub_sections() -> dict[str, SectionRunner]` —— 四段各推进 0→50→100 并写空 stats
+    - 默认 `sections` 为 `_stub_sections()`（占位实现）
+  - `def _stub_sections() -> dict[str, SectionRunner]`
 
-**核心行为（逐条对照 spec §9.2 编排）：**
+> ⚠ **runner 的 key 不是「四段」，而是「四段 + 两个提取阶段」（裁定 T4-1，改自首版）**。
+> 参考实现是**四个不同的函数**：`runContentExtraction`（`:2302`，**共享上游**，被 `await contentPromise` 收口）
+> 与 `runOutlineAnalysis` / `runContentDuplicateAnalysis` / `runImageDuplicateAnalysis`
+> （`:2412/:2504/:2632`，一起进 `Promise.all`，`:2745-2749`）。
+> 首版计划把「正文提取」与「正文比对」压进同一个 `content` 键 → 编排器会把 content runner
+> **跑两次**（一次当提取、一次当比对），第二次还把自己的输出当上游。
+> 故 `sections` 的 key 固定为 **五个角色**：
+> `"content_extraction"`、`"metadata_extraction"`、`"outline"`、`"content"`、`"image"`。
+> **注意**：这只是 **runner 的 key**；四段**状态机**（`ANALYSIS_SECTIONS` = metadata/outline/content/image）
+> **不变**，`"content_extraction"` 与 `"metadata_extraction"` **不写自己的状态行**——
+> 它们的状态并入 `metadata` 段的 `extraction` 子统计（对齐参考 `:2337/:2382` 把
+> `contentExtraction`/`metadataExtraction` 都写进 `metadataAnalysis` 的 stats）。
+> 这个区分必须在实现里显式表达，否则又会滑回「content 跑两次」。
 
-1. 读取 `previous_state`（即上次任务检查点里的 `{"sections": {...}, "signature": ...}`）。
-2. **幂等**：若 `payload.force` 非真 且 四段 `status` 全为 `success` 且 四段 `signature` 全等于本次签名 → 直接 `overall=100`、`ctx.log("标书查重分析已完成，无需重复分析。")` 并返回。**不重跑**。
+**核心行为（逐条对照参考实现 `runAnalysisTask` :2763-2795 与 spec §9.2 编排）：**
+
+> ⚠ **状态来源（已核实，别照抄直觉）**：参考实现的幂等判据读的是**持久化的工作区状态**
+> （`taskWorkspaceStore.loadDuplicateCheck()`，:2774），**不是**任务检查点里的 `previous_state`。
+> 服务端的对应物是 `repo.get_sections(project_id)` + `repo.get_meta(project_id)["current_signature"]`。
+> 本任务测试的 `_run()` 两次都传 `previous_state=None`，因此 idempotency **必须**从仓储读状态，
+> 否则 `test_second_run_same_signature_is_idempotent` 永远不可能通过。
+> `previous_state` 只用于「续跑时的段级恢复」，不参与幂等判定。
+
+1. 读 `signature_reader(project_id)` 拿当前签名，与本次 `signature` 比对；再从 `repo.get_sections(project_id)` 读四段状态。
+2. **幂等**：若 `payload.force` 非真 且 四段 `status` 全为 `success` 且四段 `signature` 全等于本次签名 → 直接 `ctx.progress(100)`、`ctx.log("标书查重分析已完成，无需重复分析。")` 并返回。**不重跑**。
 3. 若签名不同 → 清空四段状态与全部结果表（`repo.delete_sections` + 各 `replace_*` 传空），`ctx.log` 记录「签名变化，已作废旧结果」。
 4. 写 `repo.save_meta(step="analysis", current_signature=signature)`。
 5. **content 段先起、不等待**；`metadata` 段 `await` 完成 —— 两段**并行**（用 `asyncio.create_task` + `asyncio.gather`）。
