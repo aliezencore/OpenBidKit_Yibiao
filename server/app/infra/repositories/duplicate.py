@@ -422,15 +422,16 @@ class DuplicateRepository:
         （`parent_file_id` 与子行的 `file_id` 不同、或父 id 属于别的文件）在本服务端
         schema 下无意义（`item_id` 本身已 scoped），一律置 `None` 而不是拼出一个不
         存在的 id 去撞 `FOREIGN KEY constraint failed`。
+
+        **本方法要求全量入参、须单次调用。** 它先 `DELETE` 本项目全部行再整体重建，
+        而父指针的存在性校验完全交给自引用 FK——若调用方按文件分批调用，第二批次
+        会把第一批已入库的父行删掉（因为整表被清），父 id 又无 `::`，父指针即静默
+        丢失。参考实现同样不存在分批场景：`duplicateCheckService.cjs:2467-2475` 每
+        次 partial 都重写全量快照，`duplicateCheckStore.cjs:474-488` 也是先 `DELETE`
+        全表再逐文件插入。
         """
-        existing = {
-            row["item_id"]
-            for row in self._db.query(
-                "SELECT item_id FROM duplicate_check_outline_items WHERE project_id = ?",
-                (project_id,))
-        }
         scoped = [
-            _scope_outline_row(row, existing)
+            _scope_outline_row(row)
             for row in rows if row.get("item_id") and row.get("file_id")
         ]
         ordered = _parents_first(scoped)
@@ -942,21 +943,20 @@ def _unscoped_item_id(item_id: str) -> str:
     return "::".join(text.split("::")[1:]) if "::" in text else text
 
 
-def _scope_outline_row(row: dict, previously_scoped: set[str]) -> dict | None:
+def _scope_outline_row(row: dict) -> dict | None:
     """把一行 outline item 转成入库形状。
 
     父指针只在「父节点确实存在于**同一个文件**」时保留；否则置 `None`，绝不拼一个
-    不存在的 id 去撞 FK。三种情形：
+    不存在的 id 去撞 FK。两条规则：
 
     1. `parent_item_id` 已是 scoped 形式（含 `::`）→ 原样保留（父 id 自带作用域）。
-    2. 父 id 命中 `previously_scoped`（本项目已存的 outline item id 集合）→ 保留。
-    3. 否则视为同文件内的父 id 前缀补齐；若 `parent_file_id` 明示了别的文件，或
-       补齐后仍不在 `previously_scoped` 里，则判无效置 `None`。
+       调用方须保证它指向**本次入参内**的行；本函数不做存在性校验。
+    2. 否则按**子行自己的** `file_id` 前缀补齐；但若 `parent_file_id` 明示了别的
+       文件，则显式判无效置 `None`（跨文件父指针在本 schema 下无意义）。
 
-    `previously_scoped` 只在 `replace_outline_items` 重建之前取到（删表在同一事务内
-    后执行），所以「乱序但父行也在本次入参里」的情形由第 3 条前缀补齐兜住，
-    「父行在别的文件」的情形由第 3 条的 `parent_file_id` 判定置 `None`。
-    见 `replace_outline_items` 的 docstring 说明裁定。
+    本函数是纯函数、不看库内既有状态。『父 id 是否真的存在』交给
+    `_parents_first`（保证父行先写）与自引用 FK 兜底，因此调用方必须**一次性传入
+    全量行**（见 `replace_outline_items` 的 docstring）。
     """
     file_id = str(row["file_id"])
     item_id = f"{file_id}::{row['item_id']}"
