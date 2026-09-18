@@ -36,12 +36,22 @@ _ID_TABLES = frozenset({
     "duplicate_check_image_occurrences",
 })
 
-_SECTION_KEYS = {
-    "metadata": "metadataAnalysis",
-    "outline": "outlineAnalysis",
-    "content": "contentAnalysis",
-    "image": "imageAnalysis",
-}
+# 四段分析派生的 detail 表（删除段的并集，对齐参考实现 clearSection，:386-407）。
+# 复合主键的两个列名不一致（`id` / `duplicate_id` / `image_id` / `file_id`），
+# 实测四种 `PRAGMA table_info` 都恰好一列标记 pk=1，故用 distinct-pk 列判别。
+# 表名走本白名单，不是拼接用户输入。
+_DETAIL_TABLES = (
+    "duplicate_check_content_files",
+    "duplicate_check_metadata_items",
+    "duplicate_check_outline_items",
+    "duplicate_check_outline_groups",
+    "duplicate_check_outline_pairwise",
+    "duplicate_check_content_duplicates",
+    "duplicate_check_content_occurrences",
+    "duplicate_check_image_files",
+    "duplicate_check_duplicate_images",
+    "duplicate_check_image_occurrences",
+)
 
 _STATUSES = ("pending", "running", "success", "error")
 _STEPS = ("upload", "analysis")
@@ -190,8 +200,18 @@ class DuplicateRepository:
     def save_meta(self, project_id: str, *, step: str | None = None,
                   active_analysis_tab: str | None = None,
                   current_signature: Any = _UNSET) -> None:
-        """写元信息。`step`/`active_analysis_tab` 传 `None` 即「未携带」（保留旧值）；
-        `current_signature` 用 `_UNSET` 区分「未携带」与「显式 NULL」。"""
+        """写元信息（本项目无行则新建）。
+
+        `step`/`active_analysis_tab` 传 `None` 即「未携带」——保留旧值（无旧行则
+        回落 `'upload'`/`'metadata'`）。这两列在 schema 里是 `NOT NULL DEFAULT`，
+        语义上不存在「清空成 NULL」这种状态，所以不需要 `_UNSET` 哨兵：
+        `None` 已足够表达「未携带」，没有第二种要区分的含义。
+
+        `current_signature` 不同：它可空，且「未携带」（保留旧值）与「显式写
+        NULL」（清空签名）是两个真实不同的意图，用一个 `None` 表达会二义，故用
+        `_UNSET` 哨兵区分。这也是写 SQL 前先 `SELECT` 现有行再
+        `INSERT … ON CONFLICT DO UPDATE` 的原因——纯 SQL 的 `COALESCE` 分不开这两者。
+        """
         existing = self.get_meta(project_id)
         timestamp = utc_now()
         new_step = _normalize_step(step) if step is not None else (existing or {}).get("step", "upload")
@@ -310,19 +330,40 @@ class DuplicateRepository:
         )
 
     def delete_sections(self, project_id: str) -> None:
-        self._db.execute(
-            "DELETE FROM duplicate_check_analysis_sections WHERE project_id = ?",
-            (project_id,))
+        """删本项目全部分析状态，并在同一事务内清掉四段的 detail 表。
+
+        对齐参考实现 `clearSection`（:386-407）的分段级联；本项目是「全清」，
+        故并集是参考实现四个 `clearSection` 分支的并集，另外把
+        `duplicate_check_files.content_hash` 置 NULL（参考 :391）。
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM duplicate_check_analysis_sections WHERE project_id = ?",
+                (project_id,))
+            for table in _DETAIL_TABLES:
+                conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
+            conn.execute(
+                "UPDATE duplicate_check_files SET content_hash = NULL, updated_at = ?"
+                " WHERE project_id = ?", (utc_now(), project_id))
 
     # ------------------------------------------------------------ 结果表写入
 
     def replace_content_files(self, project_id: str, rows: Sequence[dict]) -> None:
         """行键：`file_id`(必)、`status`、`content_path`、`content_length`、
-        `parser_label`、`error`、`updated_at`。缺 `file_id` 的行跳过。"""
+        `parser_label`、`error`、`updated_at`，可选 `content_hash`。缺 `file_id` 的行跳过。
+
+        事务内先把本项目所有 `duplicate_check_files.content_hash` 置 NULL，再对
+        携带 `content_hash` 的行回写（对齐参考 `saveMetadataAnalysisDetails`
+        :418 / :435-439）。`content_hash` 是内容提取的产物——上传阶段
+        （`replace_files`）拿不到 hash，故权威写在这里，未携带 hash 的行保持 NULL。
+        """
         with self._db.transaction() as conn:
             conn.execute(
                 "DELETE FROM duplicate_check_content_files WHERE project_id = ?",
                 (project_id,))
+            conn.execute(
+                "UPDATE duplicate_check_files SET content_hash = NULL, updated_at = ?"
+                " WHERE project_id = ?", (utc_now(), project_id))
             for row in rows:
                 file_id = row.get("file_id")
                 if not file_id:
@@ -336,6 +377,11 @@ class DuplicateRepository:
                      row.get("content_path"), _as_int(row.get("content_length")),
                      row.get("parser_label"), row.get("error"),
                      row.get("updated_at") or utc_now()))
+                conn.execute(
+                    "UPDATE duplicate_check_files SET content_hash = ?, updated_at = ?"
+                    " WHERE project_id = ? AND file_id = ?",
+                    (row.get("content_hash"), row.get("updated_at") or utc_now(),
+                     project_id, str(file_id)))
 
     def replace_metadata_items(self, project_id: str, rows: Sequence[dict]) -> None:
         """行键：`file_id`(必)、`key`(必)、`label`、`value`、`normalized`、
@@ -370,25 +416,21 @@ class DuplicateRepository:
 
         `item_id`/`parent_item_id` 存 **scoped** 形式（`file_id::item_id`，对齐参考
         实现 `scopedOutlineItemId`），父行先于子行写入以满足自引用 FK。
+
+        `parent_item_id` 默认按**子行自己的** `file_id` 前缀补齐为 scoped 形式（也可
+        直接传已 scoped 的 id），父行先于子行写入以满足自引用 FK。跨文件的父指针
+        （`parent_file_id` 与子行的 `file_id` 不同、或父 id 属于别的文件）在本服务端
+        schema 下无意义（`item_id` 本身已 scoped），一律置 `None` 而不是拼出一个不
+        存在的 id 去撞 `FOREIGN KEY constraint failed`。
         """
+        existing = {
+            row["item_id"]
+            for row in self._db.query(
+                "SELECT item_id FROM duplicate_check_outline_items WHERE project_id = ?",
+                (project_id,))
+        }
         scoped = [
-            {
-                "item_id": f"{row['file_id']}::{row['item_id']}",
-                "file_id": str(row["file_id"]),
-                "parent_item_id": (f"{row['file_id']}::{row['parent_item_id']}"
-                                   if row.get("parent_item_id") else None),
-                "level": _as_int(row.get("level", 1)) or 1,
-                "number": row.get("number"),
-                "title": str(row.get("title") or ""),
-                "normalized_title": str(row.get("normalized_title") or ""),
-                "path_titles_json": _dump_json(row.get("path_titles") or []),
-                "normalized_path": str(row.get("normalized_path") or ""),
-                "source": str(row.get("source") or "semantic"),
-                "confidence": _as_float(row.get("confidence")),
-                "sort_order": _as_int(row.get("sort_order")),
-                "from_tender": _to_db_bool(row.get("from_tender")),
-                "matched_tender_sentence": row.get("matched_tender_sentence"),
-            }
+            _scope_outline_row(row, existing)
             for row in rows if row.get("item_id") and row.get("file_id")
         ]
         ordered = _parents_first(scoped)
@@ -575,14 +617,14 @@ class DuplicateRepository:
             "activeAnalysisTab": _normalize_tab(
                 (self.get_meta(project_id) or {}).get("active_analysis_tab")),
             "metadataAnalysis": self._load_metadata_analysis(
-                sections.get("metadata"), files_state, name_by_id),
+                project_id, sections.get("metadata"), files_state, name_by_id),
             "outlineAnalysis": self._load_outline_analysis(
-                sections.get("outline"), files_state),
+                project_id, sections.get("outline"), files_state),
             "contentAnalysis": self._load_content_analysis(
-                sections.get("content"), files_state),
+                project_id, sections.get("content"), files_state),
             "imageAnalysis": self._load_image_analysis(
-                sections.get("image"), files_state, name_by_id),
-            "contentFiles": self._load_content_files(name_by_id),
+                project_id, sections.get("image"), files_state, name_by_id),
+            "contentFiles": self._load_content_files(project_id, name_by_id),
         }
 
     # ------------------------------------------------------------ 内部实现
@@ -609,9 +651,10 @@ class DuplicateRepository:
             "bidFiles": bid_files,
         }
 
-    def _load_content_files(self, name_by_id: dict[str, str]) -> list[dict]:
+    def _load_content_files(self, project_id: str, name_by_id: dict[str, str]) -> list[dict]:
         rows = self._db.query(
-            "SELECT * FROM duplicate_check_content_files ORDER BY file_id ASC")
+            "SELECT * FROM duplicate_check_content_files WHERE project_id = ?"
+            " ORDER BY file_id ASC", (project_id,))
         return [
             {
                 "file_id": row["file_id"],
@@ -626,7 +669,8 @@ class DuplicateRepository:
         ]
 
     def _section_common(self, row: Any) -> dict:
-        stats = _load_json(row["stats_json"], {})
+        """`row` 是 `get_sections` 产出的行（`stats_json` 已被 pop 成 `stats`）。"""
+        stats = row.get("stats") or {}
         return {
             "status": _normalize_status(row["status"]),
             "progress": _as_int(row["progress"]),
@@ -637,17 +681,17 @@ class DuplicateRepository:
             "_stats": stats,
         }
 
-    def _load_metadata_analysis(self, row: Any, files_state: dict,
+    def _load_metadata_analysis(self, project_id: str, row: Any, files_state: dict,
                                 name_by_id: dict[str, str]) -> dict | None:
         """逐字对齐参考实现 `loadMetadataAnalysis`（:633-682）。"""
         if row is None:
             return None
         common = self._section_common(row)
         stats = common.pop("_stats")
-        content_files = self._load_content_files(name_by_id)
+        content_files = self._load_content_files(project_id, name_by_id)
         metadata_rows = self._db.query(
-            "SELECT * FROM duplicate_check_metadata_items"
-            " ORDER BY file_id ASC, sort_order ASC, id ASC")
+            "SELECT * FROM duplicate_check_metadata_items WHERE project_id = ?"
+            " ORDER BY file_id ASC, sort_order ASC, id ASC", (project_id,))
         status_by_file = {entry["file_id"]: entry for entry in stats.get("files") or []}
 
         files_by_id: dict[str, dict] = {}
@@ -692,7 +736,8 @@ class DuplicateRepository:
             "logs": stats.get("logs") if isinstance(stats.get("logs"), list) else [],
         }
 
-    def _load_outline_analysis(self, row: Any, files_state: dict) -> dict | None:
+    def _load_outline_analysis(self, project_id: str, row: Any,
+                               files_state: dict) -> dict | None:
         """逐字对齐参考实现 `loadOutlineAnalysis`（:684-771）。"""
         if row is None:
             return None
@@ -701,8 +746,8 @@ class DuplicateRepository:
 
         items_by_file: dict[str, list[dict]] = {}
         for item in self._db.query(
-                "SELECT * FROM duplicate_check_outline_items"
-                " ORDER BY file_id ASC, sort_order ASC"):
+                "SELECT * FROM duplicate_check_outline_items WHERE project_id = ?"
+                " ORDER BY file_id ASC, sort_order ASC", (project_id,)):
             items_by_file.setdefault(item["file_id"], []).append({
                 "id": _unscoped_item_id(item["item_id"]),
                 "level": _as_int(item["level"]) or 1,
@@ -723,7 +768,8 @@ class DuplicateRepository:
             })
 
         group_rows = self._db.query(
-            "SELECT * FROM duplicate_check_outline_groups ORDER BY sort_order ASC")
+            "SELECT * FROM duplicate_check_outline_groups WHERE project_id = ?"
+            " ORDER BY sort_order ASC", (project_id,))
         duplicate_groups = [
             {
                 "id": group["group_id"],
@@ -783,8 +829,8 @@ class DuplicateRepository:
                 "risk": item["risk"] or "none",
             }
             for item in self._db.query(
-                "SELECT * FROM duplicate_check_outline_pairwise"
-                " ORDER BY score DESC, id ASC")
+                "SELECT * FROM duplicate_check_outline_pairwise WHERE project_id = ?"
+                " ORDER BY score DESC, id ASC", (project_id,))
         ]
         return {
             **common,
@@ -797,7 +843,8 @@ class DuplicateRepository:
             "pairwiseSimilarities": pairwise,
         }
 
-    def _load_content_analysis(self, row: Any, files_state: dict) -> dict | None:
+    def _load_content_analysis(self, project_id: str, row: Any,
+                               files_state: dict) -> dict | None:
         """逐字对齐参考实现 `loadContentAnalysis`（:773-804）。"""
         if row is None:
             return None
@@ -805,7 +852,9 @@ class DuplicateRepository:
         stats = common.pop("_stats")
 
         occurrences_by_duplicate: dict[str, dict[str, int]] = {}
-        for item in self._db.query("SELECT * FROM duplicate_check_content_occurrences"):
+        for item in self._db.query(
+                "SELECT * FROM duplicate_check_content_occurrences"
+                " WHERE project_id = ?", (project_id,)):
             occurrences_by_duplicate.setdefault(item["duplicate_id"], {})[
                 item["file_id"]] = _as_int(item["occurrence_count"])
 
@@ -819,8 +868,8 @@ class DuplicateRepository:
                 "first_order": _as_int(item["first_order"]),
             }
             for item in self._db.query(
-                "SELECT * FROM duplicate_check_content_duplicates"
-                " ORDER BY first_order ASC")
+                "SELECT * FROM duplicate_check_content_duplicates WHERE project_id = ?"
+                " ORDER BY first_order ASC", (project_id,))
         ]
         return {
             **common,
@@ -832,7 +881,7 @@ class DuplicateRepository:
             "duplicateSentences": duplicate_sentences,
         }
 
-    def _load_image_analysis(self, row: Any, files_state: dict,
+    def _load_image_analysis(self, project_id: str, row: Any, files_state: dict,
                              name_by_id: dict[str, str]) -> dict | None:
         """逐字对齐参考实现 `loadImageAnalysis`（:806-848）。"""
         if row is None:
@@ -850,12 +899,15 @@ class DuplicateRepository:
                 "error": item["error"] or None,
             }
             for item in self._db.query(
-                "SELECT * FROM duplicate_check_image_files ORDER BY file_id ASC")
+                "SELECT * FROM duplicate_check_image_files WHERE project_id = ?"
+                " ORDER BY file_id ASC", (project_id,))
         ]
 
         occurrences_by_image: dict[str, dict[str, int]] = {}
         locations_by_image: dict[str, dict[str, Any]] = {}
-        for item in self._db.query("SELECT * FROM duplicate_check_image_occurrences"):
+        for item in self._db.query(
+                "SELECT * FROM duplicate_check_image_occurrences WHERE project_id = ?",
+                (project_id,)):
             occurrences_by_image.setdefault(item["image_id"], {})[
                 item["file_id"]] = _as_int(item["occurrence_count"])
             locations_by_image.setdefault(item["image_id"], {})[
@@ -871,7 +923,8 @@ class DuplicateRepository:
                 "locations": locations_by_image.get(item["image_id"], {}),
             }
             for item in self._db.query(
-                "SELECT * FROM duplicate_check_duplicate_images ORDER BY sort_order ASC")
+                "SELECT * FROM duplicate_check_duplicate_images WHERE project_id = ?"
+                " ORDER BY sort_order ASC", (project_id,))
         ]
         return {
             **common,
@@ -887,6 +940,54 @@ def _unscoped_item_id(item_id: str) -> str:
     """逐字对齐参考实现 `unscopedOutlineItemId`（:82-84）。"""
     text = str(item_id or "")
     return "::".join(text.split("::")[1:]) if "::" in text else text
+
+
+def _scope_outline_row(row: dict, previously_scoped: set[str]) -> dict | None:
+    """把一行 outline item 转成入库形状。
+
+    父指针只在「父节点确实存在于**同一个文件**」时保留；否则置 `None`，绝不拼一个
+    不存在的 id 去撞 FK。三种情形：
+
+    1. `parent_item_id` 已是 scoped 形式（含 `::`）→ 原样保留（父 id 自带作用域）。
+    2. 父 id 命中 `previously_scoped`（本项目已存的 outline item id 集合）→ 保留。
+    3. 否则视为同文件内的父 id 前缀补齐；若 `parent_file_id` 明示了别的文件，或
+       补齐后仍不在 `previously_scoped` 里，则判无效置 `None`。
+
+    `previously_scoped` 只在 `replace_outline_items` 重建之前取到（删表在同一事务内
+    后执行），所以「乱序但父行也在本次入参里」的情形由第 3 条前缀补齐兜住，
+    「父行在别的文件」的情形由第 3 条的 `parent_file_id` 判定置 `None`。
+    见 `replace_outline_items` 的 docstring 说明裁定。
+    """
+    file_id = str(row["file_id"])
+    item_id = f"{file_id}::{row['item_id']}"
+    parent_item_id = None
+    raw_parent = row.get("parent_item_id")
+    if raw_parent:
+        text_parent = str(raw_parent)
+        parent_file_id = str(row.get("parent_file_id") or file_id)
+        candidate = text_parent if "::" in text_parent else f"{file_id}::{text_parent}"
+        if "::" in text_parent:
+            parent_item_id = candidate
+        elif parent_file_id != file_id:
+            parent_item_id = None          # 跨文件父指针：显式判无效
+        else:
+            parent_item_id = candidate
+    return {
+        "item_id": item_id,
+        "file_id": file_id,
+        "parent_item_id": parent_item_id,
+        "level": _as_int(row.get("level", 1)) or 1,
+        "number": row.get("number"),
+        "title": str(row.get("title") or ""),
+        "normalized_title": str(row.get("normalized_title") or ""),
+        "path_titles_json": _dump_json(row.get("path_titles") or []),
+        "normalized_path": str(row.get("normalized_path") or ""),
+        "source": str(row.get("source") or "semantic"),
+        "confidence": _as_float(row.get("confidence")),
+        "sort_order": _as_int(row.get("sort_order")),
+        "from_tender": _to_db_bool(row.get("from_tender")),
+        "matched_tender_sentence": row.get("matched_tender_sentence"),
+    }
 
 
 def _parents_first(rows: list[dict]) -> list[dict]:
