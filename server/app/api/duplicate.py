@@ -19,13 +19,14 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from app.api.deps import AppState, get_state
 from app.domain.duplicate.progress import latest_analysis_message, overall_progress
@@ -35,6 +36,8 @@ from app.domain.shared.errors import ParsingError
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.repositories.duplicate import DuplicateFileInput
 from app.infra.tasks.duplicate_runner import DuplicateAnalysisRunner
+
+_logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -47,9 +50,31 @@ _GROUP_BID = "bid"
 
 _EXPORT_NOT_IMPLEMENTED = "导出功能在 P3d 提供（P3a 不实现）。"
 
+# 解析失败行的 `file_path` 编码：`upload-failed:<code>\x1f<file_name>`。
+# `\x1f`（ASCII Unit Separator）在正常错误码与文件名里都不可能出现，故分隔无歧义。
+_FAILED_PATH_PREFIX = "upload-failed:"
+_FAILED_PATH_SEP = "\x1f"
+
+# `POST /files` 的 id 唯一性防御（C-1 兜底）用的错误文案。
+_DUPLICATE_ID_DETAIL = "上传的文件 id 冲突（同名文件重复，或文件解析状态不一致）。"
+
+# `POST /analysis` 在「全部行都是解析失败行」时的错误文案（I-1）。
+_ALL_FILES_FAILED_DETAIL = "所有文件均解析失败，无可分析内容"
+
 
 class AnalysisRequest(BaseModel):
-    force: bool = False
+    """`POST /analysis` 的请求体。
+
+    `force` 用 **`StrictBool`**（fix-round 1 / M-2，评审 B 登记）：宽松 `bool`
+    会把字符串 `"false"` 强转成 `True`（`bool("false") is True`）→
+    `body={"force": "false"}` 得到 HTTP 200 且**强制重跑**，与调用方直觉相反。
+    用 `StrictBool` 后非真布尔（字符串 / 数字 / 列表）一律 422，语义无歧义。
+    选 `StrictBool` 而非「写进 docstring」的理由：这是**契约收紧**，
+    让错误请求响亮失败比让调用方读文档更可靠；且参考实现（JS 侧）只在真布尔时
+    传该字段，收紧不破坏任何已定语义。
+    """
+
+    force: StrictBool = False
 
 
 # --------------------------------------------------------------------- POST /files
@@ -82,6 +107,10 @@ async def upload_files(
     **逐文件容错**：单个文件解析失败 → 该行记 `error` 痕迹并继续，整批仍返回 200
     （对齐参考实现 `duplicateCheckService` 的逐文件 try）。失败行的形状见
     `_parse_failed_file`。
+
+    **失败整批时的磁盘一致性（fix-round 1 / C-1 兜底）**：本路径对每个文件**先
+    落盘**，而 `save_files` 的事务只回滚 DB。故本端点在异常路径上删掉**本次已落盘
+    的副本**（`_discard_saved_copies`），不留下「库回滚了、盘上还留着」的孤儿。
     """
     if tender is None and bid is None:
         raise HTTPException(
@@ -90,26 +119,67 @@ async def upload_files(
 
     data_root = Path(state.settings.data_root)
     tender_inputs: list[DuplicateFileInput] = []
-    for upload in tender or []:
-        item = await _ingest_upload(upload, project_id=project_id,
-                                    role=_GROUP_TENDER, data_root=data_root)
-        if item is not None:
-            tender_inputs.append(item)
     bid_inputs: list[DuplicateFileInput] = []
-    for upload in bid or []:
-        item = await _ingest_upload(upload, project_id=project_id,
-                                    role=_GROUP_BID, data_root=data_root)
-        if item is not None:
-            bid_inputs.append(item)
+    # 本次请求**已落盘**的产物（`markdown_path` / `source_path`）。异常路径靠它
+    # 枚举出要删的副本 —— C-1 兜底要求的「已落盘文件列表在异常路径上可枚举」。
+    saved_paths: list[str] = []
+    try:
+        for upload in tender or []:
+            item = await _ingest_upload(upload, project_id=project_id,
+                                        role=_GROUP_TENDER, data_root=data_root,
+                                        saved_paths=saved_paths)
+            if item is not None:
+                tender_inputs.append(item)
+        for upload in bid or []:
+            item = await _ingest_upload(upload, project_id=project_id,
+                                        role=_GROUP_BID, data_root=data_root,
+                                        saved_paths=saved_paths)
+            if item is not None:
+                bid_inputs.append(item)
 
-    state.duplicate.save_files(project_id, tender_inputs, bid_inputs,
-                               step="upload")
+        # C-1 兜底：入口的 id 唯一性校验。`save_files` 的主键是
+        # `(project_id, file_id)`，任何 id 生成路径不单射都会让**整批**撞
+        # `IntegrityError`（500 + 事务回滚）。这里提前判，降级为 400 + 明确 detail。
+        _assert_unique_file_ids(*tender_inputs, *bid_inputs)
+
+        state.duplicate.save_files(project_id, tender_inputs, bid_inputs,
+                                   step="upload")
+    except BaseException:
+        # 滚回：DB 回滚由仓储的事务负责，这里补上「盘上不留孤儿」。
+        # 兜 `BaseException` 而非 `Exception`：取消（`asyncio.CancelledError`）
+        # 同样会让 DB 回滚，磁盘必须跟着滚回，否则留下孤儿。
+        _discard_saved_copies(saved_paths)
+        raise
 
     listing = state.duplicate.list_files(project_id)
     return {
         _GROUP_TENDER: _files_for_role(listing, _GROUP_TENDER),
         _GROUP_BID: _files_for_role(listing, _GROUP_BID),
     }
+
+
+def _assert_unique_file_ids(*items: DuplicateFileInput) -> None:
+    """入口的 id 唯一性防御（C-1 兜底，评审 B 建议）。
+
+    把「撞主键 → `IntegrityError` → 500 + 整批回滚」降级为
+    「400 + 明确 detail」。
+
+    **为什么需要这道兜底**：即使 `_parse_failed_file` 的塌缩已修好，未来任何新增的
+    id 生成路径（P3b 的 content / image 派生文件）都可能再次把 500 带回来；
+    而 `save_files` 是**全量替换**语义 —— 一个 id 冲突掀掉的是整批，不是一行。
+    在入口判一次，代价是一次 O(n) 扫描，收益是「响亮且可解释的失败」。
+
+    **同名文件重复**是这条校验会拦下的真实输入：同一批次里两个同名文件即使 code
+    不同，`upload-failed:<code>\\x1f<name>` 仍可能相同；若 code 也相同则必然相同。
+    """
+    seen: dict[str, str] = {}
+    for item in items:
+        name = seen.setdefault(item.file_id, item.file_name)
+        if name != item.file_name:
+            raise HTTPException(status_code=400, detail=_DUPLICATE_ID_DETAIL)
+    # 同 id 同名（逐字节相同的重复项）也要拦：同样撞主键。
+    if len(seen) != len(items):
+        raise HTTPException(status_code=400, detail=_DUPLICATE_ID_DETAIL)
 
 
 # --------------------------------------------------------------------- GET /files
@@ -155,14 +225,27 @@ def get_state_endpoint(project_id: str,
 
     `load_analysis` 自己**不含**后三个键（brief F-3）——它们由本层用 T3 的纯函数
     现算；其余 camelCase 键原样透传（前端按它消费）。
+
+    **单次读（fix-round 1 / I-3，评审 B 登记）**：原实现对
+    `repo.get_sections(project_id)` 发 **6 次**独立 SELECT —— `load_analysis` 内 1 次、
+    `_section_states` 1 次、`sections` 字典推导里每段各 1 次（×4）。6 次读**跨不同
+    事务**，并发写时同一响应体内可能 `sections` 与 `overallProgress` 来自不同时刻
+    而自相矛盾（「四段全绿但进度条没满」）。现在开头读**一次** `section_rows`，
+    两个 helper 都吃同一份 —— 纯重构，不改契约。
+
+    注意 `load_analysis` 内部**仍会自己读一次**段状态（它是 T2 已评审的接口，
+    本任务不改）。因此本端点的读次数从 6 降到 **2**（1 次 `load_analysis` 内部 +
+    1 次本层的共享 `section_rows`），且**本层新增的三个键之间**不再有跨读窗口。
+    把 `load_analysis` 也收进同一份快照需要改它的签名，超出本任务 diff 边界
+    （已在此登记）。
     """
+    section_rows = state.duplicate.get_sections(project_id)
     analysis = state.duplicate.load_analysis(project_id)
-    states = _section_states(state, project_id)
+    states = _section_states(section_rows)
     return {
         **analysis,
         "sections": {
-            section: _section_response(state.duplicate.get_sections(project_id)
-                                       .get(section))
+            section: _section_response(section_rows.get(section))
             for section in ANALYSIS_SECTIONS
         },
         "overallProgress": overall_progress(states),
@@ -185,10 +268,19 @@ async def start_analysis(project_id: str, body: AnalysisRequest | None = None,
     同形同序 —— 两处签名逐字节一致是幂等能命中的**硬约束**（brief F-2）。
 
     `force` 默认 `False`（对齐参考实现 `:2799` 的 `payload.get("force")`）。
+
+    **拒绝「全失败行」（fix-round 1 / I-1，评审 B 登记的 Important）**：
+    原实现的唯一前置校验是「文件表非空」，而**全 `upload-failed:*` 的行同样非空**
+    → 任务被提交、跑完、四段全 `success`、`task.error` 为 `None`：
+    一个字节可分析内容都没有，却报「查重已完成」（评审 B 实测坐实）。
+    现在追加校验「至少存在一行**非失败**文件」，否则 400 + 明确 detail。
+    部分失败仍被允许（那是有可分析内容、结果不完整的正常情形）。
     """
     listing = state.duplicate.list_files(project_id)
     if not listing:
         raise HTTPException(status_code=400, detail="请先上传招标或投标文件")
+    if not any(_error_of(row) is None for row in listing):
+        raise HTTPException(status_code=400, detail=_ALL_FILES_FAILED_DETAIL)
 
     tender_files = _files_for_role(listing, _GROUP_TENDER)
     bid_files = _files_for_role(listing, _GROUP_BID)
@@ -218,7 +310,8 @@ def export_analysis(project_id: str,
 
 
 async def _ingest_upload(upload: UploadFile, *, project_id: str, role: str,
-                         data_root: Path) -> DuplicateFileInput | None:
+                         data_root: Path,
+                         saved_paths: list[str] | None = None) -> DuplicateFileInput | None:
     """把一次上传落盘成一个 `DuplicateFileInput`。
 
     参照 R24：`save_uploaded_document` **先解析后落盘**，解析失败抛 `ParsingError`
@@ -228,6 +321,10 @@ async def _ingest_upload(upload: UploadFile, *, project_id: str, role: str,
 
     解析失败时返回带 `error` 痕迹的行（见 `_parse_failed_file`），**不抛**
     —— 单文件失败不能拖垮整批（对齐参考实现的逐文件 try）。
+
+    **`saved_paths`**（C-1 兜底）：落盘成功时把 `markdown_path` 与 `source_path`
+    追加进去，供调用方在异常路径上枚举并删除 —— 这是「已落盘文件列表在异常路径上
+    可枚举」的实现。
     """
     payload = await upload.read()
     file_name = upload.filename or "未命名文件"
@@ -247,6 +344,10 @@ async def _ingest_upload(upload: UploadFile, *, project_id: str, role: str,
                                   extension=extension, error=error)
     finally:
         _remove_tree(tmp_path.parent)
+
+    if saved_paths is not None:
+        saved_paths.append(saved.markdown_path)
+        saved_paths.append(saved.source_path)
 
     file_id = stable_file_id(saved.source_path, file_name,
                              explicit_id=saved.document_id)
@@ -276,22 +377,54 @@ def _parse_failed_file(*, project_id: str, role: str, file_name: str,
 
     - `file_path` = `"upload-failed:<code>"` —— 稳定的机器可读占位。**不是真路径**：
       `save_uploaded_document` 失败时**一个字节都没写**（R24），没有真路径可给。
-      选前缀而非 NULL 是因为 `file_path` 列是 `NOT NULL`，且 `stable_file_id` 要拿
-      它算 id。
+      选前缀而非 NULL 是因为 `file_path` 列是 `NOT NULL`。
     - `modified_at` = `None` —— 解析失败没有落盘副本，拿不到 mtime。（`None` 在签名
       里渲染成 JS 的 `"null"`，仍是稳定值。）
     - `size` = 上传字节数（这个是真的，来自请求体）。
     - `content_hash` = `None`。
-    - `file_id` 由 `stable_file_id("upload-failed:<code>", file_name)` 算出 ——
-      同一失败原因 + 同一文件名 → 同一 id（确定性，便于重复上传覆盖）。
+
+    **`file_id` 必须对失败行单射（fix-round 1 / C-1，语义裁决）**
+
+    原实现是 `stable_file_id(file_path, file_name)`，而 `stable_file_id` 的内部是
+    `file_path or file_name or ""` —— `file_path` 恒为 `"upload-failed:<code>"`
+    （与文件名无关），**短路使 `file_name` 根本不参与 id 计算**。后果：同一项目内
+    两个 `error.code` 相同的坏文件算出逐字节相同的 id → 撞
+    `PRIMARY KEY (project_id, file_id)` → 整个 `save_files` 事务回滚 → HTTP 500，
+    连好文件都进不去；且事务只回滚 DB，已落盘的副本变成不可回收的孤儿。
+
+    **裁决：让 id 单射**（而不是「同 code 的失败行共用 id 以便重复上传覆盖」）。
+    理由：**「同批两个不同坏文件共存」是真实且常见的场景**（真实标书目录里
+    `.pdf`/`.doc`/`.wps` 混杂，一次上传里多个文件落到同一失败码是常态），而
+    「重复上传覆盖」在 `save_files` 是**全量替换**语义的前提下**不需要 id 承担**
+    —— 全量替换先 `DELETE ... WHERE project_id = ?` 再重插，同 code 同名的文件
+    重复上传本来就是「先删后插」，id 相同与否都不影响结果。两个需求因此不互斥：
+    单射不会牺牲任何真实能力，而共用 id 会牺牲共存。
+
+    id 口径选 `upload-failed:<code>\x1f<file_name>`：`<code>` 保持机器可读（与
+    `_error_of` 的解码口径一致），文件名提供工程上恒成立的单射性（同一 multipart
+    批次里同名文件会被 `save_files` 的 id 校验降级为 400，见那里）。`\x1f`
+    （ASCII Unit Separator）在正常错误码与文件名里都不可能出现，故分隔无歧义。
+
+    **失败行的签名（fix-round 1 / I-2）**：签名的第三个分量是 `modified_at`，
+    失败行恒为 `None` → 渲染成 `"null"`；若 `file_path` 只含 code，则**不同失败行
+    只要 code 与字节数相同，签名就完全相同**（评审 B 实测
+    `sig(bad1.docx) == sig(another-name.docx): True`）→ 换掉失败行后签名不变，
+    可能命中幂等而跳过重跑。因此 `file_path` 里也带上文件名 —— 它与 `file_id`
+    同源，让签名对「失败行集合的任何变化」敏感。
+
     - **`error` 痕迹**：`duplicate_check_files` 没有 `error` 列，故 error 文本编码在
       `file_path` 的 `upload-failed:<code>` 里；HTTP 响应由 `_error_of` 解出 `code`
       放进 `error` 键（`"format-mismatch"` / `"parser-unsupported"` 等）。
+      前缀嗅探的已知风险见 `_error_of`。
     - `role` 由调用方的分组字段决定（本函数不收 role，`save_files` 按组写入）。
     """
-    file_path = f"upload-failed:{error.code}"
+    file_path = f"{_FAILED_PATH_PREFIX}{error.code}{_FAILED_PATH_SEP}{file_name}"
     return DuplicateFileInput(
-        file_id=stable_file_id(file_path, file_name),
+        # id 与 file_path **同口径**：单射性由 `file_name` 提供。
+        # `explicit_id` 直接给出该口径的 sha1，避免再经 `stable_file_id` 的
+        # `or` 短路（那正是本 bug 的成因）。
+        file_id=stable_file_id(file_path, file_name, explicit_id=_failed_file_id(
+            file_path)),
         file_name=file_name,
         file_path=file_path,
         extension=extension,
@@ -301,10 +434,69 @@ def _parse_failed_file(*, project_id: str, role: str, file_name: str,
     )
 
 
+def _failed_file_id(file_path: str) -> str:
+    """失败行的 id：对 `file_path` 口径做 sha1（与 `stable_file_id` 同算法）。"""
+    import hashlib
+
+    return hashlib.sha1(file_path.encode("utf-8")).hexdigest()
+
+
+def _error_of(row: Mapping[str, Any]) -> str | None:
+    """失败行的 error 痕迹：`file_path` 的 `upload-failed:<code>[\\x1f<name>]` 前缀。
+
+    形状由 `_parse_failed_file` 决定。`<name>` 段是 fix-round 1 / C-1、I-2 为了让
+    `file_id` 与签名对失败行单射而加进去的，解码时按第一个分隔符切掉即可，
+    对**旧形状**（只有 code、没有分隔符）也仍然成立。
+
+    **已知局限（M-5，评审 B 登记）**：这是「把语义塞进字符串前缀」的嗅探 ——
+    若真实路径恰好以 `upload-failed:` 开头会被误判。评审判定为极低概率、低影响。
+    本轮**不移除**它：独立 `error` 列需要改 `duplicate_check_files` 的 schema，
+    而该表属 T1（已评审）且改 schema 会突破「本任务只允许新增 `save_files` 一个
+    仓储方法」的边界。改为在 P3b 有迁移机会时加列 —— 已在修复报告里登记。
+    """
+    file_path = row.get("file_path") or ""
+    if isinstance(file_path, str) and file_path.startswith(_FAILED_PATH_PREFIX):
+        return file_path[len(_FAILED_PATH_PREFIX):].split(_FAILED_PATH_SEP, 1)[0]
+    return None
+
+
 def _remove_tree(path: Path) -> None:
+    """删临时目录；**失败不再静默**（fix-round 1 / M-3，评审 B 登记）。
+
+    原实现是 `shutil.rmtree(path, ignore_errors=True)`，会把删除失败
+    （Windows 上文件被占用 / 权限不足）完全吞掉，`%TEMP%` 缓慢累积且无迹可查。
+    改成 `ignore_errors=False` + 记日志：清理失败变成**可观测事件**而不是静默泄漏。
+
+    这里**不把异常抛给调用方**：临时目录的清理失败不应该让一次本来成功的上传变成
+    500（那比泄漏更糟）。所以是「记录并继续」而不是「抛出」。
+    """
     import shutil
 
-    shutil.rmtree(path, ignore_errors=True)
+    try:
+        shutil.rmtree(path, ignore_errors=False)
+    except OSError as error:
+        _logger.warning("清理临时上传目录失败：%s（%s）", path, error)
+
+
+def _discard_saved_copies(paths: Sequence[str]) -> list[str]:
+    """滚回时删掉本次已落盘的副本，返回「删除失败」的路径（C-1 的孤儿清理）。
+
+    上传路径对每个文件**先落盘**（`save_uploaded_document` 写 `uploads/` 与
+    `documents/`），而 `save_files` 的事务**只回滚 DB** —— 一旦事务失败，磁盘上
+    就留下无主副本，且 `DELETE /files` 也不删盘（P3b 才处理），这些孤儿**永远不会
+    被任何路径回收**（评审 B 实测 2 个）。
+
+    故上传路径把已落盘的产物收集成列表，在异常路径上**显式删除**。
+    删除失败只记日志（尽力而为）：回滚路径的正确性不依赖磁盘清理成功。
+    """
+    failed: list[str] = []
+    for raw in paths:
+        try:
+            Path(raw).unlink(missing_ok=True)
+        except OSError as error:
+            failed.append(raw)
+            _logger.warning("回滚时删除落盘副本失败：%s（%s）", raw, error)
+    return failed
 
 
 def _mtime_iso(path: Path) -> str:
@@ -333,20 +525,25 @@ def _files_for_role(listing: Sequence[Mapping[str, Any]], role: str) -> list[dic
 
     保留 `file_path` / `size` / `modified_at` —— `POST /analysis` 的 payload 必须
     带这三键（T4 靠它们算签名）。
+
+    取值一律用 `row.get(...)`（fix-round 1 / M-4，评审 B 登记）：原实现是
+    `row["role"]` 直接下标，与同模块 `_error_of` 的防御式风格不一致。
+    DB 层 `role` 是 `NOT NULL`，故正常路径不触发；统一风格后，
+    「入参由仓储保证形状」这个隐含前提不再被静默依赖。
     """
     return [
         {
-            "file_id": row["file_id"],
-            "file_name": row["file_name"],
-            "file_path": row["file_path"],
-            "extension": row["extension"],
-            "size": row["size"],
-            "modified_at": row["modified_at"],
-            "role": row["role"],
+            "file_id": row.get("file_id"),
+            "file_name": row.get("file_name"),
+            "file_path": row.get("file_path"),
+            "extension": row.get("extension"),
+            "size": row.get("size"),
+            "modified_at": row.get("modified_at"),
+            "role": row.get("role"),
             "error": _error_of(row),
         }
         for row in listing
-        if row["role"] == role
+        if row.get("role") == role
     ]
 
 
@@ -358,9 +555,13 @@ def _error_of(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _section_states(state: AppState, project_id: str) -> dict[str, SectionState | None]:
-    """把仓储行读成 T3 的 `SectionState`，供进度函数使用（缺段为 `None`）。"""
-    rows = state.duplicate.get_sections(project_id)
+def _section_states(rows: Mapping[str, Mapping[str, Any]]
+                    ) -> dict[str, SectionState | None]:
+    """把仓储行读成 T3 的 `SectionState`，供进度函数使用（缺段为 `None`）。
+
+    入参是**已读出的行**而不是 `state`（fix-round 1 / I-3）：调用方读一次、
+    两处共用，消除同一响应体内的跨读不一致窗口。
+    """
     states: dict[str, SectionState | None] = {}
     for section in ANALYSIS_SECTIONS:
         row = rows.get(section)

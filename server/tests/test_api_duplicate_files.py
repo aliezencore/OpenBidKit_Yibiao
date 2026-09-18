@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -316,11 +317,14 @@ def test_upload_while_analysis_running_is_signature_guarded(
     resp = _post_files(client, project, tender=[("新招标.docx", docx_bytes)])
     assert resp.status_code == 200, resp.text
 
-    sections = state.duplicate.get_sections(project)
-    assert sections == {} or all(
-        s["status"] != "success" or s["signature"] != "stale-signature"
-        for s in sections.values()
-    ), sections
+    # 直接断言「四段行不存在」= (b) 方案要守护的不变量本身。
+    #
+    # fix-round 1（评审 A Important-1）：这里原先是
+    # `assert sections == {} or all(s["status"] != "success" or
+    # s["signature"] != "stale-signature" ...)`。那个析取式的第二支在「实现没清
+    # 四段、但签名已重写」时为真 → **在该断言要守护的语义上退化为恒真**。
+    # 现在与用例 9（`:277`）的写法一致：不用 `or` 连接两个都能独立为真的分支。
+    assert state.duplicate.get_sections(project) == {}, "上传未清四段状态"
     body = _state(client, project)
     assert body["overallProgress"] == 0
 
@@ -385,6 +389,117 @@ def test_parse_failure_marks_row_error_and_continues(client, project, docx_bytes
     # 坏文件的 error 在 GET /files 上也能读到（不是只在 POST 响应里）
     by_name = {f["file_name"]: f for f in listing["tender"]}
     assert by_name["坏文件.docx"]["error"] == bad["error"]
+
+
+# ------------------------------------------------------ 新增 A（C-1 判别）
+
+def test_two_distinct_failed_files_do_not_collide(client, project):
+    """C-1 判别：两个不同名、同 error code、同字节数的坏文件不得撞 id。
+
+    fix-round 1 之前，失败行的 `file_id` 只由 `upload-failed:<code>` 决定
+    （`stable_file_id(file_path, file_name)` 里 `file_path or file_name` 短路使
+    文件名根本不参与），于是两个坏文件算出**同一个 id** → 撞
+    `PRIMARY KEY (project_id, file_id)` → 整个 `save_files` 事务回滚 → 500。
+    """
+    resp = _post_files(client, project, tender=[
+        ("坏A.docx", b"not a docx"),
+        ("坏B.docx", b"also not a docx"),   # 同 code、字节数相同
+    ])
+    assert resp.status_code == 200, resp.text
+    tender = resp.json()["tender"]
+    assert len(tender) == 2, tender
+    ids = [f["file_id"] for f in tender]
+    assert len(set(ids)) == 2, f"失败行 id 未单射：{ids}"
+    # 两个坏文件都必须留在库里（不是「丢一行」）
+    assert len(_listing(client, project)["tender"]) == 2
+
+
+# ------------------------------------------------------ 新增 B（C-1 泄漏面）
+
+def test_no_orphan_copies_when_upload_rolls_back(client, project, docx_bytes, tmp_path):
+    """好文件 + 撞 id 的坏文件同批出现时，回滚路径必须清掉已落盘的副本。
+
+    C-1 的第二个后果：`_ingest_upload` 对每个文件**先落盘**，而事务只回滚 DB
+    → 磁盘上留下不可回收的孤儿副本（`DELETE /files` 也不删盘）。
+    """
+    resp = _post_files(client, project, tender=[
+        ("好文件.docx", docx_bytes),
+        ("坏A.docx", b"not a docx"),
+        ("坏B.docx", b"also not a docx"),
+    ])
+    # 修 C-1 后这条请求本身是成功的（200）；这里断言的是**无论成败都不留孤儿**。
+    assert resp.status_code == 200, resp.text
+
+    project_dir = tmp_path / "projects" / project
+    on_disk = {p.name for p in project_dir.rglob("*") if p.is_file()} \
+        if project_dir.exists() else set()
+    rows = client.app.state.yibiao.duplicate.list_files(project)
+
+    # 期待的 `uploads/` 副本：正好是入库行的 `file_path` 文件名（好文件一个）。
+    # 坏文件**没有**落盘副本（`ParsingError` 路径一个字节都没写）。
+    expected_uploads = {Path(r["file_path"]).name for r in rows
+                        if r["file_path"] and not r["file_path"].startswith(
+                            "upload-failed:")}
+    actual_uploads = {p.name for p in (project_dir / "uploads").glob("*")} \
+        if (project_dir / "uploads").exists() else set()
+    assert actual_uploads == expected_uploads, (
+        f"uploads/ 存在无主副本：{sorted(actual_uploads - expected_uploads)}")
+
+    # `documents/*.md` 的份数必须与「成功落盘的文件数」一致 —— 孤儿副本会让它多出来。
+    # 这个断言才是 C-1 泄漏面的**直接**判据：事务回滚后 DB 里只剩 1 行，
+    # 而磁盘上残留的孤儿 `.md` 会让实际份数 > 1。
+    markdowns = {p.name for p in (project_dir / "documents").glob("*.md")} \
+        if (project_dir / "documents").exists() else set()
+    assert len(markdowns) == len(expected_uploads), (
+        f"documents/ 份数不符：磁盘 {sorted(markdowns)} / 期待 {len(expected_uploads)} 份")
+    assert on_disk, "项目目录不该是空的"
+
+
+# ------------------------------------------------- 新增 C（双项目隔离，面向未来）
+
+def test_save_files_does_not_touch_other_projects(client, docx_bytes):
+    """跨项目隔离：对 P1 上传不得影响 P2 的文件行数。
+
+    评审 B 的探针 1 评估指出：「跨项目数据破坏」这个危险面当前**零覆盖**
+    （探针 1 变红是「副作用链」而非「跨项目破坏」）。这是面向未来的回归护栏。
+    """
+    p1 = client.post("/projects", json={"name": "P1"}).json()["id"]
+    p2 = client.post("/projects", json={"name": "P2"}).json()["id"]
+    _post_files(client, p1, tender=[("p1招标.docx", docx_bytes)])
+    _post_files(client, p2, tender=[("p2招标.docx", docx_bytes)])
+
+    state = client.app.state.yibiao
+    before = len(state.duplicate.list_files(p2))
+    assert before == 1
+
+    _post_files(client, p1, tender=[("p1新招标.docx", docx_bytes)])
+
+    after = state.duplicate.list_files(p2)
+    assert len(after) == before, f"P2 的文件行被 P1 的上传影响：{after}"
+    assert [f["file_name"] for f in after] == ["p2招标.docx"]
+
+
+# -------------------------------------------------- 新增 D（I-1 判别）
+
+def test_analysis_rejects_all_failed_rows(client, project, docx_bytes):
+    """I-1 判别：全是失败行时 `POST /analysis` → 400，不得跑完并报四段 success。
+
+    fix-round 1 之前唯一的前置校验是「文件表非空」，而失败行同样非空 →
+    任务被提交、跑完、四段全 `success`、`task.error` 为 `None`：
+    **一个字节可分析内容都没有，却报「查重已完成」**。
+    """
+    resp = _post_files(client, project, tender=[("坏文件.docx", b"not a docx")])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["tender"][0]["error"], "预置失败行不成立"
+
+    analysis = client.post(f"/projects/{project}/duplicate/analysis",
+                           json={"force": False})
+    assert analysis.status_code == 400, analysis.text
+    assert "解析失败" in analysis.json()["detail"], analysis.json()
+
+    state = client.app.state.yibiao
+    assert state.tasks.list_for_project(project) == [], "不应提交任务"
+    assert state.duplicate.get_sections(project) == {}, "不应写四段状态"
 
 
 # ------------------------------------------------------------------- 帮手

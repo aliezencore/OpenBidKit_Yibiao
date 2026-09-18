@@ -7,6 +7,7 @@ import pytest
 
 from app.infra.db.engine import Database
 from app.infra.db.migrate import apply_schema
+from app.domain.duplicate.signature import compute_analysis_signature
 from app.infra.repositories.duplicate import DuplicateFileInput, DuplicateRepository
 from app.infra.tasks.context import TaskCancelled
 from app.infra.tasks.duplicate_runner import (
@@ -397,6 +398,37 @@ def test_missing_bid_files_key_is_tolerated(repo):
 def test_empty_file_list_still_runs(repo):
     ctx = _run(repo, {"tenderFiles": [], "bidFiles": []})
     assert ctx.progress_calls[-1][0] == 100
+
+
+def test_empty_file_list_does_not_inherit_previous_success(repo):
+    """空清单不得继承上一轮的 `success` 段行（fix-round 1 / Task 5 I-1 连带）。
+
+    `compute_analysis_signature([])` 是常量 `sha1("")`。若库里
+    **`current_signature` 也是它、且四段已是 `success` + 同一个签名**，那么
+    幂等判据 `_is_up_to_date` 为真 → 直接报 100 返回。这正是「空清单 + 空清单签名」
+    的组合：**本轮什么都没算，但四段带着上一轮的 `success` 与旧文案原样返回**。
+
+    判别点选**段文案**：幂等命中路径**不写任何段行**，所以段文案会停在预置的
+    `OLD`；走真实路径则会被本轮终态覆盖成「分析完成」/「元数据分析完成」。
+    实测（枚举 meta×段签名 四种组合）：只有「meta 与段签名都等于空清单签名」这一
+    组合会停在 `OLD` —— 其余组合都因 `signature_reader != signature` 而进入
+    真实路径。故本用例是**判别该缺陷的最小组合**。
+    """
+    empty = compute_analysis_signature([])
+    for section in ("metadata", "outline", "content", "image"):
+        repo.save_section("p1", section, status="success", progress=100,
+                          message="OLD", signature=empty,
+                          stats={}, updated_at="2026-01-01T00:00:00Z")
+    repo.save_meta("p1", current_signature=empty)
+
+    _run(repo, {"tenderFiles": [], "bidFiles": [], "force": False})
+
+    sections = repo.get_sections("p1")
+    # 幂等命中会保留 `OLD`；真实路径必须把它覆盖成本轮终态文案。
+    messages = {s: sections[s]["message"] for s in
+                ("metadata", "outline", "content", "image")}
+    assert all(m != "OLD" for m in messages.values()), (
+        f"空清单误命中幂等，继承了上一轮的段状态：{messages}")
 
 
 def test_single_tender_file_key_is_supported(repo):

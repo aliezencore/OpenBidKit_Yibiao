@@ -332,7 +332,17 @@ class DuplicateAnalysisRunner:
             ctx.progress(100)
             return
 
-        if data.get("force") or self._signature_reader(project_id) != signature:
+        # 空文件清单的兜底（fix-round 1 / Task 5 I-1 的连带修复）。
+        #
+        # `compute_analysis_signature([])` 是 sha1("") = `da39a3ee…`，一个**常量**。
+        # 若库里 `current_signature` 恰好也是它、且四段已是 `success` + 同一签名，
+        # 幂等判据 `_is_up_to_date` 会为真 → 直接报 100 返回，**四段带着上一轮的
+        # 状态与文案原样返回**：本轮一个文件都没算，却报「查重已完成」。
+        #
+        # 修法落在 `_is_up_to_date` 里而不是这里：幂等短路发生在本行**之前**，
+        # 放在这里根本拦不住（我第一版就是这么写错的，被新用例当场抓住）。见那里。
+        signature_changed = self._signature_reader(project_id) != signature
+        if data.get("force") or signature_changed:
             # 签名变了（或用户强制）→ 旧结果整体作废后再重跑。
             self._discard_previous(project_id, ctx)
 
@@ -630,8 +640,26 @@ class DuplicateAnalysisRunner:
 
         逐条对齐 :2799-2803 的合取式（参考实现在一个 `if` 里写完四段）。
         **状态从仓储读**，不读 `previous_state`（见模块 docstring）。
+
+        **空清单额外判据（fix-round 1 / Task 5 I-1 的连带修复）**：
+        `compute_analysis_signature([])` 是常量 `sha1("")`。若库里
+        `current_signature` 与四段签名恰好都是它，上式会**在没有任何文件可分析时
+        命中幂等** → 直接报 100 返回、四段保留上一轮的状态与文案 → 用户看到
+        「查重已完成」，而实际上本轮一个文件都没算。
+
+        故先判「本次载荷是否为空」：为空时**永远不算 up-to-date**，必须走真实路径
+        （真实路径会 `_discard_previous` 清掉上一轮状态，再由终态写入覆盖）。
+        这与 `POST /analysis` 的接口层校验（拒绝全失败行）是**两道独立的防线**：
+        接口层管 HTTP 入口，这里管**绕过接口层直接 submit** 的调用方。
+
+        参考实现 `isCurrentDuplicateCheckSignature`（:2856-2859）没有这个特例，
+        属于本实现的有意收紧；代价是空载荷会多跑一轮 stub，收益是不会把
+        「什么都没算」报成「已完成」。
         """
         if payload.get("force"):
+            return False
+        if not [item for item in _payload_files(payload) if item]:
+            # 空载荷：不可能有「本轮结果」，不得命中幂等。
             return False
         sections = self._repo.get_sections(project_id)
         for section in ANALYSIS_SECTIONS:
