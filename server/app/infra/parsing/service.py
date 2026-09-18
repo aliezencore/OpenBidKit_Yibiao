@@ -49,7 +49,7 @@ def save_uploaded_document(
     此时一个字节都没写过，因此不会留下半成品目录——`test_parse_failure_leaves_no_artifacts`
     钉住这一点。若反过来先建目录再解析，失败就会留下空目录与    已复制的原件。
     """
-    _validate_project_id(project_id)
+    validate_project_id(project_id)
     data_root = Path(data_root)
     source_path = Path(source_path)
 
@@ -87,7 +87,7 @@ def save_uploaded_document(
     )
 
 
-def _validate_project_id(project_id: str) -> None:
+def validate_project_id(project_id: str) -> None:
     """project_id 必须是一个安全的单段路径，不得触发目录穿越（裁定 P2a 终审 F1）。
 
     P3/P4 的上传端点会把 URL 路径参数喂进来，这里进行一次性的净化，而不是指望
