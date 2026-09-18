@@ -80,6 +80,25 @@ class AnalysisRequest(BaseModel):
 # --------------------------------------------------------------------- POST /files
 
 
+def _strip_empty_uploads(
+        uploads: list[UploadFile] | None) -> list[UploadFile] | None:
+    """把「字段出现但只带空占位 part」归一化成空列表（fix-round 2 / N-4）。
+
+    multipart 里「字段出现但为空」唯一协议可达的形状是 `filename=""` 的空
+    file part —— 这正是浏览器空 `<input type="file">` 的原生提交形状（前端
+    表达「该组 0 个文件」）。starlette 会把它解析成一个 `filename=""`、
+    0 字节的 `UploadFile`，若不过滤就会走解析流程变成一条失败行垃圾。
+
+    - `None`（字段缺席）原样返回 —— 缺席语义不变（两组都缺席仍是 400）。
+    - `filename` 为空串/`None` 的 part 一律视为占位；正常文件名不可能为空
+      （`_ingest_upload` 对空名兜底「未命名文件」，正是为这类占位准备的，
+      但归一化后它根本走不到那里）。
+    """
+    if uploads is None:
+        return None
+    return [upload for upload in uploads if upload.filename]
+
+
 @router.post("/projects/{project_id}/duplicate/files")
 async def upload_files(
     project_id: str,
@@ -89,8 +108,20 @@ async def upload_files(
 ) -> dict:
     """全量替换两组文件（对齐 `saveFiles`，brief F-1/F-2）。
 
-    两个分组字段**至少出现一个**；两个都不出现是歧义请求 → 400（空列表是合法的
-    显式「清空该组」，字段缺席不是）。
+    两个分组字段**都不出现**是歧义请求 → 400（「全清空」应走 `DELETE /files`）。
+    「该组为空」有两处显式表达（fix-round 2 / N-4）：
+
+    - **字段出现但为空**：该组只带 `filename=""` 的空 part —— 这是浏览器空
+      `<input type="file">` 的原生提交形状，也是 multipart 里「空列表」唯一
+      协议可达的形状。它会被归一化成空列表（`_strip_empty_uploads`）。
+      修复前任何「出现但空」的形状都 422（`Expected UploadFile`），而参考
+      实现「删到 0 个文件」走的就是空列表（`DuplicateCheckPage.tsx:1101`
+      的 `persistSelectedFiles(tenderFiles, [])`），P3d 前端对接会撞死。
+      为何不用 `File(default=[])`：实测它既救不了「出现但空」（FastAPI 对
+      字符串 part 的 `UploadFile` 验证与 default 无关，仍 422），又把「字段
+      缺席」的取值从 `None` 变 `[]`，直接瓦解上面的 400 歧义防线（用例 2）。
+    - **单组字段缺席** = 清空该组（全量替换语义，`or []`，用例 3 钉住）。
+      两组都缺席 ≠ 两组都空：前者没说清意图 → 400，后者是显式意图 → 200。
 
     **上传是破坏性操作**：换文件的同时作废全部已有分析结果并重写签名——由仓储的
     `save_files` 在**一个事务**里完成（brief F-2）。
@@ -116,6 +147,12 @@ async def upload_files(
         raise HTTPException(
             status_code=400,
             detail="必须至少出现 tender 或 bid 分组字段（两个都不出现是歧义请求）")
+    # N-4：把「字段出现但只带空占位 part」归一化成空列表（显式清空该组）。
+    # 占位 part 若流到 ingest 会被当成 0 字节文件解析，变成一条
+    # `filename=""` 的失败行垃圾。过滤不改变 `None` 性（字段缺席仍是缺席），
+    # 故上面的 400 歧义判断不受影响。
+    tender = _strip_empty_uploads(tender)
+    bid = _strip_empty_uploads(bid)
 
     data_root = Path(state.settings.data_root)
     tender_inputs: list[DuplicateFileInput] = []
@@ -545,14 +582,6 @@ def _files_for_role(listing: Sequence[Mapping[str, Any]], role: str) -> list[dic
         for row in listing
         if row.get("role") == role
     ]
-
-
-def _error_of(row: Mapping[str, Any]) -> str | None:
-    """失败行的 error 痕迹：`file_path` 的 `upload-failed:<code>` 前缀。"""
-    file_path = row.get("file_path") or ""
-    if isinstance(file_path, str) and file_path.startswith("upload-failed:"):
-        return file_path.split(":", 1)[1]
-    return None
 
 
 def _section_states(rows: Mapping[str, Mapping[str, Any]]

@@ -43,26 +43,46 @@ def docx_bytes(tmp_path):
 
 
 def _post_files(client, project, *, tender=None, bid=None):
-    """两个分组字段全量上传；`None` 表示该分组字段不出现（歧义请求用）。
+    """两个分组字段全量上传；`None` 表示该分组字段不出现；`[]` 发显式空 part。
 
-    注意：multipart 里「字段不出现」与「字段出现但空」是两件事——前者是歧义请求
-    （→400），后者是显式清空该组。只在真正传 `[]` 时才发空列表。
+    注意：multipart 里「字段不出现」「字段出现但为空」是两件事——前者两组都
+    发生时是歧义请求（→400），后者是显式清空该组（fix-round 2 / N-4）。
+
+    「出现但为空」在 multipart 里唯一协议可达的形状是 `filename=""` 的空
+    file part（浏览器空 `<input type="file">` 的原生提交形状）。httpx 便捷
+    API 发不出它——`files=[("tender", ("", b""))]` 会把空 filename 整个
+    省略，part 退化成字符串字段（`Expected UploadFile` → 422）；而
+    `data={"tender": ""}` 同样是字符串字段，也是 422。故整个请求体手工编码
+    （实测 `httpx.Request(...).read()` 的 body：`name="tender"` 无 filename
+    属性）。
     """
-    data = {}
-    files = []
-    if tender is not None:
-        if tender == []:
-            data["tender"] = ""
-        else:
-            files.extend(("tender", (name, payload, DOCX_MIME))
-                         for name, payload in tender)
-    if bid is not None:
-        if bid == []:
-            data["bid"] = ""
-        else:
-            files.extend(("bid", (name, payload, DOCX_MIME))
-                         for name, payload in bid)
-    return client.post(f"/projects/{project}/duplicate/files", data=data, files=files)
+    boundary = "YibiaoTestBoundary3141"
+    parts: list[bytes] = []
+    for group, items in (("tender", tender), ("bid", bid)):
+        if items is None:
+            continue  # 字段不出现
+        if items == []:
+            # 显式空组：filename="" 的空 part（0 字节）。
+            parts.append(
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{group}"; filename=""\r\n'
+                f'Content-Type: application/octet-stream\r\n\r\n\r\n'.encode())
+            continue
+        for name, payload in items:
+            parts.append(
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{group}"; '
+                f'filename="{name}"\r\n'
+                f'Content-Type: {DOCX_MIME}\r\n\r\n'.encode()
+                + payload + b'\r\n')
+    if not parts:
+        # 两个分组字段都不出现（用例 2 的歧义形状）。
+        return client.post(f"/projects/{project}/duplicate/files",
+                           data={}, files=[])
+    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+    return client.post(
+        f"/projects/{project}/duplicate/files", content=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
 
 
 def _listing(client, project):
@@ -377,8 +397,20 @@ def test_parse_failure_marks_row_error_and_continues(client, project, docx_bytes
     assert not good["file_path"].startswith("upload-failed:")
 
     # 坏文件：error 痕迹 + 占位路径 + 无 mtime
-    assert bad["error"], bad
-    assert bad["file_path"] == f"upload-failed:{bad['error']}"
+    #
+    # fix-round 2 / N-1：这里原先是
+    #     assert bad["file_path"] == f"upload-failed:{bad['error']}"
+    # —— **恒真式**：等式两边都由实现产出（`file_path` 是 `_parse_failed_file` 写的，
+    # `error` 是 `_error_of` 从同一个 `file_path` 解出来的），只要解码口径自洽就恒成立。
+    # 它恰好掩盖了 N-1（重复定义的 `_error_of` → 解码根本没生效、`error` 里带着
+    # `\x1f<文件名>`，等式**仍然**成立）。评审 B 早先点名它「接近同义反复」，
+    # 修复环 1 漏改，缺陷从它下面溜过。
+    #
+    # 现在改成**与实现无关的精确断言**：`error` 必须是纯 code，`file_path` 必须是
+    # 显式写出的编码形状。任何一侧口径漂移都会红。
+    assert bad["error"] == "format-mismatch", bad["error"]
+    assert bad["file_path"] == "upload-failed:format-mismatch\x1f坏文件.docx", \
+        repr(bad["file_path"])
     assert bad["modified_at"] is None
     assert bad["size"] == len(b"this is definitely not a docx")
 
@@ -386,9 +418,89 @@ def test_parse_failure_marks_row_error_and_continues(client, project, docx_bytes
     listing = _listing(client, project)
     assert [f["file_name"] for f in listing["tender"]] == ["好文件.docx", "坏文件.docx"]
 
-    # 坏文件的 error 在 GET /files 上也能读到（不是只在 POST 响应里）
+    # 坏文件的 error 在 GET /files 上也能读到（不是只在 POST 响应里），
+    # 且**同样必须是干净 code**（N-1 实测两个端点都泄漏 `\x1f<文件名>`）。
     by_name = {f["file_name"]: f for f in listing["tender"]}
-    assert by_name["坏文件.docx"]["error"] == bad["error"]
+    assert by_name["坏文件.docx"]["error"] == "format-mismatch", \
+        repr(by_name["坏文件.docx"]["error"])
+
+
+# -------------------------------------------- 新增 E（N-1：error 必须是干净 code）
+
+def test_failed_row_error_is_a_clean_code(client, project):
+    """N-1 判别：失败行的 `error` 必须是**纯机器码**，不得带编码分隔符或文件名。
+
+    fix-round 1 引入了**重复定义的 `_error_of`**（新定义含 `\\x1f` 解码、
+    旧定义不含），Python 取模块级**最后一个**定义 → 新解码是死代码。
+    实测两个端点都返回 `'format-mismatch\\x1f坏文件.docx'`。
+
+    这条用例用**精确等值断言**钉住口径（不是 `in` / `not in` 的弱断言），
+    并且**两个端点都测**（POST /files 与 GET /files —— 前者走本层的
+    `_files_for_role`，后者同样，但两条路径的响应体是分别组装的）。
+    """
+    resp = _post_files(client, project, tender=[("坏文件.docx", b"not a docx")])
+    assert resp.status_code == 200, resp.text
+
+    posted = resp.json()["tender"][0]
+    assert posted["error"] == "format-mismatch", repr(posted["error"])
+    assert "\x1f" not in posted["error"], repr(posted["error"])
+    assert "坏文件.docx" not in posted["error"], repr(posted["error"])
+
+    fetched = _listing(client, project)["tender"][0]
+    assert fetched["error"] == "format-mismatch", repr(fetched["error"])
+    assert "\x1f" not in fetched["error"], repr(fetched["error"])
+    assert "坏文件.docx" not in fetched["error"], repr(fetched["error"])
+
+    # 后端仍保留完整的编码形状（含文件名）——解码是**读出时**做的，
+    # 存储形状不能为了「error 干净」而被一起削掉：`file_id` 的单射性
+    # （C-1）与签名的敏感性（I-2）都依赖它。
+    assert fetched["file_path"] == "upload-failed:format-mismatch\x1f坏文件.docx", \
+        repr(fetched["file_path"])
+
+
+# ------------------------------------- 新增 F（N-4：空组字段 = 显式清空）
+
+def test_empty_group_field_is_explicit_clear(client, project, docx_bytes):
+    """N-4 判别：「字段出现但为空」= 显式清空该组，不是 422、不是失败行。
+
+    brief F-1 说「空列表是合法的显式意图」，参考实现里「删到 0 个文件」走的
+    就是空列表（`DuplicateCheckPage.tsx:1101` 的
+    `persistSelectedFiles(tenderFiles, [])`）。修复前任何「出现但空」的形状
+    都 422（`Expected UploadFile`）—— P3d 前端照参考实现改写会直接撞死。
+
+    修复后契约：`filename=""` 的空 part（浏览器空 `<input type="file">` 的
+    原生提交形状，`_post_files` 的 `tender=[]` 就是发它）= 显式清空该组；
+    与「字段完全不出现」（两组都缺席 → 400，用例 2）的区分保持不变。
+    """
+    # 铺底：两组各 1 个文件
+    _post_files(client, project,
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标.docx", docx_bytes)])
+    assert len(_listing(client, project)["tender"]) == 1
+
+    # 场景 1（对照 persistSelectedFiles(tenderFiles, [])）：
+    # tender 传真文件、bid 显式空 → 200，tender 全量替换、bid 清空。
+    resp = _post_files(client, project,
+                       tender=[("招标2.docx", docx_bytes)], bid=[])
+    assert resp.status_code == 200, resp.text
+    listing = _listing(client, project)
+    assert [f["file_name"] for f in listing["tender"]] == ["招标2.docx"]
+    assert listing["bid"] == [], \
+        f"bid 显式空 part 应清空该组，实际：{listing['bid']}"
+
+    # 场景 2：两组都显式空 = 全清空，不撞 400（两字段都**缺席**才是 400）。
+    resp = _post_files(client, project, tender=[], bid=[])
+    assert resp.status_code == 200, resp.text
+    listing = _listing(client, project)
+    assert listing["tender"] == [], \
+        f"tender 显式空 part 应清空该组，实际：{listing['tender']}"
+    assert listing["bid"] == []
+
+    # 空组不是失败行：库里不能留下 filename="" 的解析失败痕迹。
+    rows = _db(client).execute(
+        "SELECT file_name FROM duplicate_check_files WHERE project_id = ?",
+        (project,)).fetchall()
+    assert rows == [], f"空组请求不应留下任何行，实际：{rows}"
 
 
 # ------------------------------------------------------ 新增 A（C-1 判别）
