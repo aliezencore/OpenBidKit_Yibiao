@@ -1448,6 +1448,12 @@ def test_png_is_recompressed_to_a_data_url(tmp_path):
     assert prepared.data_url.startswith("data:")
     assert ";base64," in prepared.data_url
     assert prepared.width == 100 and prepared.height == 80
+    # 裁定 R21：上面三条只证明「解码过」（宽高来自 Pillow），**证不了重编码**——
+    # 「只解码取尺寸、却把原字节 base64 回去」的变异体也能全绿，而本用例的名字
+    # 恰恰叫 recompressed。下面两条才钉住重编码：无 alpha 的 PNG 按约定必须
+    # 重编码成 JPEG，且产物字节与输入不同。
+    assert prepared.mime == "image/jpeg"
+    assert prepared.data != media.data
 
 
 def test_transcode_turns_bmp_into_a_model_readable_format(tmp_path):
