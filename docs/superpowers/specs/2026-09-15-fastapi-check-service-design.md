@@ -132,11 +132,19 @@ rejection_check_documents(
   parser_label TEXT, sort_order INTEGER DEFAULT 0, imported_at TEXT, updated_at TEXT,
   PRIMARY KEY (project_id, document_id))
 
--- 缺口（2026-09-17 记）：上面这张表全是**通用文档字段**（没有一列是废标项特有的），
--- 而查重（P3）同样需要「哪个文件、哪份 markdown、哪个 hash」的簿记，本 spec 却**没有**
--- 给查重定义对应表。裁定 R24 把 P2a 的职责定为「落盘 + 算哈希 + 返回 SavedDocument」，
--- 数据库行留给 P3/P4 在各自域表里写；因此 P3 需要自己决定是复用这张表的形状、
--- 还是抽一张中性的 documents 表。**这一决定不能拖到 P3 实现中途再做。**
+-- 缺口裁定（2026-09-19 结）：上面这张表全是**通用文档字段**（没有一列是废标项特有的），
+-- 而查重（P3）同样需要「哪个文件、哪份 markdown、哪个 hash」的簿记。
+-- **裁定 R31：不抽中性 documents 表，两域各用各的域表。**
+--   · 废标项侧用 rejection_check_documents（形状见上，含 role/source/parser_label 等
+--     废标项结果页要展示的字段）；
+--   · 查重侧用 duplicate_check_files（文件簿记，含 extension/size/modified_at/role）
+--     + duplicate_check_content_files（每文件的 markdown 落盘路径与长度），两张表都是
+--     现有实现已有的，见 sqliteDatabase.cjs:391 / :431。
+-- 理由：(1) 这两张表并非同形——rejection_check_documents 没有 extension/size/modified_at，
+--   duplicate_check_files 没有 parser_label；(2) 抽中性表需要额外 join 或冗余列，而两域的
+--   「文档」概念其实不同（废标项按 document_id 寻址，查重按 file_id 寻址且 role 只有
+--   tender/bid 两值）；(3) 现有实现就是两张表，抽表属「顺手优化」，与 R4「原样搬」冲突。
+-- 两域各自维护自己的簿记，P2a 的 SavedDocument 只是「落盘 + 算哈希」的返回值，不落库。
 
 rejection_check_extraction(
   project_id TEXT PK, status TEXT DEFAULT 'idle', content TEXT DEFAULT '',
@@ -502,11 +510,16 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | # | 计划 | 产出（可独立验证） | 能力 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端跑通 `collect_json_response` 的成功与修复路径；「domain 不 import 框架」护栏生效 | 纯本地 | — | **已完成**（22 提交 / 123 测试） |
-| P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown；`save_uploaded_document()` 落盘正文与原件副本并返回**含 `content_hash` 的 `SavedDocument`**；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **执行中（8/9）** |
-| P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | 计划待写 |
+| P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown；`save_uploaded_document()` 落盘正文与原件副本并返回**含 `content_hash` 的 `SavedDocument`**；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **已完成**（85 提交 / 290 测试，与 P2b 合并计数） |
+| P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | **已完成** |
 | P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | 计划待写 |
-| P3 | 标书查重领域 + 查重闭环 | 上传招标 / 投标文件 → 跑查重 → 看结果 → 导 Excel（**零模型依赖**，可端到端验证） | 纯本地 | P1、P2a、P2b（图片重复比对需图片提取） | — |
+| **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **本轮计划** |
+| **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | 计划待写 |
+| **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | 计划待写 |
+| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | 计划待写 |
 | P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
+
+**P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
 **关于 P2a / P2b 为何不合并**：合起来约 13 个任务，单个计划的 TDD 步骤会到 90+ 条，可执行性下降。两者**没有依赖关系**（图片管线不读 markdown，文档解析不碰图片），可以任意顺序或并行实施。**若你更希望一个大计划，可以合并**——那是我对计划粒度的取舍，不是能力约束。
 
