@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,6 +108,54 @@ def _as_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+class _SignatureFileRef:
+    """文件项的只读属性视图，只为 `compute_analysis_signature` 而存在。
+
+    `FileLike` 协议要求 `file_path` / `size` / `modified_at` 三个**属性**，而入参
+    既可能是 `DuplicateFileInput`（有真属性）也可能是 `list_files` 取回的 dict。
+    编排器侧有同名同形的 `_MappingFileRef`（`duplicate_runner.py:186`）—— 两处
+    各自持有是为了不让 infra 仓储反向依赖 tasks 编排器；**渲染语义必须保持一致**，
+    否则上传签名与 `POST /analysis` 签名不同，幂等永远命中不了（brief F-2）。
+    """
+
+    __slots__ = ("_item",)
+
+    def __init__(self, item: Any) -> None:
+        self._item = item
+
+    def _get(self, key: str) -> Any:
+        item = self._item
+        if isinstance(item, Mapping):
+            return item.get(key)
+        return getattr(item, key, None)
+
+    @property
+    def file_path(self) -> Any:
+        return self._get("file_path")
+
+    @property
+    def size(self) -> Any:
+        return self._get("size")
+
+    @property
+    def modified_at(self) -> Any:
+        return self._get("modified_at")
+
+
+def _signature_of_rows(tender_files: Sequence[Any],
+                       bid_files: Sequence[Any]) -> str:
+    """按 tender → bid 顺序对两组文件算 sha1 签名。
+
+    顺序与 `createSignature`（`duplicateCheckStore.cjs:71-76` /
+    `duplicateCheckService.cjs:126-131`）一致：`[...tenderFiles, ...bidFiles]`，
+    每组**保持入参顺序**（即 `sort_order`）。
+    """
+    from app.domain.duplicate.signature import compute_analysis_signature
+
+    ordered = [*tender_files, *bid_files]
+    return compute_analysis_signature([_SignatureFileRef(item) for item in ordered])
 
 
 def _as_float(value: Any) -> float:
@@ -273,6 +321,88 @@ class DuplicateRepository:
         """只删 `duplicate_check_files`；下游表靠 FK CASCADE 级联清空。"""
         self._db.execute(
             "DELETE FROM duplicate_check_files WHERE project_id = ?", (project_id,))
+
+    def save_files(self, project_id: str, tender_files: Sequence[DuplicateFileInput],
+                   bid_files: Sequence[DuplicateFileInput], *,
+                   step: str | None = None,
+                   active_analysis_tab: str | None = None) -> str:
+        """全量替换两组文件 + 作废四段 + 重写 `current_signature`，**单事务**。
+
+        对齐参考实现 `saveFiles`（`duplicateCheckStore.cjs:913-927`）的事务体：
+
+        ```js
+        const saved = db.transaction(() => {
+          ensureMetaRow();
+          replaceFiles({tenderFiles, tenderFile, bidFiles});   // 无 role 过滤的全删全插
+          clearAnalysisState();                                // 清四段 + detail 表
+          updateMeta({step, active_analysis_tab});
+          return loadDuplicateCheck();
+        })();
+        ```
+
+        三件事必须收在**一个**事务里：`replace_files` / `delete_sections` / `save_meta`
+        各自开事务，拼起来会出现「文件换了但四段还是旧的 `success`」的中间态 ——
+        下次 `POST /analysis` 时 T4 编排器的幂等判据（四段 `success` + 四段签名都等于
+        本次签名）会**误判为已完成而跳过重跑**（brief F-2）。
+
+        签名由**入库行**按 tender→bid 顺序算出，与 `POST /analysis` 构造 payload 后
+        由编排器算出的签名逐字节一致（`createSignature`，:262-300 末尾；
+        `duplicateCheckService.cjs:126-131`）。两处的包装手法见 `_signature_of_rows`。
+
+        `step` / `active_analysis_tab` 为 `None` 即「未携带」，保留旧值（同 `save_meta`）。
+
+        **已知延后（P3b）**：参考实现事务后还有一步 `clearDuplicateContentArtifacts()`
+        （删 content 产物目录）。服务端的产物路径归 `data_root` 管，且 P3a 还没产
+        content 文件，故本阶段不做——登记在 Task 5 报告的「已知缺口」。
+        """
+        timestamp = utc_now()
+        existing = self.get_meta(project_id)
+        new_step = (_normalize_step(step) if step is not None
+                    else (existing or {}).get("step", "upload"))
+        new_tab = (_normalize_tab(active_analysis_tab) if active_analysis_tab is not None
+                   else (existing or {}).get("active_analysis_tab", "metadata"))
+        signature = _signature_of_rows(tender_files, bid_files)
+
+        with self._db.transaction() as conn:
+            # 1) 全量替换两组文件：先无过滤删除（对齐 `replaceFiles:263`），再 tender → bid。
+            conn.execute(
+                "DELETE FROM duplicate_check_files WHERE project_id = ?", (project_id,))
+            for role, files in (("tender", tender_files), ("bid", bid_files)):
+                for index, item in enumerate(files):
+                    conn.execute(
+                        "INSERT INTO duplicate_check_files"
+                        "(project_id, file_id, role, file_name, file_path, extension,"
+                        " size, modified_at, sort_order, content_hash, created_at,"
+                        " updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (project_id, item.file_id, role, item.file_name, item.file_path,
+                         item.extension, _as_int(item.size), item.modified_at, index,
+                         item.content_hash, timestamp, timestamp))
+
+            # 2) 作废四段状态与全部 detail 表（`delete_sections` 的等价 SQL，
+            #    必须在同一事务内 —— 不能调 `delete_sections()` 那会另开事务）。
+            conn.execute(
+                "DELETE FROM duplicate_check_analysis_sections WHERE project_id = ?",
+                (project_id,))
+            for table in _DETAIL_TABLES:
+                conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
+            conn.execute(
+                "UPDATE duplicate_check_files SET content_hash = NULL, updated_at = ?"
+                " WHERE project_id = ?", (timestamp, project_id))
+
+            # 3) 元信息：step / tab / 新签名（对齐 `updateMeta`，:927 / :300）。
+            conn.execute(
+                "INSERT INTO duplicate_check_meta"
+                "(project_id, step, active_analysis_tab, current_signature,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(project_id) DO UPDATE SET"
+                " step = excluded.step,"
+                " active_analysis_tab = excluded.active_analysis_tab,"
+                " current_signature = excluded.current_signature,"
+                " updated_at = excluded.updated_at",
+                (project_id, new_step, new_tab, signature, timestamp, timestamp))
+        return signature
 
     # -------------------------------------------------------------- 四段状态
 

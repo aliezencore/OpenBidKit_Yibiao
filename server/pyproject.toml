@@ -11,6 +11,9 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic-settings>=2.4",
   "httpx>=0.27",
+  # FastAPI 的 multipart/form-data 端点（P3a 的 POST /duplicate/files）必需。
+  # 缺它时 FastAPI 在**路由注册期**就抛 RuntimeError，整个 app 起不来。
+  "python-multipart>=0.0.9",
   "mammoth>=1.6",
   "markdownify>=0.13",
   "beautifulsoup4>=4.12",

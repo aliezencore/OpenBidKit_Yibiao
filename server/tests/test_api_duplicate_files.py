@@ -1,0 +1,462 @@
+"""Task 5：查重文件簿记 API 的 HTTP 契约。
+
+契约来源是 brief `task-5-brief.md` 的「测试要求」12 条 + 参考实现
+`client/electron/services/duplicateCheckStore.cjs`。夹具沿用 P1
+`tests/test_api_tasks.py:14-19` 的写法（不要另起一套）。
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.config import Settings
+from app.main import create_app
+
+DOCX_MIME = ("application/vnd.openxmlformats-officedocument"
+             ".wordprocessingml.document")
+
+
+@pytest.fixture
+def client(tmp_path):
+    settings = Settings(_env_file=None, data_root=tmp_path)
+    app = create_app(settings)
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def project(client):
+    return client.post("/projects", json={"name": "查重项目"}).json()["id"]
+
+
+@pytest.fixture
+def docx_bytes(tmp_path):
+    """真实可解析的 docx（复用 P2a 夹具，不要手搓字节）。"""
+    from tests.parsing_fixtures import build_docx
+
+    path = build_docx(tmp_path / "doc.docx", blocks=[("p", "投标文件正文内容")])
+    return path.read_bytes()
+
+
+def _post_files(client, project, *, tender=None, bid=None):
+    """两个分组字段全量上传；`None` 表示该分组字段不出现（歧义请求用）。
+
+    注意：multipart 里「字段不出现」与「字段出现但空」是两件事——前者是歧义请求
+    （→400），后者是显式清空该组。只在真正传 `[]` 时才发空列表。
+    """
+    data = {}
+    files = []
+    if tender is not None:
+        if tender == []:
+            data["tender"] = ""
+        else:
+            files.extend(("tender", (name, payload, DOCX_MIME))
+                         for name, payload in tender)
+    if bid is not None:
+        if bid == []:
+            data["bid"] = ""
+        else:
+            files.extend(("bid", (name, payload, DOCX_MIME))
+                         for name, payload in bid)
+    return client.post(f"/projects/{project}/duplicate/files", data=data, files=files)
+
+
+def _listing(client, project):
+    resp = client.get(f"/projects/{project}/duplicate/files")
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _state(client, project):
+    resp = client.get(f"/projects/{project}/duplicate/state")
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _db(client):
+    return client.app.state.yibiao.db
+
+
+# --------------------------------------------------------------- 必有用例 1
+
+def test_upload_records_role_and_metadata(client, project, docx_bytes):
+    resp = _post_files(client, project, tender=[("招标文件.docx", docx_bytes)])
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["tender"][0]["role"] == "tender"
+    assert body["tender"][0]["file_name"] == "招标文件.docx"
+    assert body["tender"][0]["size"] == len(docx_bytes)
+
+
+# --------------------------------------------------------------- 必有用例 2
+
+def test_upload_rejects_ambiguous_request_without_any_group(client, project):
+    """两个分组字段都不出现 → 400（F-1 后取代了原「非法 role」用例）。
+
+    新形状下请求体里没有 `role` 字段了，所以「非法 role → 400」这个用例在
+    字面上已经不可能存在；它守护的不变量（「形状说不清意图时必须响亮失败，
+    不能静默当成清空」）改由「两个分组字段都不出现」来承载。
+    """
+    resp = client.post(f"/projects/{project}/duplicate/files", data={}, files=[])
+    assert resp.status_code == 400, resp.text
+
+
+# --------------------------------------------------------------- 必有用例 3
+
+def test_upload_replaces_all_files_not_just_same_role(client, project, docx_bytes):
+    """F-1 判别：全量替换两组，不是按 role 替换。
+
+    先传 tender+bid，再**只传 bid**；按 role 替换的实现会保留 tender，本用例会红。
+    """
+    _post_files(client, project,
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标a.docx", docx_bytes)])
+    before = _listing(client, project)
+    assert [f["file_name"] for f in before["tender"]] == ["招标.docx"]
+
+    _post_files(client, project, bid=[("投标b.docx", docx_bytes)])
+
+    after = _listing(client, project)
+    assert after["tender"] == [], "tender 未被清空 → 不是全量替换语义"
+    assert [f["file_name"] for f in after["bid"]] == ["投标b.docx"]
+
+
+# --------------------------------------------------------------- 必有用例 4
+
+def test_state_returns_four_sections_and_overall(client, project):
+    body = _state(client, project)
+    assert body["overallProgress"] == 0
+    assert set(body["sections"]) == {"metadata", "outline", "content", "image"}
+    assert body["message"] == "标书查重分析运行中。"
+    # F-3：load_analysis 的 camelCase 键原样透传（前端按它消费）
+    for key in ("tenderFiles", "bidFiles", "step", "activeAnalysisTab",
+                "metadataAnalysis", "outlineAnalysis", "contentAnalysis",
+                "imageAnalysis", "contentFiles"):
+        assert key in body, f"GET /state 缺少 load_analysis 的键 {key}"
+
+
+# --------------------------------------------------------------- 必有用例 5
+
+def test_analysis_requires_files(client, project):
+    resp = client.post(f"/projects/{project}/duplicate/analysis",
+                       json={"force": False})
+    assert resp.status_code == 400, resp.text
+
+
+# --------------------------------------------------------------- 必有用例 6
+
+def test_export_is_not_implemented_in_p3a(client, project):
+    assert client.get(f"/projects/{project}/duplicate/export").status_code == 501
+
+
+# --------------------------------------------------------------- 必有用例 7
+
+def test_upload_clears_sections_and_rewrites_signature(client, project, docx_bytes):
+    """F-2 判别：上传 = 破坏性操作，作废四段 + 重写签名。
+
+    预置四段 success + 旧签名 → 上传 → 四段清空（overallProgress 归零）
+    且 `current_signature` 等于用当前文件算出的签名。
+    """
+    state = client.app.state.yibiao
+    _post_files(client, project, tender=[("招标.docx", docx_bytes)])
+    rows = state.duplicate.list_files(project)
+    expected_signature = _signature_of(rows)
+
+    for section in ("metadata", "outline", "content", "image"):
+        state.duplicate.save_section(project, section, status="success", progress=100,
+                                     message="旧结果", signature="stale-signature",
+                                     updated_at="2026-01-01T00:00:00Z")
+    state.duplicate.save_meta(project, current_signature="stale-signature")
+
+    resp = _post_files(client, project, tender=[("招标2.docx", docx_bytes)])
+    assert resp.status_code == 200, resp.text
+
+    body = _state(client, project)
+    assert body["overallProgress"] == 0, "四段未作废 → 上传没有清分析状态"
+    meta = state.duplicate.get_meta(project)
+    current = _signature_of(state.duplicate.list_files(project))
+    assert meta["current_signature"] == current
+    assert meta["current_signature"] != "stale-signature"
+    assert current != expected_signature  # 换了文件名 → 签名确实变了
+
+
+# --------------------------------------------------------------- 必有用例 8
+
+def test_upload_and_analysis_signatures_agree(client, project, docx_bytes):
+    """F-2 硬约束：上传路径与 POST /analysis 路径算出的签名必须一致。
+
+    这是防「两处签名算法不一致」的唯一哨兵。
+
+    **判别点必须落在签名本身，不能只看四段是否 success**：两处算法不一致时，
+    编排器 `__call__:335` 的 `self._signature_reader(project_id) != signature`
+    为真 → 走 `_discard_previous` 把旧结果作废后**照常重跑**，四段最终**仍是**
+    `success`（只是多跑了一次）。所以「四段 success」对签名不一致**不敏感**
+    （变异探针 2 实测：12 passed）。真正敏感的断言是：
+
+    1. 上传后库里存的 `current_signature` 恰好等于**编排器据 payload 算出的**
+       签名 —— 用 `repo.list_files()` 组装 payload 后按 T4 的算法复算，与
+       `current_signature` 逐字节比对；
+    2. 跑完后的四段签名也都等于这一个值（而不是「等于另一个值」）。
+
+    这样即便换了实现路径，只要两处不一致，第 1 条立刻红。
+    """
+    state = client.app.state.yibiao
+    _post_files(client, project,
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标.docx", docx_bytes)])
+
+    # 上传写入的签名
+    uploaded = state.duplicate.get_meta(project)["current_signature"]
+
+    first = client.post(f"/projects/{project}/duplicate/analysis", json={"force": False})
+    assert first.status_code == 200, first.text
+    first_task = first.json()["taskId"]
+
+    # 编排器据「按 list_files 组装的 payload」算出的签名（与 runner 同一算法）
+    rows = state.duplicate.list_files(project)
+    expected = _signature_from_rows(rows)
+    assert uploaded == expected, (
+        "上传路径与编排器路径的签名不一致："
+        f"上传={uploaded} 编排器={expected}")
+
+    _wait_for_task(state, first_task)
+    task = state.tasks.get(first_task)
+    assert task["status"] == "success", task
+
+    sections = state.duplicate.get_sections(project)
+    assert all(sections[s]["status"] == "success" for s in
+               ("metadata", "outline", "content", "image")), sections
+    # 跑完后的段签名必须也是同一个值（不是「另一个算法算出的另一个值」）
+    assert all(sections[s]["signature"] == expected for s in
+               ("metadata", "outline", "content", "image")), {
+        s: sections[s]["signature"] for s in ("metadata", "outline", "content", "image")}
+
+    # 第二次：四段已 success 且签名一致 → 命中幂等（runner 直接报 100 返回）
+    second = client.post(f"/projects/{project}/duplicate/analysis", json={"force": False})
+    assert second.status_code == 200, second.text
+    second_task = _wait_for_task(state, second.json()["taskId"])
+    sections_after = state.duplicate.get_sections(project)
+    assert all(sections_after[s]["status"] == "success" for s in
+               ("metadata", "outline", "content", "image")), sections_after
+    assert second_task["status"] == "success", second_task
+    assert sections_after["metadata"]["signature"] == expected
+
+
+# --------------------------------------------------------------- 必有用例 9
+
+def test_delete_files_cascades_through_api(client, project, docx_bytes):
+    """F-4：不加 CASCADE，改为经 HTTP 面钉住文件级级联的实际行为。"""
+    state = client.app.state.yibiao
+    _post_files(client, project,
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标.docx", docx_bytes)])
+    files = state.duplicate.list_files(project)
+    fid = files[0]["file_id"]
+
+    # 手工插满 5 张子表（T2 已实现的 FK CASCADE 才是被钉的对象）。
+    _seed_child_rows(state, project, fid)
+    # 预置四段为 success —— 否则 (b) 的 overallProgress == 0 是空断言
+    # （四段本来就缺段、本来就是 0，无论 DELETE 有没有清段状态都会绿）。
+    for section in ("metadata", "outline", "content", "image"):
+        state.duplicate.save_section(project, section, status="success", progress=100,
+                                     message="旧结果", signature="stale-signature",
+                                     updated_at="2026-01-01T00:00:00Z")
+    assert _state(client, project)["overallProgress"] == 100, "预置四段失败"
+
+    resp = client.delete(f"/projects/{project}/duplicate/files")
+    assert resp.status_code == 200, resp.text
+
+    # (a) 两组皆空
+    after = _listing(client, project)
+    assert after["tender"] == [] and after["bid"] == []
+
+    # (b) 四段归零（DELETE 必须同时清段状态，不能只删文件）
+    assert state.duplicate.get_sections(project) == {}, "DELETE 未清四段状态"
+    body = _state(client, project)
+    assert body["overallProgress"] == 0
+
+    # (c) 直查库：5 张子表本项目无行
+    db = _db(client)
+    for table in ("duplicate_check_content_files",
+                  "duplicate_check_metadata_items",
+                  "duplicate_check_outline_items",
+                  "duplicate_check_image_files",
+                  "duplicate_check_content_occurrences"):
+        rows = db.query(f"SELECT * FROM {table} WHERE project_id = ?", (project,))
+        assert rows == [], f"{table} 未级联清空：{rows}"
+
+
+# -------------------------------------------------------------- 必有用例 10
+
+def test_upload_while_analysis_running_is_signature_guarded(
+        client, project, docx_bytes):
+    """F-5：不做取消，改为显式表达「running 的旧任务会被签名守卫拦下」。
+
+    预置四段 success + 旧签名 + 一个 `domain="duplicate"` `status="running"` 的
+    孤儿任务 → 上传 → 断言四段被清空、旧签名被重写。孤儿任务即使跑完拿旧签名
+    写段状态，也会被 T4 的签名守卫拦住，不污染本次上传的状态。
+    """
+    state = client.app.state.yibiao
+    _post_files(client, project, tender=[("招标.docx", docx_bytes)])
+
+    for section in ("metadata", "outline", "content", "image"):
+        state.duplicate.save_section(project, section, status="success", progress=100,
+                                     message="旧结果", signature="stale-signature",
+                                     updated_at="2026-01-01T00:00:00Z")
+    state.duplicate.save_meta(project, current_signature="stale-signature")
+    state.tasks.create(task_id="duplicate-analysis_orphan", project_id=project,
+                       domain="duplicate", kind="duplicate-analysis",
+                       payload={"tenderFiles": [], "bidFiles": []},
+                       created_at="2026-01-01T00:00:00Z")
+    state.tasks.mark_running("duplicate-analysis_orphan", "2026-01-01T00:00:01Z")
+
+    resp = _post_files(client, project, tender=[("新招标.docx", docx_bytes)])
+    assert resp.status_code == 200, resp.text
+
+    sections = state.duplicate.get_sections(project)
+    assert sections == {} or all(
+        s["status"] != "success" or s["signature"] != "stale-signature"
+        for s in sections.values()
+    ), sections
+    body = _state(client, project)
+    assert body["overallProgress"] == 0
+
+
+# -------------------------------------------------------------- 必有用例 11
+
+def test_analysis_payload_carries_stored_files(client, project, docx_bytes):
+    """payload 的项必须带 `file_path`/`size`/`modified_at`（T4 靠它们算签名）。"""
+    state = client.app.state.yibiao
+    _post_files(client, project,
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标.docx", docx_bytes)])
+
+    client.post(f"/projects/{project}/duplicate/analysis", json={"force": False})
+
+    tasks = state.tasks.list_for_project(project)
+    assert len(tasks) == 1, tasks
+    payload = json.loads(tasks[0]["payload_json"])
+    assert len(payload["tenderFiles"]) == 1
+    assert len(payload["bidFiles"]) == 1
+    for item in [*payload["tenderFiles"], *payload["bidFiles"]]:
+        assert item["file_path"]
+        assert item["size"] == len(docx_bytes)
+        # `modified_at` 是文件 mtime（JS `toISOString()` 形状），不是 content hash。
+        # 它是签名的第三个分量（`path|size|modified`），形状错了签名就不对齐。
+        assert item["modified_at"].endswith("Z"), item["modified_at"]
+        assert "T" in item["modified_at"], item["modified_at"]
+        assert len(item["modified_at"]) == len("2026-01-01T00:00:00.000Z")
+
+
+# -------------------------------------------------------------- 必有用例 12
+
+def test_parse_failure_marks_row_error_and_continues(client, project, docx_bytes):
+    """一次传两个文件，其中一个坏字节 → 请求仍 200，好文件正常入库。"""
+    resp = _post_files(client, project, tender=[
+        ("好文件.docx", docx_bytes),
+        ("坏文件.docx", b"this is definitely not a docx"),
+    ])
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    tender = {item["file_name"]: item for item in body["tender"]}
+    assert set(tender) == {"好文件.docx", "坏文件.docx"}
+    good, bad = tender["好文件.docx"], tender["坏文件.docx"]
+
+    # 好文件：有真路径、真 mtime、无 error
+    assert good["file_id"]
+    assert good["error"] is None
+    assert good["modified_at"], "好文件应带文件 mtime"
+    assert not good["file_path"].startswith("upload-failed:")
+
+    # 坏文件：error 痕迹 + 占位路径 + 无 mtime
+    assert bad["error"], bad
+    assert bad["file_path"] == f"upload-failed:{bad['error']}"
+    assert bad["modified_at"] is None
+    assert bad["size"] == len(b"this is definitely not a docx")
+
+    # 坏文件不阻断整批：好文件仍在列表里
+    listing = _listing(client, project)
+    assert [f["file_name"] for f in listing["tender"]] == ["好文件.docx", "坏文件.docx"]
+
+    # 坏文件的 error 在 GET /files 上也能读到（不是只在 POST 响应里）
+    by_name = {f["file_name"]: f for f in listing["tender"]}
+    assert by_name["坏文件.docx"]["error"] == bad["error"]
+
+
+# ------------------------------------------------------------------- 帮手
+
+def _signature_of(rows):
+    """用 domain 的签名函数 + runner 的包装手法算入库行的签名。"""
+    from app.domain.duplicate.signature import compute_analysis_signature
+
+    class _Ref:
+        def __init__(self, item):
+            self._item = item
+
+        @property
+        def file_path(self):
+            return self._item.get("file_path")
+
+        @property
+        def size(self):
+            return self._item.get("size")
+
+        @property
+        def modified_at(self):
+            return self._item.get("modified_at")
+
+    ordered = ([r for r in rows if r["role"] == "tender"]
+               + [r for r in rows if r["role"] == "bid"])
+    return compute_analysis_signature([_Ref(r) for r in ordered])
+
+
+def _signature_from_rows(rows):
+    """`_signature_of` 的别名，语义相同（用例 8 用它表达「编排器会算出这个值」）。"""
+    return _signature_of(rows)
+
+
+def _wait_for_task(state, task_id, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task = state.tasks.get(task_id)
+        if task and task["status"] in ("success", "error", "cancelled", "interrupted"):
+            return task
+        time.sleep(0.02)
+    return state.tasks.get(task_id)
+
+
+def _seed_child_rows(state, project, file_id):
+    """在 5 张子表里各插一行（content_occurrences 需先有 content_duplicates）。"""
+    db = state.db
+    db.execute(
+        "INSERT INTO duplicate_check_content_files"
+        "(project_id, file_id, status, content_length, updated_at)"
+        " VALUES (?, ?, 'success', 10, '2026-01-01T00:00:00Z')", (project, file_id))
+    db.execute(
+        "INSERT INTO duplicate_check_metadata_items"
+        "(project_id, id, file_id, key, label, value, sort_order)"
+        " VALUES (?, 1, ?, 'k', '标签', 'v', 0)", (project, file_id))
+    db.execute(
+        "INSERT INTO duplicate_check_outline_items"
+        "(project_id, item_id, file_id, level, title, normalized_title,"
+        " path_titles_json, normalized_path, source, sort_order)"
+        " VALUES (?, 'i1', ?, 1, '标题', '标题', '[]', '', 'tender', 0)",
+        (project, file_id))
+    db.execute(
+        "INSERT INTO duplicate_check_image_files"
+        "(project_id, file_id, status, image_count, unique_image_count, updated_at)"
+        " VALUES (?, ?, 'success', 1, 1, '2026-01-01T00:00:00Z')", (project, file_id))
+    db.execute(
+        "INSERT INTO duplicate_check_content_duplicates"
+        "(project_id, duplicate_id, sentence, normalized, file_ids_json)"
+        " VALUES (?, 'd1', '句子', '句子', '[]')", (project,))
+    db.execute(
+        "INSERT INTO duplicate_check_content_occurrences"
+        "(project_id, id, duplicate_id, file_id, occurrence_count)"
+        " VALUES (?, 1, 'd1', ?, 1)", (project, file_id))

@@ -433,3 +433,102 @@ def test_replace_outline_items_keeps_same_file_parent(repo):
     items = repo.load_analysis("p1")["outlineAnalysis"]["files"][0]["items"]
     assert {item["id"]: item["parent_id"] for item in items} == {"child": "parent",
                                                                  "parent": None}
+
+
+# ------------------------------------------------------- save_files（Task 5）
+
+def test_save_files_replaces_both_roles_atomically(repo):
+    """全量替换两组：只传 bid 时 tender 也清空（F-1）。返回新签名。"""
+    repo.save_files("p1", [_file("t", "t.docx")], [_file("b1", "b1.docx")])
+    signature = repo.save_files("p1", [], [_file("b2", "b2.docx")])
+
+    assert repo.list_files("p1", "tender") == []
+    assert [r["file_id"] for r in repo.list_files("p1", "bid")] == ["b2"]
+    assert isinstance(signature, str) and len(signature) == 40
+
+
+def test_save_files_assigns_sort_order_per_role(repo):
+    repo.save_files("p1", [_file("t1", "t1.docx"), _file("t2", "t2.docx")],
+                    [_file("b1", "b1.docx")])
+    assert [r["sort_order"] for r in repo.list_files("p1", "tender")] == [0, 1]
+    assert [r["sort_order"] for r in repo.list_files("p1", "bid")] == [0]
+
+
+def test_save_files_clears_sections_and_detail_tables(repo):
+    """上传是破坏性操作：四段状态 + 全部 detail 表一并清空（F-2）。"""
+    repo.save_files("p1", [_file("t", "t.docx")], [_file("b", "b.docx")])
+    for section in ("metadata", "outline", "content", "image"):
+        repo.save_section("p1", section, status="success", progress=100,
+                          message="旧", signature="stale",
+                          updated_at="2026-01-01T00:00:00Z")
+    repo.replace_content_files("p1", [{"file_id": "t", "status": "success"}])
+    repo.replace_image_files("p1", [{"file_id": "t", "status": "success"}])
+
+    repo.save_files("p1", [_file("t2", "t2.docx")], [])
+
+    assert repo.get_sections("p1") == {}
+    assert repo._db.query(
+        "SELECT * FROM duplicate_check_content_files WHERE project_id = 'p1'") == []
+    assert repo._db.query(
+        "SELECT * FROM duplicate_check_image_files WHERE project_id = 'p1'") == []
+
+
+def test_save_files_rewrites_current_signature(repo):
+    """签名由入库行按 tender→bid 顺序算出（与编排器同一算法）。"""
+    from app.domain.duplicate.signature import compute_analysis_signature
+
+    repo.save_files("p1", [_file("t", "t.docx", size=7)],
+                    [_file("b", "b.docx", size=9)])
+    rows = repo.list_files("p1")
+
+    class _Ref:
+        def __init__(self, item):
+            self._item = item
+
+        @property
+        def file_path(self):
+            return self._item.get("file_path")
+
+        @property
+        def size(self):
+            return self._item.get("size")
+
+        @property
+        def modified_at(self):
+            return self._item.get("modified_at")
+
+    expected = compute_analysis_signature(
+        [_Ref(r) for r in rows if r["role"] == "tender"]
+        + [_Ref(r) for r in rows if r["role"] == "bid"])
+    assert repo.get_meta("p1")["current_signature"] == expected
+
+
+def test_save_files_returns_signature_of_written_rows(repo):
+    """返回值就是写进库的那一个签名（调用方不必自己再算一遍）。"""
+    signature = repo.save_files("p1", [_file("t", "t.docx")], [])
+    assert repo.get_meta("p1")["current_signature"] == signature
+
+
+def test_save_files_updates_step_and_tab(repo):
+    repo.save_files("p1", [_file("t", "t.docx")], [], step="analysis",
+                    active_analysis_tab="content")
+    meta = repo.get_meta("p1")
+    assert meta["step"] == "analysis"
+    assert meta["active_analysis_tab"] == "content"
+
+
+def test_save_files_keeps_step_when_omitted(repo):
+    """不传 step/tab → 保留旧值（与 save_meta 的 None 语义一致）。"""
+    repo.save_meta("p1", step="analysis", active_analysis_tab="image")
+    repo.save_files("p1", [_file("t", "t.docx")], [])
+    meta = repo.get_meta("p1")
+    assert meta["step"] == "analysis"
+    assert meta["active_analysis_tab"] == "image"
+
+
+def test_save_files_clears_content_hash_from_previous_upload(repo):
+    repo.save_files("p1", [_file("t", "t.docx")], [])
+    repo.replace_content_files("p1", [{"file_id": "t", "status": "success",
+                                       "content_hash": "abc"}])
+    repo.save_files("p1", [_file("t", "t.docx")], [])
+    assert all(row["content_hash"] is None for row in repo.list_files("p1"))

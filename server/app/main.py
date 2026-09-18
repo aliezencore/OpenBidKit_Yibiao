@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import health, projects, tasks
+from app.api import duplicate, health, projects, tasks
 from app.api.deps import build_state
 from app.config import Settings, get_settings
 
@@ -24,6 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(projects.router)
     app.include_router(tasks.router)
+    app.include_router(duplicate.router)
     return app
 
 
