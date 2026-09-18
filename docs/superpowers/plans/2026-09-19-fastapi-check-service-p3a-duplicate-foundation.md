@@ -103,7 +103,7 @@ def build_section_stats_patch(section: str, analysis: Mapping[str, Any]) -> dict
   1. 所有表去掉 `CHECK (id = 1)` / `type TEXT PRIMARY KEY` 的单例设计，改为带 `project_id`
   2. 并入 `tasks` 表的两张（`duplicate_check_tasks` 不建）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `server/tests/test_db_schema.py` 追加：
 
@@ -183,7 +183,7 @@ def test_apply_schema_is_idempotent_with_duplicate_tables(tmp_path):
     apply_schema(db)  # 不抛
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_db_schema.py -k duplicate -q
@@ -191,7 +191,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_db_schema.py -k dupli
 
 预期：`test_duplicate_tables_exist` 失败（缺 13 张表）。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 在 `server/app/infra/db/schema.py` 的 `SCHEMA_STATEMENTS` 末尾追加。**逐字照抄参考实现的列定义**，改动处已用注释标出：
 
@@ -460,17 +460,17 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_db_schema.py -k dupli
         REFERENCES duplicate_check_duplicate_images(project_id, image_id) ON DELETE CASCADE
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_db_schema.py -q
 ```
 
-- [ ] **Step 5: 变异探针（必做）**
+- [x] **Step 5: 变异探针（必做）**
 
 临时把 `duplicate_check_meta` 的 `PRIMARY KEY (project_id)` 改回 `CHECK (id = 1)` 风格（或直接删掉 `project_id` 列），跑 `test_duplicate_check_meta_is_project_scoped`，**必须变红**。确认后改回。在报告里贴出红/绿两次输出。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/app/infra/db/schema.py server/tests/test_db_schema.py
@@ -498,7 +498,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
   - `@dataclass(frozen=True) class DuplicateFileInput`：`file_id: str`、`file_name: str`、`file_path: str`、`extension: str`、`size: int = 0`、`modified_at: str | None = None`、`content_hash: str | None = None`
   - 模块级 `_UNSET = object()`（哨兵，实现「未携带则保留」语义）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 创建 `server/tests/test_repositories_duplicate.py`。**必须复用 P1 的 conftest 夹具**（若 `conftest.py` 已有 `db` fixture 则直接用；没有则在文件内自建，见下）：
 
@@ -599,7 +599,7 @@ def test_delete_files_cascades_scoped_rows(repo):
     assert repo.load_analysis("p1")["contentFiles"] == []
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_repositories_duplicate.py -q
@@ -607,7 +607,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_repositories_duplicat
 
 预期：`ModuleNotFoundError: app.infra.repositories.duplicate`。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 创建 `server/app/infra/repositories/duplicate.py`。要点：
 
@@ -634,19 +634,19 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_repositories_duplicat
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_repositories_duplicate.py -q
 ```
 
-- [ ] **Step 5: 变异探针（必做）**
+- [x] **Step 5: 变异探针（必做）**
 
 把 `save_section` 里「未携带则保留」的合并逻辑删掉（改成无条件覆盖），跑 `test_save_section_preserves_omitted_fields`，**必须变红**。贴出红/绿两次输出。
 
 同时给 `_next_row_id` 的变异做一次：改成常量 `1`，跑 `test_replace_content_files` 类用例（若当前用例没覆盖两条并发写就**先加一条**：同一项目连续两次 `replace_content_files` 且都带 2 行，断言两次都成功且 id 不冲突）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/app/infra/repositories/duplicate.py server/tests/test_repositories_duplicate.py
@@ -665,7 +665,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 - Consumes: 无（纯函数，零依赖）
 - Produces: 见上文「已定接口」小节的全部签名。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `server/tests/test_duplicate_signature.py`：
 
@@ -922,13 +922,13 @@ def test_stats_patch_empty_files_list_stays_empty_list():
     assert build_section_stats_patch("metadata", {"files": []}) == {"files": []}
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_signature.py tests/test_duplicate_progress.py tests/test_duplicate_state.py -q
 ```
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 `signature.py`：注意 sha1 输入是**字节**（`"...".join(...).encode("utf-8")`）。`modified_at` 为 `None` 时参考实现会插字面 `"null"`（JS 模板字符串）——**逐字对齐**：`f"{path}|{size}|{modified}"` 里 `modified` 为 `None` 时要输出 `"null"`，不是空串。加一条用例钉住：
 
@@ -949,13 +949,13 @@ def overall_progress(states):
 
 `state.py`：`SectionState` 用 `frozen=True` + `field(default_factory=dict)`；`build_section_stats_patch` 用四个显式分支 + `_pick(analysis, keys)` 助手（`if key in analysis`，不是 `analysis.get(key) is not None`）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_signature.py tests/test_duplicate_progress.py tests/test_duplicate_state.py -q
 ```
 
-- [ ] **Step 5: 变异探针（必做，三处）**
+- [x] **Step 5: 变异探针（必做，三处）**
 
 1. 把 `overall_progress` 的 `math.floor(x + 0.5)` 改成 `round(x)` → `test_overall_progress_averages_and_rounds_half_up` **必须变红**。
 2. 把 `analysis_progress` 里 `status in ("success", "error") → 100` 改成只认 `success` → `test_analysis_progress_error_is_100_...` **必须变红**。
@@ -963,7 +963,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_signature.p
 
 三处都贴出红/绿输出。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/app/domain/duplicate/ server/tests/test_duplicate_signature.py server/tests/test_duplicate_progress.py server/tests/test_duplicate_state.py
@@ -1034,7 +1034,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 11. **签名校验**：跑完后重读 `repo.get_meta(project_id)["current_signature"]`，若 ≠ 本次签名（用户已改动文件）→ **丢弃结果不落库**，`ctx.log` 记录并返回。
 12. **每次进度更新**：`ctx.progress(overall_progress(states), latest_analysis_message(states))`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 创建 `server/tests/test_duplicate_runner.py`：
 
@@ -1192,13 +1192,13 @@ def test_stale_signature_discards_results(repo):
 
 > 实现里 `_is_up_to_date` 与「跑完后的签名校验」都走 `self._signature_reader(project_id)`，**不直接调 `repo.get_meta`**。这是让这个测试成为真实归因测试的关键。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_runner.py -q
 ```
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 创建 `server/app/infra/tasks/duplicate_runner.py`。结构：
 
@@ -1228,19 +1228,19 @@ class DuplicateAnalysisRunner:
 `_reset` 的判据：`previous_state` 里的签名 ≠ 本次签名，或 `payload.force`，或四段不全 success。
 「跑完后的签名校验」在写终态**之前**调 `self._signature_reader(project_id)` 重新取值。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_runner.py -q
 ```
 
-- [ ] **Step 5: 变异探针（必做，三处）**
+- [x] **Step 5: 变异探针（必做，三处）**
 
 1. 去掉幂等分支（无条件重跑）→ `test_second_run_same_signature_is_idempotent` **必须变红**。
 2. 把 `metadata` 与 `content` 的并行改成串行（先 await metadata 再起 content）→ 「等待正文内容」消息时序用例 **必须变红**。若杀不掉，就**删掉该用例并在报告里说明它不敏感**（不要留一条杀不掉的断言）。
 3. 去掉签名校验 → `test_stale_signature_discards_results` **必须变红**。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/app/infra/tasks/duplicate_runner.py server/tests/test_duplicate_runner.py
@@ -1288,7 +1288,7 @@ def build_state(settings):
   - `POST /analysis` —— body `{"force": bool}`，提交任务，返回 `{"taskId": ...}`。
   - `GET /export` —— **P3a 返回 501**（导出属 P3d）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 创建 `server/tests/test_api_duplicate_files.py`。**沿用 P1 `tests/test_api_tasks.py:14-19` 的既有夹具写法**（不要另起一套）：
 
@@ -1374,13 +1374,13 @@ def test_export_is_not_implemented_in_p3a(client, project):
 
 > **路由挂载方式（已核实）**：`app/main.py` 用 `app.include_router(x.router)` **无全局前缀**，故路径就是 `/projects/{project_id}/duplicate/...`。测试里的路径即实际路径，不要再加 `/api`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_api_duplicate_files.py -q
 ```
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 要点：
 - `POST /files` 的落盘走 P2a 的 `save_uploaded_document`（**不要**重写解析）。**已核实签名**：
@@ -1399,18 +1399,18 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_api_duplicate_files.p
 - `GET /state` 的 `sections` 键是四段名，值是 `{status, progress, message, signature, stats}`；`overallProgress` / `message` 用 Task 3 的 domain 函数现算。
 - 路由全部放 `app/api/duplicate.py`，**domain 层不 import fastapi**（护栏测试会跑）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_api_duplicate_files.py -q
 ```
 
-- [ ] **Step 5: 变异探针（必做，两处）**
+- [x] **Step 5: 变异探针（必做，两处）**
 
 1. 把 `replace_files` 改成追加而非替换 → `test_upload_replaces_previous_files_of_same_role` **必须变红**。
 2. 把 `role` 白名单校验删掉 → `test_upload_rejects_unknown_role` **必须变红**。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/app/api/duplicate.py server/app/main.py server/tests/test_api_duplicate_files.py
@@ -1428,7 +1428,7 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 **Interfaces:**
 - **不新建 SSE 端点。** P1 已有全局 `GET /tasks/{task_id}/events`（`app/api/tasks.py:25`）与 `GET /tasks/{task_id}`，查重的进度与日志**直接走它们**。先读 `app/api/tasks.py` 与 `app/infra/tasks/events.py` 确认 domain 是否需要登记；若需要，加进既有白名单即可，**不要**写第二套事件通道。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 创建 `server/tests/test_duplicate_e2e.py`。**这是本计划唯一的端到端验收**，必须真实跑通任务引擎：
 
@@ -1534,17 +1534,17 @@ def _task_logs_contain(client, task_id, needle):
 
 > **`_task_logs_contain` 的兜底**：先读 `app/api/tasks.py` 确认有没有日志端点。若没有，**不要新建**——改为让 `test_second_analysis_is_idempotent_via_api` 断言「第二次任务的 `GET /tasks/{id}` 的 `stageLabel`/`progress` 直接是 100 且没有中间进度」，这同样能证明幂等命中。选哪条由实现者读完代码定，并在报告中说明。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_e2e.py -q
 ```
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 接任何因真实编排暴露的问题（**大概率会暴露**：stub 与真实 TaskContext 的接口不匹配、`payload` 的实际形状、`previous_state` 的实际形状）。改的是实现，不是测试。
 
-- [ ] **Step 4: 跑全部测试**
+- [x] **Step 4: 跑全部测试**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest -q
@@ -1552,11 +1552,11 @@ cd server && .venv/Scripts/python.exe -m pytest -q
 
 **必须 ≥ 300 passed，0 failed。**
 
-- [ ] **Step 5: 变异探针（必做）**
+- [x] **Step 5: 变异探针（必做）**
 
 把幂等分支的 `previous_state` 判据改成恒假（永不幂等），跑 `test_second_analysis_is_idempotent_via_api`，**必须变红**。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add -A server/app server/tests
@@ -1571,19 +1571,19 @@ git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(s
 - Modify: `docs/superpowers/specs/2026-09-15-fastapi-check-service-design.md`（§15 状态列）
 - Modify: `docs/superpowers/plans/2026-09-19-fastapi-check-service-p3a-duplicate-foundation.md`（勾选）
 
-- [ ] **Step 1: 回填 spec §15**
+- [x] **Step 1: 回填 spec §15**
 
 把 P3a 行状态改为 `**已完成**（N 提交 / M 测试）`，并补一行「P3b 起替换 stub，编排与状态机不动」的说明。
 
-- [ ] **Step 2: 勾选本计划全部步骤**
+- [x] **Step 2: 勾选本计划全部步骤**
 
-- [ ] **Step 3: 跑一次全量测试留底**
+- [x] **Step 3: 跑一次全量测试留底**
 
 ```bash
 cd server && .venv/Scripts/python.exe -m pytest -q
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/
