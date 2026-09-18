@@ -174,3 +174,78 @@ def test_init_closes_connection_when_pragma_fails(tmp_path, monkeypatch):
 
     assert len(created) == 1
     assert created[0].close_calls == 1
+
+
+DUPLICATE_TABLES = (
+    "duplicate_check_meta",
+    "duplicate_check_files",
+    "duplicate_check_content_files",
+    "duplicate_check_metadata_items",
+    "duplicate_check_outline_items",
+    "duplicate_check_outline_groups",
+    "duplicate_check_outline_pairwise",
+    "duplicate_check_content_duplicates",
+    "duplicate_check_content_occurrences",
+    "duplicate_check_image_files",
+    "duplicate_check_duplicate_images",
+    "duplicate_check_image_occurrences",
+    "duplicate_check_analysis_sections",
+)
+
+
+def test_duplicate_tables_exist(tmp_path):
+    db = Database(tmp_path / "t.sqlite")
+    apply_schema(db)
+    names = {row["name"] for row in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    missing = [t for t in DUPLICATE_TABLES if t not in names]
+    assert missing == [], f"缺表：{missing}"
+
+
+def test_duplicate_check_tasks_is_not_created(tmp_path):
+    """任务统一收归 tasks 表（spec §5.1），不得再建 domain 私有任务表。"""
+    db = Database(tmp_path / "t.sqlite")
+    apply_schema(db)
+    names = {row["name"] for row in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "duplicate_check_tasks" not in names
+
+
+def test_duplicate_check_meta_is_project_scoped(tmp_path):
+    """不复用 CHECK(id=1)，改 UNIQUE(project_id)，能容纳两个项目各一行。"""
+    db = Database(tmp_path / "t.sqlite")
+    apply_schema(db)
+    db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p1','a','t')")
+    db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p2','b','t')")
+    for pid in ("p1", "p2"):
+        db.execute(
+            "INSERT INTO duplicate_check_meta(project_id, created_at, updated_at) "
+            "VALUES (?, 'now', 'now')", (pid,))
+    assert db.query_one("SELECT COUNT(*) AS c FROM duplicate_check_meta")["c"] == 2
+
+
+def test_duplicate_section_rows_are_project_scoped(tmp_path):
+    """analysis_sections 同理：section 变成 (project_id, section) 联合主键。"""
+    db = Database(tmp_path / "t.sqlite")
+    apply_schema(db)
+    db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p1','a','t')")
+    db.execute(
+        "INSERT INTO duplicate_check_analysis_sections"
+        "(project_id, section, status, message, updated_at) "
+        "VALUES ('p1','metadata','running','', 'now')")
+    row = db.query_one("SELECT status FROM duplicate_check_analysis_sections")
+    assert row["status"] == "running"
+
+
+def test_duplicate_files_role_order_index(tmp_path):
+    db = Database(tmp_path / "t.sqlite")
+    apply_schema(db)
+    idx = {row["name"] for row in db.query(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_duplicate_check_files_role_order" in idx
+
+
+def test_apply_schema_is_idempotent_with_duplicate_tables(tmp_path):
+    db = Database(tmp_path / "t.sqlite")
+    apply_schema(db)
+    apply_schema(db)  # 不抛
