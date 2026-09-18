@@ -65,6 +65,53 @@ def test_analysis_progress_non_finite_falls_back_without_raising(value):
     assert analysis_progress(_s("running", progress=value)) == 0
 
 
+def test_analysis_progress_parseable_huge_value_clamps_to_99():
+    """F6：`"1e308"` 是**可解析**的有限巨大值，clamp 后得 99 —— 不是 0。
+
+    这条容易与上面的「非有限回落 0」混淆：`"1e400"` 溢出成 `Infinity`，
+    而 `"1e308"` 仍在 double 范围内（约 `1.8e308` 才是上界），
+    `float("1e308")` 是有限值，`int()` 也不抛。
+
+    参考实现（Node 实测）：`Math.min(1e308, 99) === 99`，故本实现必须给 **99**。
+    钉住它，避免有人看到「巨大值」就把阈值判断顺手写成回落 0 ——
+    那样会和参考实现分叉（99 vs 0），且 99 才是「进度拉满但未完成」的正确语义。
+    """
+    assert analysis_progress(_s("running", progress="1e308")) == 99
+    assert analysis_progress(_s("running", progress=1e308)) == 99
+
+
+def test_analysis_progress_lenient_parsing_is_registered():
+    """F5：登记并钉住「我们比 JS `Number()` 更宽容」这条**反向偏离**。
+
+    `float()` 接受 `Unicode Nd` 数字与下划线分隔符，JS `Number()` 不接受：
+
+    | 输入 | JS `Number()`（Node 实测） | 参考实现（`|| 0` 后） | 本实现 |
+    |---|---|---|---|
+    | `"７"`（全角 7） | `NaN` | `0` | `7` |
+    | `"１２"` | `NaN` | `0` | `12` |
+    | `"1_0"` | `NaN` | `0` | `10` |
+
+    我们**有意保留**这个宽容行为（理由见 `_parse_progress` docstring 的裁定）：
+    无副作用、无数据风险，且参考实现自己的严格性并不自洽
+    （它接受 `Number("0x10") === 16`）。此用例把该行为**固定下来**，
+    任何一边的收紧/放开都会在 CI 里被看见。
+    """
+    assert analysis_progress(_s("running", progress="７")) == 7
+    assert analysis_progress(_s("running", progress="１２")) == 12
+    assert analysis_progress(_s("running", progress="1_0")) == 10
+
+
+def test_analysis_progress_hex_string_diverges_from_reference():
+    """F5 的第二个实例：`"0x10"` 两端**方向相反**，一并钉住。
+
+    Node 实测参考实现：`Number("0x10") === 16` → `analysisProgress` 得 **16**；
+    本实现 `float("0x10")` 抛 `ValueError` → 回落 **0**。
+    这是**唯一一处我们比参考实现更严格**的输入，登记在案（不为它引入十六进制解析）。
+    """
+    assert analysis_progress(_s("running", progress="0x10")) == 0
+    assert analysis_progress(_s("running", progress="16")) == 16
+
+
 @pytest.mark.parametrize("value,expected", [
     (0, 0), (25, 25), (50, 50), (75, 75),
     # 修正计划笔误：`running` 的 progress 在 analysisProgress 里被 clamp 到上限 99

@@ -47,7 +47,20 @@ def normalize_section_status(value: object, *, fallback: str = "pending") -> str
 
 @dataclass(frozen=True)
 class SectionState:
-    """单段分析的持久化状态。不可变，便于跨层传递而不怕被就地改写。"""
+    """单段分析的持久化状态。
+
+    **`frozen=True` 的确切保证（fix-round 1 / F4 订正）**：只禁止**属性名重新绑定**
+    （`s.status = "x"` 抛 `FrozenInstanceError`），此外因字段不可变、`dataclass`
+    会一并生成 `__hash__`（该哈希只有在 `stats` 为可哈希映射时才可用）。
+
+    **它不保证的内容**：`stats` 字段是 `Mapping`，`frozen` **拦不住就地改写** ——
+    `s.stats["k"] = 2` 仍会改到同一个 dict（`default_factory=dict` 产出的是可变
+    `dict`），且该实例因此**不可哈希**（`hash(s)` 抛 `TypeError: unhashable type`）。
+    这是刻意的取舍：`stats` 是部分更新补丁（见 `build_section_stats_patch`），
+    上游需要往里塞嵌套的原始 JSON，不冻结它更实用。
+
+    结论：本对象是「**浅不可变**」的传输载体，**不要**当作深不可变的共享值使用。
+    """
 
     status: str = "pending"
     progress: int = 0

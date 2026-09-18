@@ -48,6 +48,31 @@ def test_section_state_is_frozen():
         SectionState().status = "x"
 
 
+def test_section_state_frozen_is_shallow_only():
+    """F4：`frozen=True` 只拦属性重新绑定，拦不住 `stats` 的**就地改写**。
+
+    这条不是「应该发生」的理想行为，而是**现状的精确刻画**——写下来是为了
+    防止下游把 `SectionState` 当成深不可变的共享值（那样会踩到静默的串改）。
+    同时也钉住它**不可哈希**（`dict` 字段），避免有人误以为能塞进 `set`/当 key。
+    """
+    state = SectionState()
+    state.stats["injected"] = 1  # frozen 不拦这一手
+    assert state.stats == {"injected": 1}
+    with pytest.raises(TypeError):
+        hash(state)
+
+
+def test_section_state_instances_do_not_share_stats_dict():
+    """`default_factory=dict` 的意义：每个实例拿到**各自**的空 dict。
+
+    若误写成 `stats: Mapping[str, Any] = {}`（可变默认值），两个实例会共享同一个
+    dict，一处改到处变。这条钉住工厂语义。
+    """
+    a, b = SectionState(), SectionState()
+    a.stats["x"] = 1
+    assert b.stats == {} and a.stats is not b.stats
+
+
 def test_stats_patch_metadata_whitelist():
     analysis = {"contentExtraction": {"a": 1}, "metadataExtraction": {"b": 2},
                 "logs": ["x"], "files": [{"file_id": "f", "file_name": "n",
