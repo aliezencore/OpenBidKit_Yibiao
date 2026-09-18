@@ -38,8 +38,6 @@ from app.main import create_app
 DOCX_MIME = ("application/vnd.openxmlformats-officedocument"
              ".wordprocessingml.document")
 
-IDEMPOTENT_MESSAGE = "标书查重分析已完成，无需重复分析。"
-
 
 @pytest.fixture
 def client(tmp_path):
