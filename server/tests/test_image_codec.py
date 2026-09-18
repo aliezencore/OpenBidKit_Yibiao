@@ -29,6 +29,9 @@ def test_png_is_recompressed_to_a_data_url(tmp_path):
     assert prepared.data_url.startswith("data:")
     assert ";base64," in prepared.data_url
     assert prepared.width == 100 and prepared.height == 80
+    # 无 alpha 的 PNG 按约定必须重编码成 JPEG，且产物字节与输入不同
+    assert prepared.mime == "image/jpeg"
+    assert prepared.data != media.data
 
 
 def test_transcode_turns_bmp_into_a_model_readable_format(tmp_path):
