@@ -1503,6 +1503,11 @@ def test_large_image_is_scaled_down_to_max_edge(tmp_path):
     prepared = prepare_image(media, max_edge=200)
 
     assert (prepared.width, prepared.height) == (200, 100)
+    # 裁定 R22：上面那条**证不了真的缩过**——width/height 来自 compute_target_size
+    # 并被原样上报，与 `_encode` 是否执行 resize 无关。把 `resized = image`（永不缩放）
+    # 变异后上面那条仍绿，而用例名里的「缩了」恰恰没被钉住。解回产物看真实尺寸：
+    decoded = Image.open(io.BytesIO(base64.b64decode(prepared.data_url.split(",", 1)[1])))
+    assert decoded.size == (200, 100)
 
 
 def test_undecodable_png_is_skipped_not_raised(tmp_path):
