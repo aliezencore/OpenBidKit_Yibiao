@@ -5,7 +5,7 @@
 的所有位置共享跳过/失败结果，避免同一张图被反复上传。
 
 落盘布局：`<data_root>/projects/<project_id>/assets/<content_hash>.<ext>`。
-`project_id` 复用 `service.validate_project_id` 的同一道净化守卫（P2a 终审 F1），
+`project_id` 复用 `path_safety.validate_project_id` 的同一道净化守卫（P2a 终审 F1，
 不在这里另写一份。
 
 R24 — 出现位置的 media_name 与 word/media 条目**不保证一一对应**：
@@ -18,12 +18,14 @@ docx 不该因为一条悬空引用就整体失败。这不是丢信息：`extra
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.infra.parsing.docx_assets import AssetOccurrence, MediaFile, extract_docx_visual_assets
 from app.infra.parsing.image_codec import DEFAULT_MAX_EDGE, PreparedImage, prepare_image
-from app.infra.parsing.service import validate_project_id
+from app.infra.parsing.path_safety import validate_project_id
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,9 @@ def save_docx_assets(
         payload = prepared.data if prepared.action != "skip" else media.data
         extension = _asset_extension(media, prepared)
         target = assets_dir / f"{content_hash}{extension}"
-        target.write_bytes(payload)
+        # 原子落盘：先写同目录临时文件，再 os.replace 覆盖（同卷移动在 Windows 上原子）。
+        # 中途失败不会在盘上留下**截断**的资产，P4 才不会把半张图喂给视觉模型（F3）。
+        _atomic_write_bytes(target, payload)
         saved.append(StoredAsset(
             content_hash=content_hash,
             path=str(target),
@@ -102,3 +106,21 @@ def save_docx_assets(
             prepared=prepared,
         ))
     return saved
+
+
+def _atomic_write_bytes(target: Path, payload: bytes) -> None:
+    """写临时文件后 `os.replace` 到最终路径；失败时清理临时文件，绝不留下残骸。"""
+    target = Path(target)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.remove(tmp_name)
+        except OSError:
+            pass
+        raise

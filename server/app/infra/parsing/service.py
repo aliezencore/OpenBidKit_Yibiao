@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.domain.shared.errors import ParsingError
+from app.infra.parsing.path_safety import validate_project_id
 from app.infra.parsing.router import parse_document
 
-# 安全单段路径：大小写字母、数字、`. _ -`，非空。`.`/`..` 为特殊路径分量，
-# 会触发目录穿越，单独排除（裁定 P2a 终审 F1）。
-_SAFE_PROJECT_ID = re.compile(r"^[A-Za-z0-9._-]+$")
-_SPECIAL_PATH_COMPONENTS = frozenset({"", ".", ".."})
+# `validate_project_id` 已下沉到叶子模块 `path_safety`（P2b 终审 F4），此处再导出以保持
+# 本模块 API 稳定——`service.validate_project_id` 仍可调用。
 
 
 @dataclass(frozen=True)
@@ -85,22 +83,3 @@ def save_uploaded_document(
         format_kind=parsed.format_kind,
         extension=parsed.extension,
     )
-
-
-def validate_project_id(project_id: str) -> None:
-    """project_id 必须是一个安全的单段路径，不得触发目录穿越（裁定 P2a 终审 F1）。
-
-    P3/P4 的上传端点会把 URL 路径参数喂进来，这里进行一次性的净化，而不是指望
-    每个未来端点都记得。拒绝：空串、含 `..`/分隔符/绝对路径的非法字符、以及 `.`/`..`
-    这类特殊路径分量。不静默改写 id。
-    """
-    if not isinstance(project_id, str) or project_id in _SPECIAL_PATH_COMPONENTS:
-        raise ParsingError(
-            f"非法的 project_id：{project_id!r}",
-            code="invalid-project-id",
-        )
-    if not _SAFE_PROJECT_ID.match(project_id):
-        raise ParsingError(
-            f"非法的 project_id：{project_id!r}（只允许字母、数字、. _ -）",
-            code="invalid-project-id",
-        )

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.domain.shared.errors import ParsingError
+from app.infra.parsing.image_plan import half_up
 
 # 对齐现有 docxVisualAssetExtractor.cjs:13 的 MIME_BY_EXTENSION
 MIME_BY_EXTENSION = {
@@ -44,6 +45,23 @@ def open_docx_zip(path: Path) -> zipfile.ZipFile:
         ) from error
 
 
+def _read_zip_entry(archive: zipfile.ZipFile, name: str, docx_path: Path) -> bytes:
+    """读 zip 条目；读失败（坏 CRC、截断条目等）归一为 ParsingError。
+
+    否则裸的 `BadZipFile`/`OSError` 会漏出——而本模块其它失败路径都走 `ParsingError`，
+    P3/P4 错误处理抓不到（F2）。与 `open_docx_zip` 用同一个 code：二者对用户而言都是
+    「这不是一个能用的 DOCX」。
+    """
+    try:
+        return archive.read(name)
+    except (zipfile.BadZipFile, OSError) as error:
+        raise ParsingError(
+            "文件解析失败：DOCX 条目读取出错",
+            code="docx-open-failed",
+            path=str(docx_path),
+        ) from error
+
+
 def list_media_files(docx_path: Path) -> list[MediaFile]:
     """列出 `word/media/*` 下的每个文件（对齐 extractDocxVisualAssets 的 mediaFiles）。"""
     docx_path = Path(docx_path)
@@ -56,10 +74,17 @@ def list_media_files(docx_path: Path) -> list[MediaFile]:
             )
         media: list[MediaFile] = []
         for name in archive.namelist():
-            # 只收一级目录下的文件：`word/media/a/b.png` 不是标准布局
-            if not name.startswith("word/media/") or "/" in name[len("word/media/"):]:
+            # 只收一级目录下的文件：`word/media/a/b.png` 不是标准布局。
+            # 目录条目 `word/media/`（remainder 为空、无 `/`）也会被 `name.endswith("/")`
+            # 拦下——否则它会变成 data=b""、content_hash=sha256(b"") 的**固定常量**伪资产，
+            # 既命不中参考的 `/^word\/media\/[^/]+$/` 校验，又会在去重键上与任何空文件相撞（F1）。
+            if (
+                not name.startswith("word/media/")
+                or "/" in name[len("word/media/"):]
+                or name.endswith("/")
+            ):
                 continue
-            data = archive.read(name)
+            data = _read_zip_entry(archive, name, docx_path)
             extension = Path(name).suffix.lower()
             media.append(
                 MediaFile(
@@ -188,7 +213,14 @@ def extract_section_title(index: ParagraphIndex, position: int) -> str | None:
     """向前全篇回溯：先找标题样式/编号段落，再退一步找加粗短段落，都没有返回 None。
 
     **不加**「上一个非空段落」兜底——那会把正文首句当成章节名。
+
+    当 `position < 0`（drawing 落在任何 `<w:p>` 之外，或 XML 残缺）时直接返回
+    `None`，与 `extract_nearby_text` 的形状一致（F7）。注：Python 里
+    `range(position-1, -1, -1)` 在 position==-1 时本就是空区间，旧实现同样返回 None；
+    此处显式守卫只为形状一致与防御未来调用方传入其它负值。
     """
+    if position < 0:
+        return None
     for cursor in range(position - 1, -1, -1):
         candidate = index.paragraphs[cursor]
         if candidate.text and is_heading_paragraph(candidate):
@@ -277,8 +309,9 @@ def collect_drawing_occurrences(xml: str, relationships: dict[str, str],
         extent = _EXTENT_RE.search(block) or _EXTENT_REVERSED_RE.search(block)
         width = height = 0
         if extent:
-            width = round(int(extent.group(1)) / EMU_PER_PX)
-            height = round(int(extent.group(2)) / EMU_PER_PX)
+            # half-up（对齐参考 Math.round），不是内置 round() 的 half-even（F5）
+            width = half_up(int(extent.group(1)) / EMU_PER_PX)
+            height = half_up(int(extent.group(2)) / EMU_PER_PX)
         occurrences.append(_occurrence(
             target.replace("word/", "", 1), relationship_id, placement,
             width, height, part_label, index, match.start(),
@@ -301,8 +334,9 @@ def collect_vml_occurrences(xml: str, relationships: dict[str, str],
         height_pt = float(_VML_STYLE_HEIGHT_RE.search(style_block).group(1)) if _VML_STYLE_HEIGHT_RE.search(style_block) else 0.0
         occurrences.append(_occurrence(
             target.replace("word/", "", 1), match.group(1), "inline",
-            round(width_pt * PT_TO_EMU / EMU_PER_PX),
-            round(height_pt * PT_TO_EMU / EMU_PER_PX),
+            # half-up（对齐参考 Math.round），不是内置 round() 的 half-even（F5）
+            half_up(width_pt * PT_TO_EMU / EMU_PER_PX),
+            half_up(height_pt * PT_TO_EMU / EMU_PER_PX),
             part_label, index, match.start(),
         ))
     return occurrences
@@ -356,7 +390,7 @@ def extract_docx_visual_assets(docx_path: Path) -> DocxVisualAssets:
             )
 
         def read_text(name: str) -> str:
-            return archive.read(name).decode("utf-8") if name in names else ""
+            return _read_zip_entry(archive, name, docx_path).decode("utf-8") if name in names else ""
 
         parts: list[tuple[str, str, dict[str, str]]] = [
             ("正文", "word/document.xml", parse_relationships(read_text("word/_rels/document.xml.rels"))),

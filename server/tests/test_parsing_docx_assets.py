@@ -116,6 +116,61 @@ def test_nested_media_paths_are_skipped(tmp_path):
     assert "media/image1.png" in names
 
 
+def test_directory_media_entry_is_rejected(tmp_path):
+    """F1：字面量 `word/media/` 目录条目（remainder 为空、无 `/`）不能变成伪资产。
+
+    它会被 `name.endswith("/")` 拦下，不成为 `MediaFile`；而兄弟真实文件仍在。
+    参考 `/^word\\/media\\/[^/]+$/` 要求至少一个字符，会拒绝空 remainder。
+    """
+    source = _docx_with_two_images(tmp_path)
+    injected = tmp_path / "with-dir-entry.docx"
+    # 重建归档并注入一个字面量目录条目（append 对目录条目不可靠，故重建）。
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(
+        injected, "w", zipfile.ZIP_DEFLATED
+    ) as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        dst.writestr("word/media/", b"")
+
+    # 先钉前提：目录条目确实写进了 zip。
+    with zipfile.ZipFile(injected) as archive:
+        assert "word/media/" in archive.namelist()
+
+    names = [item.media_name for item in list_media_files(injected)]
+
+    assert "media/" not in names          # 目录条目不成为 media/ 资产
+    assert "media/image1.png" in names    # 兄弟真实文件仍在
+
+
+def test_media_listing_read_failure_normalized(tmp_path, monkeypatch):
+    """F2：media 读取失败（坏 CRC / 截断条目）必须归一为 ParsingError(docx-open-failed)，
+    不能漏出裸的 BadZipFile/OSError。"""
+    source = _docx_with_two_images(tmp_path)
+
+    def boom(self, name):
+        raise zipfile.BadZipFile("corrupt entry")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", boom)
+
+    with pytest.raises(ParsingError) as info:
+        list_media_files(source)
+    assert info.value.code == "docx-open-failed"
+
+
+def test_part_read_failure_normalized(tmp_path, monkeypatch):
+    """F2：part（document.xml / rels）读取失败同样归一为 ParsingError(docx-open-failed)。"""
+    source = _docx_with_two_images(tmp_path)
+
+    def boom(self, name):
+        raise zipfile.BadZipFile("corrupt entry")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", boom)
+
+    with pytest.raises(ParsingError) as info:
+        extract_docx_visual_assets(source)
+    assert info.value.code == "docx-open-failed"
+
+
 from app.infra.parsing.docx_assets import extract_run_text, parse_relationships, unescape_xml
 
 
@@ -255,6 +310,21 @@ def test_section_title_is_none_without_any_candidate():
     assert extract_section_title(index, 1) is None
 
 
+def test_section_title_returns_none_for_negative_position():
+    """F7：`position == -1`（drawing 落在任何 `<w:p>` 之外 / XML 残缺）必须返回 None。
+
+    旧实现不守卫：取 `range(-2, -1, -1)` → `paragraphs[-2]`，负索引回绕会把**倒数第二段**
+    当成章节标题返回（>=2 段时静默错值；<2 段时还会 IndexError）。新实现与
+    `extract_nearby_text` 形状一致，直接返回 None。
+    """
+    index = build_paragraph_index(_paragraphs(
+        ("第一段 总览", "", False),
+        ("第二章 实施要求", "", False),   # 倒数第二段、是标题样式会被旧逻辑误抓
+        ("第三段 说明", "", False),
+    ))
+    assert extract_section_title(index, -1) is None
+
+
 def test_nearby_text_prefers_own_paragraph():
     index = build_paragraph_index(_paragraphs(("上一段", "", False), ("自己的文字", "", False), ("下一段", "", False)))
     assert extract_nearby_text(index, 1) == "自己的文字"
@@ -390,6 +460,24 @@ def test_vml_occurrence_reads_size_from_shape_style():
     # 推导：80pt × 12700(EMU/pt) ÷ 9525(EMU/px) = 106.67 → 107；20pt 同法 = 26.67 → 27。
     assert occurrences[0].width == 107
     assert occurrences[0].height == 27
+
+
+def test_vml_geometry_uses_half_up_at_dot_five_boundary():
+    """F5：EMU 值除以 9525 恰好落在 .5 时，几何换算必须 half-up（对齐参考 Math.round）。
+
+    width:0.375pt → 0.375 × 12700(EMU/pt) = 4762.5 EMU ÷ 9525 = 0.5 恰好临界。
+    内置 `round(0.5) == 0`（half-even），`half_up(0.5) == 1`。用字面量期望钉死。
+    """
+    xml = (
+        '<w:p><w:r><w:pict><v:shape style="width:0.375pt;height:20pt;">'
+        '<v:imagedata r:id="rId4"/></v:shape></w:pict></w:r></w:p>'
+    )
+    index = build_paragraph_index(xml)
+
+    occurrence = collect_vml_occurrences(xml, RELS, "页眉", index)[0]
+
+    assert occurrence.width == 1        # half_up(0.5) == 1
+    assert occurrence.height == 27      # 20pt 不变
 
 
 def test_classify_asset_kind():

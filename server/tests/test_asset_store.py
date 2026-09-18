@@ -1,9 +1,11 @@
 import hashlib
+import os
 import zipfile
 
 import pytest
 
 from app.domain.shared.errors import ParsingError
+import app.infra.parsing.asset_store as asset_store
 from app.infra.parsing.asset_store import save_docx_assets
 from tests.parsing_fixtures import build_docx_with_images, make_image
 
@@ -94,7 +96,12 @@ def test_same_image_twice_is_stored_once_with_all_occurrences(tmp_path):
     assert assets[0].occurrences[0].media_name == assets[0].occurrences[1].media_name
 
 
-def test_content_hash_matches_the_stored_file(tmp_path):
+def test_content_hash_is_stored_at_its_hash_path(tmp_path):
+    """`content_hash` 键的是**原图字节**的哈希（去重键），而磁盘上的文件可能是重编码后的载荷。
+
+    对 `compress`/`transcode` 资产，落盘文件自身字节的哈希与 `content_hash` 不同——
+    本断言只验证「文件按 `content_hash` 落盘、size 与载荷一致」，不声称二者哈希相等。
+    """
     image = make_image(tmp_path / "a.png")
     source = _docx(tmp_path, [image])
 
@@ -160,6 +167,71 @@ def test_stored_identity_tracks_the_media_bytes(tmp_path):
     assets = save_docx_assets(data_root=tmp_path / "data", project_id="p1", docx_path=source)
 
     assert [asset.content_hash for asset in assets] == [hashlib.sha256(image.read_bytes()).hexdigest()]
+
+
+def test_r25_dedup_contract_one_file_and_one_prepare_per_hash(tmp_path, monkeypatch):
+    """R25 去重契约：同一张图出现两次 → 磁盘上**一份**文件、**一次** prepare_image。
+
+    先前 `test_same_image_twice_is_stored_once_with_all_occurrences` 只钉了 assets 数与
+    occurrences 数；一个「把文件写两遍」或「对同 hash 调用两次 prepare_image」的实现
+    照样绿。这里把磁盘文件数与 prepare_image 调用次数都钉死：
+    - 资产目录里恰好一个文件（不是两个、也不是零）；
+    - `prepare_image` 只被调用一次（每个 hash 一次准备）。
+    """
+    image = make_image(tmp_path / "same.png")
+    source = _docx(tmp_path, [image, image])
+
+    prepare_calls = []
+    real_prepare = asset_store.prepare_image
+
+    def spy(media, **kwargs):
+        prepare_calls.append(media.content_hash)
+        return real_prepare(media, **kwargs)
+
+    monkeypatch.setattr(asset_store, "prepare_image", spy)
+
+    assets = save_docx_assets(data_root=tmp_path / "data", project_id="p1", docx_path=source)
+
+    expected_hash = hashlib.sha256(image.read_bytes()).hexdigest()
+    assets_dir = tmp_path / "data" / "projects" / "p1" / "assets"
+    on_disk = [p for p in assets_dir.iterdir() if p.is_file()]
+    # 一份文件落盘（按 content_hash 命名）
+    assert len(on_disk) == 1
+    assert on_disk[0].name == f"{expected_hash}{assets[0].extension}"
+    # 每个 hash 只准备一次
+    assert prepare_calls == [expected_hash]
+
+
+def test_atomic_write_leaves_no_partial_temp_on_second_failure(tmp_path, monkeypatch):
+    """F3：第二份资产落盘失败时，第一份必须完整、第二份不应以残骸/.tmp 形式留在盘上。
+
+    实现改为「写同目录临时文件 + os.replace」。这里让 `os.replace` 在**第二次**调用时
+    抛错，验证：第一份已完整落盘、第二份 absent、且没有任何 `.tmp` 临时文件残留
+    （失败的临时文件必须被清理）。
+    """
+    a = make_image(tmp_path / "a.png", size=(40, 30), color=(255, 0, 0))
+    b = make_image(tmp_path / "b.png", size=(40, 30), color=(0, 255, 0))
+    source = _docx(tmp_path, [a, b])
+
+    state = {"n": 0}
+    real_replace = os.replace
+
+    def failing_replace(src, dst):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(asset_store.os, "replace", failing_replace)
+
+    with pytest.raises(OSError):
+        save_docx_assets(data_root=tmp_path / "data", project_id="p1", docx_path=source)
+
+    assets_dir = tmp_path / "data" / "projects" / "p1" / "assets"
+    # 不应有任何未清理的临时文件
+    assert not any(p.name.endswith(".tmp") for p in assets_dir.iterdir())
+    # 恰好一份：第一张图完整落盘，第二张因 replace 失败未落盘（absent）
+    assert len([p for p in assets_dir.iterdir() if p.is_file()]) == 1
 
 
 def test_stray_occurrence_without_matching_media_is_not_attached(tmp_path):

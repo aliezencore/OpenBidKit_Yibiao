@@ -1,6 +1,6 @@
 """图像格式决策。**纯函数：不读文件、不 import Pillow、无副作用。**
 
-把「压缩 / 透传 / 转码 / 跳过」的策略集中在一处（对齐 utils/imageFormat.cjs:52 的
+把「压缩 / 透传 / 转码 / 跳过」的策略集中在一处（对齐 utils/imageFormat.cjs:65 的
 resolveImagePlan），这样策略可以脱离真实图片单测，也不会与编解码实现纠缠。
 
 为什么 Python 侧明明用 Pillow（能解 PNG/JPEG/GIF/BMP/WebP/TIFF）却仍沿用
@@ -87,6 +87,16 @@ def resolve_image_plan(data: bytes, *, max_passthrough_bytes: int | None = None)
                      reason=f"图片格式不支持（{detected.label}）")
 
 
+def half_up(value: float) -> int:
+    """half-up 取整（对齐参考 `Math.round`），不是 Python 内置 `round()` 的 half-even。
+
+    `round(0.5) == 0`（银行家舍入），但 `Math.round(0.5) === 1`。两者只在值恰好落在
+    `.5` 临界时分道扬镳（如 6001×8000、edge=4000 → py 3000 / js 3001）。按「行为对齐
+    参考」的验收标准，这里对齐参考。**不要**改回 `round()`——那会重新引入 1px 的平台性偏离。
+    """
+    return math.floor(float(value) + 0.5)
+
+
 def compute_target_size(width: int, height: int, max_edge: int) -> tuple[int, int]:
     """等比缩放到最长边不超过 max_edge；**不放大**（对齐 computeTargetSize）。"""
     safe_width = max(1, int(width or 0))
@@ -96,9 +106,5 @@ def compute_target_size(width: int, height: int, max_edge: int) -> tuple[int, in
     if edge <= 0 or longest <= edge:
         return safe_width, safe_height
     scale = edge / longest
-    # 取整刻意用 half-up 的 `floor(x + 0.5)`，**不是**内置 `round()`：Python 的 `round()`
-    # 是 half-even（`round(3000.5) == 3000`），而参考实现的 `Math.round` 是 half-up
-    # （`Math.round(3000.5) === 3001`）。两者只在缩放值恰好落 .5 时分道扬镳
-    # （如 6001×8000、edge=4000 → py 3000 / js 3001）。按「行为对齐参考」的验收标准，
-    # 这里对齐参考。**不要**改回 `round()`——那会重新引入 1px 的平台性偏离。
-    return max(1, math.floor(safe_width * scale + 0.5)), max(1, math.floor(safe_height * scale + 0.5))
+    # 取整用 half-up（见 `half_up`），与参考 `Math.round` 对齐；行为不变。
+    return max(1, half_up(safe_width * scale)), max(1, half_up(safe_height * scale))
