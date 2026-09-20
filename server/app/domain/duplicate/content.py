@@ -171,8 +171,8 @@ _STRIP_LEADING_PATTERNS = [
     re.compile(r"^\s*[\d０-９]+(?:\\?[.．][\d０-９]+)*\s*(?:\\?[.．]|[)）、])\s*"),
     # :1677 数字编号 + 空格 + 字母/汉字/括号（lookahead）
     re.compile(r"^\s*[\d０-９]+(?:\\?[.．][\d０-９]+)*\s+(?=[A-Za-z\u4e00-\u9fff（(])"),
-    # :1678 半角括号 (数字|CJK数字)
-    re.compile(r"^\s*\((?:[\d０-９]+(?:\\?[.．][\d０-９]+)*|[" + _CJK_DIGITS + r"]+)\)\s*(?:\\?[.．]|[、])?\s*"),
+    # :1678 半角括号 (数字|CJK数字)——CJK 集含「百千万」（参考 :1678 逐字）
+    re.compile(r"^\s*\((?:[\d０-９]+(?:\\?[.．][\d０-９]+)*|[" + _CJK_DIGITS_LONG + r"]+)\)\s*(?:\\?[.．]|[、])?\s*"),
     # :1679 CJK 数字 + .．|、)）
     re.compile(r"^\s*[" + _CJK_DIGITS_LONG + r"]+\s*(?:\\?[.．]|[、)）])\s*"),
     # :1680 全角括号 （CJK数字|数字）
@@ -318,8 +318,14 @@ def is_markdown_table_row(line: str) -> bool:
 def clean_markdown_inline_text(value: str) -> str:
     """行内 markdown 清洗（:1569-1582）：图片三连剥 → 行内代码保文字 → 链接
     保文字 → ``<br>``→``\\n`` → 块级闭合标签→``\\n`` → 其余标签→空格 → ``**``/
-    ``__``/``~~`` 剥除；末尾解码 HTML 实体。"""
-    text = decode_basic_html_entities(str(value or ""))
+    ``__``/``~~`` 剥除；**最后**解码 HTML 实体。
+
+    评审 A F1 修正：参考把 ``decodeBasicHtmlEntities`` 包在整个 replace 链
+    **最外层**（:1569 ``return decodeBasicHtmlEntities(String(value||'')…)``
+    到 :1583 收口），即先剥完全部 markdown/HTML 语法再解码——这样
+    ``&lt;img …&gt;``、``&#x60;…&#x60;`` 这类「编码实体包装的语法」不会被
+    解码后的裸语法二次命中（参考行为：残留为普通文本）。"""
+    text = str(value or "")
     text = _MARKDOWN_IMAGE_PATTERN.sub(" ", text)
     text = _HTML_IMAGE_SRC_PATTERN.sub(" ", text)
     text = _HTML_IMAGE_PATTERN.sub(" ", text)
@@ -331,7 +337,7 @@ def clean_markdown_inline_text(value: str) -> str:
     text = _BOLD_PATTERN.sub(r"\1", text)
     text = _UNDERSCORE_PATTERN.sub(r"\1", text)
     text = _STRIKE_PATTERN.sub(r"\1", text)
-    return text
+    return decode_basic_html_entities(text)
 
 
 def clean_markdown_line(value: str) -> str:

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from app.domain.duplicate.content import (
+    clean_markdown_inline_text,
     decode_basic_html_entities,
     extract_content_text_blocks,
     extract_markdown_text_blocks,
@@ -42,6 +43,29 @@ def test_decode_basic_html_entities_order_and_numeric():
     assert decode_basic_html_entities("A&nbsp;B") == "A B"
     # 链式 &lt;a&gt; → <a>
     assert decode_basic_html_entities("&lt;a&gt;") == "<a>"
+
+
+def test_clean_markdown_inline_text_decodes_last_and_cjk_paren_pattern():
+    """评审 A F1/F2 修复的回归钉子（全部 Node oracle 真值，2026-09-20 实测）。
+
+    F1：参考把 decodeBasicHtmlEntities 包在 replace 链最外层（:1569-1583），
+    先剥完 markdown/HTML 语法**再**解码——编码实体包装的语法（如
+    ``&lt;img…&gt;``）解码后的裸语法不会被二次剥除，按字面残留。
+    F2：stripLeading 模式 3（:1678）的 CJK 数字集含「百千万」。
+    """
+    # F1：解码发生在剥标签之后 → 裸标签字面量残留（Node 真值 '<img src="x">'）
+    assert clean_markdown_inline_text("&lt;img src=&quot;x&quot;&gt;") == '<img src="x">'
+    # 编码反引号不再触发行内代码剥（解码后已无结构可剥）
+    assert clean_markdown_inline_text("&#x60;code&#x60;") == "`code`"
+    assert clean_markdown_inline_text("&lt;b&gt;bold&lt;/b&gt;") == "<b>bold</b>"
+    assert clean_markdown_inline_text("&#x5b;link&#x5d;(http://x)") == "[link](http://x)"
+    # 强调剥除仍发生在解码前 → **&amp;lt;x&amp;gt;** 剥 ** 得 &amp;lt;x&amp;gt; 再解码
+    assert clean_markdown_inline_text("**&amp;lt;x&amp;gt;**") == "&lt;x&gt;"
+    # 普通实体正常解码
+    assert clean_markdown_inline_text("a&amp;b") == "a&b"
+    # F2：模式 3 半角括号 CJK 集含「百千万」（Node 真值：剥净）
+    assert strip_leading_content_sequence("（百）工程概况") == "工程概况"
+    assert strip_leading_content_sequence("(百千) 工程概况") == "工程概况"
 
 
 # ---------------------------------------------------------------------------
