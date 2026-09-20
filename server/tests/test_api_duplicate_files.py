@@ -206,7 +206,7 @@ def test_upload_clears_sections_and_rewrites_signature(client, project, docx_byt
 
 # --------------------------------------------------------------- 必有用例 8
 
-def test_upload_and_analysis_signatures_agree(client, project, docx_bytes):
+def test_upload_and_analysis_signatures_agree(client, project):
     """F-2 硬约束：上传路径与 POST /analysis 路径算出的签名必须一致。
 
     这是防「两处签名算法不一致」的唯一哨兵。
@@ -223,11 +223,17 @@ def test_upload_and_analysis_signatures_agree(client, project, docx_bytes):
     2. 跑完后的四段签名也都等于这一个值（而不是「等于另一个值」）。
 
     这样即便换了实现路径，只要两处不一致，第 1 条立刻红。
+
+    **夹具偏离登记（T4）**：用 `.txt` 而非 docx——P2a 的 docx 解析器在
+    `include_images=True` 时显式抛 not-implemented（P2a 裁定 R2，docx 图片
+    属 P2b），而 T4 的 content_extraction 按裁定 R-P3b-1 必须
+    `include_images=True` 重解析。本测试验证的是签名一致性（与文件格式
+    无关），txt 让分析链路真实跑通；docx 图片链路待 P2b 落地后回归。
     """
     state = client.app.state.yibiao
     _post_files(client, project,
-                tender=[("招标.docx", docx_bytes)],
-                bid=[("投标.docx", docx_bytes)])
+                tender=[("招标.txt", "招标要求正文".encode("utf-8"))],
+                bid=[("投标.txt", "投标应答正文".encode("utf-8"))])
 
     # 上传写入的签名
     uploaded = state.duplicate.get_meta(project)["current_signature"]

@@ -35,7 +35,15 @@ from app.domain.duplicate.state import ANALYSIS_SECTIONS, SectionState
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.repositories.duplicate import DuplicateFileInput
-from app.infra.tasks.duplicate_runner import DuplicateAnalysisRunner
+from app.infra.tasks.duplicate_runner import (
+    CONTENT_EXTRACTION,
+    DuplicateAnalysisRunner,
+    _stub_sections,
+)
+from app.infra.tasks.duplicate_sections import (
+    build_content_extraction,
+    content_dir_for,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -181,6 +189,10 @@ async def upload_files(
 
         state.duplicate.save_files(project_id, tender_inputs, bid_inputs,
                                    step="upload")
+        # R-P3b-6：上传全量替换成功后清 content 目录（换文件则旧正文产物作废）。
+        # 复用 `_remove_tree` 的可观测清理（与参考 `saveFiles` 事务后调
+        # `clearDuplicateContentArtifacts` 语义对齐，:924）。
+        _remove_tree(content_dir_for(state.settings.data_root, project_id))
     except BaseException:
         # 滚回：DB 回滚由仓储的事务负责，这里补上「盘上不留孤儿」。
         # 兜 `BaseException` 而非 `Exception`：取消（`asyncio.CancelledError`）
@@ -249,6 +261,10 @@ def delete_files(project_id: str, state: AppState = Depends(get_state)) -> dict:
     """
     state.duplicate.delete_files(project_id)
     state.duplicate.delete_sections(project_id)
+    # R-P3b-6：参考 `clearDuplicateCheck`（:929-956）事务后删 content 目录与
+    # imported image batches（content 产物路径清理）。服务端此处同样清
+    # `duplicate_content/` 目录，与 POST /files 的清理保持一致。
+    _remove_tree(content_dir_for(state.settings.data_root, project_id))
     return {"tender": [], "bid": []}
 
 
@@ -326,9 +342,14 @@ async def start_analysis(project_id: str, body: AnalysisRequest | None = None,
         "bidFiles": bid_files,
         "force": bool(body.force) if body is not None else False,
     }
+    # P3b（Task 4）：把 stub 的 `content_extraction` 替换为真实重解析 runner。
+    # 其余四角色保持 P3a stub。改动最小化——只替换对应键。
+    sections = dict(_stub_sections())
+    sections[CONTENT_EXTRACTION] = build_content_extraction(state.settings.data_root)
     task_id = await state.engine.submit(
         project_id=project_id, domain=ANALYSIS_DOMAIN, kind=ANALYSIS_KIND,
-        payload=payload, runner=DuplicateAnalysisRunner(repo=state.duplicate),
+        payload=payload,
+        runner=DuplicateAnalysisRunner(repo=state.duplicate, sections=sections),
     )
     return {"taskId": task_id}
 

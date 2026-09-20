@@ -69,18 +69,21 @@ def _setup_project(client, tmp_path):
     """建项目 + 上传 tender/bid 两组 multipart（Task 5 F-1 的形状）。
 
     返回 `(project_id, base)`，`base = /projects/{id}/duplicate`。
-    """
-    from tests.parsing_fixtures import build_docx
 
+    **夹具偏离登记（T4）**：用 `.txt` 而非 docx——P2a 的 docx 解析器在
+    `include_images=True` 时显式抛 not-implemented（P2a 裁定 R2，docx 图片
+    属 P2b），而 T4 的 content_extraction 按裁定 R-P3b-1 必须
+    `include_images=True` 重解析，docx 会让分析必 error。本测试验证的是
+    「编排到四段 success」的链路（与格式无关），txt 让链路真实走通；docx
+    图片链路待 P2b 落地后回归。
+    """
     project = client.post("/projects", json={"name": "查重项目"}).json()["id"]
     base = f"/projects/{project}/duplicate"
-    tender = build_docx(tmp_path / "招标.docx", blocks=[("p", "招标要求正文")])
-    bid = build_docx(tmp_path / "投标A.docx", blocks=[("p", "投标应答正文")])
     resp = client.post(
         f"{base}/files",
         files=[
-            ("tender", ("招标.docx", tender.read_bytes(), DOCX_MIME)),
-            ("bid", ("投标A.docx", bid.read_bytes(), DOCX_MIME)),
+            ("tender", ("招标.txt", "招标要求正文".encode("utf-8"), "text/plain")),
+            ("bid", ("投标A.txt", "投标应答正文".encode("utf-8"), "text/plain")),
         ])
     assert resp.status_code == 200, resp.text
     return project, base

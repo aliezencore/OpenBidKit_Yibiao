@@ -114,11 +114,23 @@ class SectionOutput:
     这里把它显式声明为第三个字段，是为了让「P3a 的失败分支不可达」这件事
     **在接口上可见**，而不是一个藏在 `getattr` 默认值里的幽灵。
     P3a 的 stub 不设它，故四段终态当前**只可能是 `success`**（见 `_output_failed`）。
+
+    - `message`：段终态文案（P3b 冻结的第 4 字段，默认 `None`）。`None` 时主编排
+      用 P3a 默认文案（"分析完成" / "分析失败"）。本任务（T4）只在
+      `content_extraction` 产出上预留该字段，不设置它——具体文案由 T5 的
+      outline/content 段产出。向后兼容：P3a 既有构造不传，恒 `None`。
+    - `extraction`：段内 extraction 子统计（P3b 冻结的第 5 字段，默认 `None`），
+      形状 `{status, completed, total}`（对齐参考 `:2485` / `:2616` 的
+      `extraction` 子对象）。本任务在 `content_extraction` 产出上设置它；T5 的
+      `_commit_terminal_states` 把它并进该段 stats 的 `extraction` 键。向后兼容：
+      P3a 既有构造不传，恒 `None`。
     """
 
     stats: dict[str, Any] = field(default_factory=dict)
     rows: dict[str, list] = field(default_factory=dict)
     failed: bool = False
+    message: str | None = None
+    extraction: dict[str, Any] | None = None
 
 
 def content_output_of(content_files: Any) -> "SectionOutput | None":
@@ -133,6 +145,15 @@ def content_output_of(content_files: Any) -> "SectionOutput | None":
     故这里把「上游 → 提取角色产出」的解读收进一个函数：P3b 真正定义
     `content_files` 的形状时，只改这一处即可。P3a 的 stub 让两者恒等
     （`SectionOutput` 原样透传），所以现状是精确的。
+
+    **T4 的形状（向后兼容 P3a 测试）**：`content_extraction` 角色现在返回真实的
+    `SectionOutput`——`stats` 携带 `{status, completed, total}` 子对象（经
+    `_merge_metadata_stats` 落到 `metadata` 段 stats 的 `content_extraction` 键）、
+    `rows` 携带 `{"content_files": [...]}`、`extraction` 携带同一子对象、
+    `failed` 在任一文件 error 时为 `True`。P3a 既有 stub 仍返回空 `SectionOutput`
+    （`failed=False`），故 `content_output_of` 的恒等收口与 `_output_failed` /
+    `_merge_metadata_stats` 行为完全不变——本函数体无需更改，形状兼容由
+    `SectionOutput` 的字段默认值（`message=None` / `extraction=None`）保证。
 
     返回 `None` 表示正文不可用（提取失败或上游不是产出对象）——
     此时不产生任何「提取失败」的误判（失败判定由 `_guarded_call` 转出的
