@@ -20,9 +20,18 @@
 - **D2 ``\\d``/``\\b``/``\\w`` ASCII 语义（对齐 JS，非偏离）**：JS 的 ``\\d``
   只匹配 ASCII ``[0-9]``、``\\w`` 只 ``[A-Za-z0-9_]``、``\\b`` 按 ASCII 单词
   边界；Python ``re`` 默认 Unicode 语义（``\\d`` 匹配 Unicode 十进制数字、``\\w``
-  含汉字、``\\b`` 按 Unicode 边界）。**本模块所有含 ``\\d``/``\\b``/``\\w``
-  的正则一律加 ``re.ASCII``** 以对齐 JS——否则 ``\\b\\d+\\b`` 对「2026年」会因
+  含汉字、``\\b`` 按 Unicode 边界）。本模块所有含 ``\\d``/``\\b``/``\\w`` 的正则
+  **一律加 ``re.ASCII``** 以对齐 JS——否则 ``\\b\\d+\\b`` 对「2026年」会因
   「年」在 Python 里是 ``\\w`` 而匹配失败（比对结果将偏离参考）。
+
+  *评审修复环（F1）*：评审 A grep 审计发现 3 处含 ``\\d`` 的正则**当初遗漏
+  ``re.ASCII``**——``_TENDER_FIELD_ALLOW_PATTERN``（``附件\\d*``）、
+  ``_SCORE_RETRIEVAL_PATTERN``（``\\d{1,4}``）、``strip_tender_table_prefix``
+  的动态前缀正则（``\\d+``）。其中 ``_TENDER_FIELD_ALLOW_PATTERN`` 直接消费原始
+  ``field`` 字符串（内部不做 NFKC），以全角数字 ``附件１`` 调用时 Python
+  ``\\d`` 误匹配全角数字→返回 ``True``，而 JS 返回 ``False``（真实行为偏离）。
+  修复后该 3 处均补 ``re.ASCII``，现保证成立；``is_tender_field_allowed("附件１")``
+  两侧一致为 ``False``。
 - **D3 参考硬编码专名**：:func:`is_safe_tender_field_tail` 的
   ``天津港保税区消防救援支队 | 消防装备管理系统项目 | 天津众信招标咨询有限公司``
   是参考 :1893 写死的项目专名，**逐字保留、刻意不"修复"**（已知空白 3）。
@@ -106,7 +115,8 @@ _TENDER_FIELD_DENY_PATTERN = re.compile(
     r"(供应商名称|供应商地址|法定代表人|供应商代表|授权代表|被授权人|委托代理人|联系人|联系电话|电话|手机|邮政编码|邮箱|电子邮箱|开户|账号|银行|报价|投标报价|投标总价|合同金额|金额|总价)"
 )
 _TENDER_FIELD_ALLOW_PATTERN = re.compile(
-    r"^(投标日期|日期|项目名称|项目编号|采购人|采购代理机构|评分因素及评标标准页码检索|投标文件总目录|目录|附件\d*|投标书|开标一览表|报价分项一览表|投标产品配置清单|商务要求点对点应答表|技术要求点对点应答表|主要相关业绩一览表|政府采购政策情况表|中小微企业声明函|非残疾人福利性单位声明函)$"
+    r"^(投标日期|日期|项目名称|项目编号|采购人|采购代理机构|评分因素及评标标准页码检索|投标文件总目录|目录|附件\d*|投标书|开标一览表|报价分项一览表|投标产品配置清单|商务要求点对点应答表|技术要求点对点应答表|主要相关业绩一览表|政府采购政策情况表|中小微企业声明函|非残疾人福利性单位声明函)$",
+    re.ASCII,
 )
 
 # field 名归一 :1856-1860
@@ -116,7 +126,7 @@ _FIELD_BRACKET_PATTERN = re.compile(r"[()（）【】\[\]《》]")
 
 # 评分因素特例 :1866
 _SCORE_RETRIEVAL_PATTERN = re.compile(
-    r"^评分因素及评标标准页码检索(?:\s+\d{1,4}|\s+P?\d{1,4}(?:[-~至]P?\d{1,4})?)?$", re.I
+    r"^评分因素及评标标准页码检索(?:\s+\d{1,4}|\s+P?\d{1,4}(?:[-~至]P?\d{1,4})?)?$", re.I | re.ASCII
 )
 
 # safe tail :1889-1892
@@ -193,7 +203,7 @@ def strip_tender_table_prefix(value: str) -> str:
         for prefix in _TABLE_PREFIXES:
             pattern = re.compile(
                 rf"^{re.escape(prefix)}\s*[:：]?\s*(?:\d+(?:\.\d+)*\s*[.)、．]?\s*)?",
-                re.I,
+                re.I | re.ASCII,
             )
             nxt = pattern.sub("", text).strip()
             if nxt != text and nxt:
@@ -313,7 +323,6 @@ def parse_tender_format_field(value: str) -> dict[str, str] | None:
     if not text:
         return None
     if _SCORE_RETRIEVAL_PATTERN.search(text):
-        tail = _SCORE_RETRIEVAL_PATTERN.sub("", text).strip()
         # 参考用 text.replace(/^评分因素及评标标准页码检索/i, '') 剥前缀
         tail = re.sub(r"^评分因素及评标标准页码检索", "", text, flags=re.I).strip()
         return {"field": "评分因素及评标标准页码检索", "tail": tail}
