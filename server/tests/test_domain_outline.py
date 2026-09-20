@@ -422,6 +422,44 @@ def test_build_outline_comparison_pairwise_formula_and_risk():
     assert risk_from_score(1.0) == "high"
 
 
+def test_build_outline_comparison_boundary_single_file_and_all_from_tender():
+    # 边界 1（Node oracle 对拍真值，评审 B）：单文件 → 组与 pairwise 全空。
+    f_solo = _mk_file("fSolo", "# 总体要求\n# 施工组织设计\n")
+    solo = build_outline_comparison([f_solo])
+    assert solo["duplicateGroups"] == []
+    assert solo["pairwiseSimilarities"] == []
+
+    # 边界 2：全部条目 from_tender → 组阶段跳过；pairwise 仍计算
+    # （Node oracle 真值：score=0 / shared_count=0 / risk=none）。
+    tender = split_tender_sentences("施工组织设计的要求。")
+
+    def _mk_tender_file(file_id: str) -> dict:
+        return {
+            "file_id": file_id,
+            "status": "success",
+            "items": build_outline_items("# 施工组织设计的要求", tender)["items"],
+        }
+
+    f_t1 = _mk_tender_file("fT1")
+    f_t2 = _mk_tender_file("fT2")
+    assert all(i["from_tender"] for i in f_t1["items"])
+    assert all(i["from_tender"] for i in f_t2["items"])
+    result = build_outline_comparison([f_t1, f_t2])
+    assert result["duplicateGroups"] == []
+    assert result["pairwiseSimilarities"] == [
+        {
+            "file_a_id": "fT1",
+            "file_b_id": "fT2",
+            "score": 0,
+            "title_overlap": 0,
+            "path_overlap": 0,
+            "order_similarity": 0,
+            "shared_count": 0,
+            "risk": "none",
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 14. intersectSize（:1328） / bigramSimilarity（:1334） / lcsSimilarity（:1350）
 # ---------------------------------------------------------------------------

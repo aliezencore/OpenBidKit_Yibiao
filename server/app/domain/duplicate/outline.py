@@ -51,7 +51,9 @@
 - **D4 ``to_fixed_2`` 用精确十进制 half-up**（R-P3b-7）：**没有**采用
   ``math.floor(x * 100 + 0.5) / 100`` 的直觉写法——它在刀刃输入上偏离
   ECMA ``toFixed(2)`` 语义，恰好落在参考真实输出可观察的位置（反例与裁定
-  见 :func:`to_fixed_2` docstring）。
+  见 :func:`to_fixed_2` docstring）。参考实际写法是
+  ``Number(score.toFixed(2))``（:1416/:1436/:1441-1443），返回 **number**；
+  本函数返回 float 与之**类型一致**，不存在 str/float 分歧。
 - **D5 ``$`` 锚语义**：Python ``re`` 的 ``$`` 在尾随换行前也匹配；JS 的
   ``$``（无 ``m`` 标志）只在串尾。本模块所有进入带 ``$`` 正则的文本均先经
   :func:`_normalize_value` 的 ``strip()``（无尾随换行），两端口径实际一致；
@@ -182,6 +184,9 @@ def _normalize_value(value: Any) -> str:
 
 def to_fixed_2(value: float) -> float:
     """JS ``(x).toFixed(2)`` → ``Number`` 的对应物（R-P3b-7）。
+
+    参考实现的真实写法是 ``Number(score.toFixed(2))``（:1416/:1436/:1441-1443），
+    返回 **number**；本函数返回 float 与之类型一致。
 
     ECMA-262 的 ``toFixed(2)`` 对浮点数的**精确二进制十进制展开**做 half-up
     取两位（同为 n 时取较大者）。直觉写法 ``math.floor(x * 100 + 0.5) / 100``
