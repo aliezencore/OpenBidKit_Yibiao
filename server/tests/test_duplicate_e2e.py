@@ -130,8 +130,9 @@ def test_upload_then_analyze_reaches_success_with_four_sections(client, tmp_path
     # 「snake_case 会让 /state 恒 0」这个已被修复的缺陷。
     outline_analysis = state["outlineAnalysis"]
     content_analysis = state["contentAnalysis"]
-    assert outline_analysis["tenderSentenceCount"] >= 1, outline_analysis
-    assert content_analysis["totalSentenceCount"] >= 1, content_analysis
+    # 精确句数（T7 评审 A §4.5）：夹具各 1 句，钉死「夹具 ↔ 切句器 ↔ 段统计」契约。
+    assert outline_analysis["tenderSentenceCount"] == 1, outline_analysis
+    assert content_analysis["totalSentenceCount"] == 1, content_analysis
     # 元数据段的提取子统计（contentExtraction）走同一 camelCase 键，
     # 且**直接挂在 metadataAnalysis 上**（`_load_metadata_analysis` 的形状，
     # 对齐参考 `updateAnalysis({contentExtraction: ...})`）
@@ -268,9 +269,13 @@ def test_e2e_duplicate_sentences_and_outline_groups_reachable(client, tmp_path):
     duplicates = content["duplicateSentences"]
     assert duplicates, content
     assert any(len(item["file_ids"]) >= 2 for item in duplicates), duplicates
-    # 3) stats 的 camelCase 键在同一响应里可读（T7 键名修复的回归钉子）
-    assert content["totalSentenceCount"] >= 2, content
-    assert outline["tenderSentenceCount"] >= 1, outline
+    # 3) stats 的 camelCase 键在同一响应里可读（T7 键名修复的回归钉子）。
+    # **断言精确句数而非 `>=`**（T7 评审 A §4.5）：夹具句的紧凑长度只比
+    # `isInformativeContentSentence` 的 ≥12 门槛高 1.75~2.2 倍，用 `>= 1`
+    # 会在「门槛上调 / 归一化口径变化」时静默改变判别力。精确值把
+    # 「夹具文本 ↔ 切句器 ↔ 段统计」三者的契约钉死：任一环节漂移立刻变红。
+    assert content["totalSentenceCount"] == 4, content   # 2 份投标 × 2 句
+    assert outline["tenderSentenceCount"] == 1, outline   # 招标 1 句
 
 
 # --------------------------- 用例 6（T7 评审 A §4.1 的 P1）：content_files 生产接线
