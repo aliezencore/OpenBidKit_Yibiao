@@ -588,6 +588,17 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > `success` → 垃圾文本进入切句与比对（P2a 既有行为，建议另立任务）；②**性能**：
 > `content_extraction` 每轮都全量重解析 docx 并重跑 `save_docx_assets`
 > （实测 ≈14 ms/图，20 图 ≈0.28 s，与解析同量级）——签名幂等已抵消「每轮重做」，暂不优化。
+>
+> **评审 B 的补充登记（2026-09-21）**：
+> - **`assets/` 清理与在跑分析的时序窗口**（B5，P2-low）：`POST /files` 在事务提交后
+>   无条件删 `assets/`；若此时有分析任务正在写资产，会出现「markdown 已写好、资产被删」。
+>   影响仅「陈旧资产残留 / 该轮图片缺失」（内容寻址，不会指错图），与 F10 同族，**不修**。
+> - **无图 docx 也会建出空 `assets/` 目录 + 同轮落盘失败留孤儿**（F10，P2-low）：无害，**不修**。
+> - **跨文件同 hash**：同一 project 两个 docx 内嵌同一张图 → 资产只落一份，两个 markdown
+>   各有占位（符合「按 hash 去重」）。**P3c 立项时必须写死 `occurrence_count` 口径**
+>   ——参考是按「文件内出现次数」计，跨文件去重与计数是两件事，别混。
+> - **`resolve_asset_path` 返回服务器绝对路径**：`preview_url` / 任何 API 响应**不得**
+>   直接透出（同上文硬约束 ①）。
 
 > **跨阶段缺口登记（2026-09-21，P3b Task 4-7 评审 A §4.4）——P3c/P3d 段子统计无生产者**：
 > `metadata_extraction`（P3d）与 `image`（P3c）两个角色在生产仍是 `_stub_sections()`

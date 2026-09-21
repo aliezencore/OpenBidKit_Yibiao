@@ -34,6 +34,7 @@ from app.domain.duplicate.signature import stable_file_id
 from app.domain.duplicate.state import ANALYSIS_SECTIONS, SectionState
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.asset_store import assets_dir_for
+from app.infra.parsing.path_safety import validate_project_id
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.repositories.duplicate import DuplicateFileInput
 from app.infra.tasks.duplicate_runner import (
@@ -192,15 +193,12 @@ async def upload_files(
 
         state.duplicate.save_files(project_id, tender_inputs, bid_inputs,
                                    step="upload")
-        # R-P3b-6：上传全量替换成功后清 content 目录（换文件则旧正文产物作废）。
-        # 复用 `_remove_tree` 的可观测清理（与参考 `saveFiles` 事务后调
-        # `clearDuplicateContentArtifacts` 语义对齐，:924）。
-        _remove_tree(content_dir_for(state.settings.data_root, project_id))
-        # P2a↔P2b 接线（评审 A 的 F5）：资产目录同样作废——参考的
+        # R-P3b-6：上传全量替换成功后清产品目录（换文件则旧正文产物作废）。
+        # P2a↔P2b 接线（评审 A 的 F5）把 `assets/` 一并纳入——参考
         # `clearDuplicateContentArtifacts`（store.cjs:958-964）在删 content 的同一处
-        # 还调 `deleteImportedImageBatches` 清 image batch，即「换文件 → 上一轮的图片
-        # 资产一并失效」。不清也不会指错图（资产按内容哈希寻址），但会无界累积。
-        _remove_tree(assets_dir_for(state.settings.data_root, project_id))
+        # 还调 `deleteImportedImageBatches`，即「换文件 → 上一轮图片资产一并失效」。
+        # 净化守卫与两目录的一致性收在 `_remove_project_output_dirs` 里。
+        _remove_project_output_dirs(state.settings.data_root, project_id)
     except BaseException:
         # 滚回：DB 回滚由仓储的事务负责，这里补上「盘上不留孤儿」。
         # 兜 `BaseException` 而非 `Exception`：取消（`asyncio.CancelledError`）
@@ -270,11 +268,9 @@ def delete_files(project_id: str, state: AppState = Depends(get_state)) -> dict:
     state.duplicate.delete_files(project_id)
     state.duplicate.delete_sections(project_id)
     # R-P3b-6：参考 `clearDuplicateCheck`（:929-956）事务后删 content 目录与
-    # imported image batches（content 产物路径清理）。服务端此处同样清
-    # `duplicate_content/` 目录，与 POST /files 的清理保持一致。
-    _remove_tree(content_dir_for(state.settings.data_root, project_id))
-    # 资产目录一并清（评审 A 的 F5：与参考的 image batches 清理对齐，见 POST /files 处注释）。
-    _remove_tree(assets_dir_for(state.settings.data_root, project_id))
+    # imported image batches（content 产物路径清理）。服务端清 `duplicate_content/`
+    # 与 `assets/`，与 POST /files 保持同一入口（含 `project_id` 净化，见该函数）。
+    _remove_project_output_dirs(state.settings.data_root, project_id)
     return {"tender": [], "bid": []}
 
 
@@ -529,6 +525,25 @@ def _error_of(row: Mapping[str, Any]) -> str | None:
     if isinstance(file_path, str) and file_path.startswith(_FAILED_PATH_PREFIX):
         return file_path[len(_FAILED_PATH_PREFIX):].split(_FAILED_PATH_SEP, 1)[0]
     return None
+
+
+def _remove_project_output_dirs(data_root: Path, project_id: str) -> None:
+    """清掉一次分析的全部盘上产物：正文目录（`duplicate_content/`）与图片资产（`assets/`）。
+
+    **删除是破坏性操作，而 `project_id` 直接来自 URL 路径参数**——所以这里**先**
+    过 `validate_project_id` 那道净化守卫（与 `save_uploaded_document` 同款），
+    **再**拼路径。`content_dir_for` / `assets_dir_for` 都是**纯路径计算**、本身不校验
+    （见 `asset_store.assets_dir_for` 的 docstring），把未校验的 id 交给
+    `shutil.rmtree` 会形成**路径遍历递归删除**：实测 `project_id="%2e%2e"` 会让
+    `POST /files` 返回 200 并删掉 `data_root` 及其任意上级（`..%5c..%5c..%5c..` 可到任意深度）。
+
+    **不能依赖「DB 先失败兜底」**：上传在没有可插入的文件行时（如只发一个空分组）
+    不会碰 FK，会一路走到这里。把两个目录的清理收进这一个函数，也让「以后新增产物
+    目录时必须一起净化」变成结构性的、而不是靠记性。
+    """
+    validate_project_id(project_id)
+    _remove_tree(content_dir_for(data_root, project_id))
+    _remove_tree(assets_dir_for(data_root, project_id))
 
 
 def _remove_tree(path: Path) -> None:

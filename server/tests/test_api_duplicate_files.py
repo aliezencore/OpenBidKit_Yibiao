@@ -764,3 +764,76 @@ def test_error_of_legacy_failed_row_without_separator():
     ) == "format-mismatch"
     assert _error_of({"file_path": "C:/normal/path.docx"}) is None
     assert _error_of({}) is None
+
+
+# ------------------------------------------------- 破坏性清理的净化守卫（评审 B 的 B1）
+
+
+def test_output_dir_removal_rejects_traversal_project_id(tmp_path):
+    """**破坏性路径必须先净化**（评审 B 的 B1，P1）。
+
+    事故形态：`_remove_project_output_dirs` 之前是「先拼路径、后 rmtree」，
+    而 `assets_dir_for` / `content_dir_for` 都是纯路径计算、**不校验** `project_id`
+    ——`project_id=".."` 会让 `rmtree` 拿到 `data_root/projects/../assets`
+    （= `data_root/assets`），`project_id="..%5c..%5c..%5c.."` 能到任意深度。
+
+    判别点刻意放在**遍历目的地真的存在一个文件**上：只断言「抛出异常」是不够的
+    （没有守卫时若目的地不存在，也不会有任何事发生——弱断言）。
+    """
+    from app.api.duplicate import _remove_project_output_dirs
+    from app.domain.shared.errors import ParsingError
+
+    data_root = tmp_path / "data"
+    victim = data_root / "assets"          # `projects/../assets` 恰好落在这里
+    victim.mkdir(parents=True)
+    (victim / "keep.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(ParsingError):
+        _remove_project_output_dirs(data_root, "..")
+
+    assert (victim / "keep.txt").exists(), "遍历 id 触达了删除"
+
+
+def test_http_traversal_project_id_cannot_delete_outside_data_root(client, tmp_path):
+    """HTTP 面同上：`%2e%2e` 曾在实测里返回 200 并把上级目录删掉。
+
+    **入口是 `DELETE /files`，不是 POST**：`delete_files` 只做 DELETE（不插入任何行）
+    → 不碰 `duplicate_check_meta` 的 FK → 一路走到清理；而带真实文件 part 的
+    `POST /files` 会先在 FK 上炸掉（`IntegrityError`），根本到不了清理那一步。
+
+    断言只钉**安全属性**（哨兵文件必须还在）+「该请求不得成功」：净化失败后以
+    `ParsingError` 上抛（当前没有全局 handler），响应形状属另一层决策，不该被锁死。
+    """
+    from app.domain.shared.errors import ParsingError
+
+    data_root = tmp_path
+    victim = data_root / "assets"          # `projects/../assets` 恰好落在这里
+    victim.mkdir(parents=True)
+    (victim / "keep.txt").write_text("keep", encoding="utf-8")
+
+    try:
+        resp = client.delete("/projects/%2e%2e/duplicate/files")
+        assert resp.status_code != 200, resp.status_code
+    except ParsingError:
+        pass  # 净化失败以异常上抛——同样是「请求没有成功」
+
+    assert (victim / "keep.txt").exists(), "遍历 id 经 HTTP 触达了删除"
+
+
+def test_delete_files_clears_stale_image_assets(client, project):
+    """`DELETE /files` 同样清 `assets/`（评审 B 的 B2：DELETE 侧原先零覆盖）。
+
+    两处清理走同一个 `_remove_project_output_dirs`，但**不能靠「同一个函数」推断
+    覆盖**——删掉调用点照样全绿。这条用例把 DELETE 侧钉住。
+    """
+    from app.infra.parsing.asset_store import assets_dir_for
+
+    state = client.app.state.yibiao
+    assets_dir = assets_dir_for(state.settings.data_root, project)
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "deadbeef.png").write_bytes(b"stale")
+
+    resp = client.delete(f"/projects/{project}/duplicate/files")
+
+    assert resp.status_code == 200, resp.text
+    assert not assets_dir.exists(), "DELETE /files 后旧图片资产应被清掉"

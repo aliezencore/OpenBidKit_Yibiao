@@ -325,6 +325,27 @@ def test_resolve_asset_path_rejects_foreign_and_escaping_targets(tmp_path, targe
         data_root=tmp_path / "data", project_id="p1", target=target) is None
 
 
+def test_resolve_asset_path_validates_the_hash_even_when_a_file_matches(tmp_path):
+    """哈希校验是**载荷**的：造出「permissive 实现会匹配到」的文件，仍须返回 `None`。
+
+    （评审 B 的 B3：上面那条参数化用例只放了一个合法资产，于是「去掉哈希校验」这类
+    变异下 8 个参数全绿——返回 None 只是因为恰好没找到，判别力≈0。这里把种子的
+    判别力单独钉住。）
+    """
+    assets_dir = tmp_path / "data" / "projects" / "p1" / "assets"
+    assets_dir.mkdir(parents=True)
+    # 非法哈希名：permissive 实现会 glob 出 `assets/not-a-hash.*`
+    (assets_dir / "not-a-hash.png").write_bytes(b"x")
+    # 大写十六进制：产出侧一律小写，大写版本必须被拒（Windows 文件系统不区分大小写，
+    # 所以这条在「大小写敏感」这件事上是有判别力的）
+    (assets_dir / f"{'A' * 64}.png").write_bytes(b"x")
+
+    assert resolve_asset_path(data_root=tmp_path / "data", project_id="p1",
+                              target="assets/not-a-hash") is None
+    assert resolve_asset_path(data_root=tmp_path / "data", project_id="p1",
+                              target=f"assets/{'A' * 64}") is None
+
+
 def test_resolve_asset_path_returns_none_when_missing(tmp_path):
     """合法靶但盘上没有（例如资产还没落盘）→ None，调用方自行降级。"""
     digest = hashlib.sha256(b"gone").hexdigest()

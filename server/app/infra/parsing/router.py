@@ -87,9 +87,11 @@ def _parse_locally(path: Path, fmt: FileFormat, *, include_images: bool = False)
     if fmt.kind == "xlsx":
         return spreadsheet_to_markdown(path)
     if fmt.kind == "docx":
-        # 裁定 R23：include_images 只在 docx 路径有意义——R2 在 docx_to_markdown
-        # 里对 include_images=True 显式拒绝；不转发就等于静默丢弃该参数，调用方
-        # 会误以为已请求到图片。其余格式解析器的签名刻意收窄，故不加该参数。
+        # 裁定 R23：`include_images` 只在 docx 路径有意义——不转发就等于静默丢弃该参数，
+        # 调用方会误以为已请求到图片。其余格式解析器的签名刻意收窄，故不加该参数。
+        # （**裁定史**：R2 曾在 `docx_to_markdown` 里对 `include_images=True` 显式拒绝，
+        # 于是当年「转发」的可观测量是「抛 not-implemented」；P2a↔P2b 接线撤销了该拒绝，
+        # 现在转发的结果是 markdown 里出现 `assets/<hash>` 占位。）
         return docx_to_markdown(path, include_images=include_images)
     if fmt.kind == "doc":
         return legacy_doc_to_markdown(path)

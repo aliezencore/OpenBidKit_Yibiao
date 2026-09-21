@@ -136,9 +136,10 @@ def test_content_extraction_writes_per_file_content_and_rows(tmp_path):
     """tender + bid 各一 → content 目录两份 {file_id}.md、rows 两行 success、
     content_length / content_hash 正确（sha256 手算对照）。
 
-    偏离登记：源文件用 `.txt`（P2a 的 docx 解析器在 include_images=True 时抛
-    not-implemented，见 docx.py:12-21）；runner 逻辑与格式无关，.txt 等价覆盖
-    「重解析 → 写 content 目录 → 收行 → 算 hash」全链路。
+    夹具用 `.txt`：runner 逻辑与格式无关，.txt 等价覆盖「重解析 → 写 content 目录 →
+    收行 → 算 hash」全链路。（图片链路另有真 docx 的用例覆盖。）**裁定史**：接线前
+    P2a 的 docx 解析器在 `include_images=True` 时抛 `not-implemented`，故当年只能
+    用 txt；该限制已随 P2a↔P2b 接线撤销。
     """
     tender = _mk_file(tmp_path, "tender.txt", "招标正文第一段。\n第二段。")
     bid = _mk_file(tmp_path, "bid.txt", "投标正文内容。")
