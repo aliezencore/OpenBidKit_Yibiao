@@ -20,6 +20,7 @@ r"""P3c Task 1 —— 图片出现位置纯函数（`domain/duplicate/image.py`�
 from __future__ import annotations
 
 from app.domain.duplicate.image import (
+    build_duplicate_images,
     extract_image_occurrences,
     line_image_targets,
     parse_image_context_heading,
@@ -175,3 +176,50 @@ def test_parse_heading_rejects_sentence_like_line():
 def test_parse_heading_accepts_numbered_and_bold_lines_at_level_two():
     assert parse_image_context_heading("**加粗标题**") == {
         "level": 2, "title": "加粗标题"}
+
+
+# ------------------------------------------------- 跨文件去重汇总（Task 2）
+# 真值来自 oracle-task2.cjs（同目录）
+
+def _image_row(hash_, file_ids, occurrences, preview="p"):
+    return {"hash": hash_, "preview_url": f"{preview}/{hash_}",
+            "file_ids": list(file_ids), "occurrences": dict(occurrences)}
+
+
+def test_duplicate_images_keep_only_cross_file_and_sort_by_file_count():
+    rows = [
+        _image_row("aaaa", ["f1", "f2"], {"f1": 2, "f2": 1}),
+        _image_row("bbbb", ["f1", "f2", "f3"], {"f1": 1, "f2": 1, "f3": 1}),
+        _image_row("cccc", ["f1"], {"f1": 5}),          # 只在一个文件里 → 被过滤
+    ]
+    assert [row["hash"] for row in build_duplicate_images(rows)] == ["bbbb", "aaaa"]
+    assert [row["image_id"] for row in build_duplicate_images(rows)] == [
+        "I000001", "I000002"]
+
+
+def test_duplicate_images_break_ties_by_total_occurrences():
+    rows = [
+        _image_row("dddd", ["f1", "f2"], {"f1": 1, "f2": 1}),
+        _image_row("eeee", ["f1", "f2"], {"f1": 3, "f2": 2}),
+    ]
+    assert [row["hash"] for row in build_duplicate_images(rows)] == ["eeee", "dddd"]
+
+
+def test_duplicate_images_are_stable_on_full_ties():
+    """完全同分时保持入参顺序（JS 的 `Array.sort` 自 ES2019 起稳定）。"""
+    rows = [
+        _image_row("ffff", ["f1", "f2"], {"f1": 1, "f2": 1}),
+        _image_row("gggg", ["f1", "f2"], {"f1": 1, "f2": 1}),
+    ]
+    assert [row["hash"] for row in build_duplicate_images(rows)] == ["ffff", "gggg"]
+
+
+def test_duplicate_images_empty_when_none_duplicated():
+    assert build_duplicate_images([_image_row("hhhh", ["f1"], {"f1": 1})]) == []
+
+
+def test_duplicate_images_pad_ids_to_six_digits():
+    rows = [_image_row(f"x{index}", ["f1", "f2"], {"f1": 1, "f2": 1})
+            for index in range(12)]
+    ids = [row["image_id"] for row in build_duplicate_images(rows)]
+    assert ids[0] == "I000001" and ids[-1] == "I000012"
