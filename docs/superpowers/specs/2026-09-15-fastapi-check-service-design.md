@@ -539,6 +539,25 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > 接入 P2b 的资产提取并产出图片占位 markdown，随后把 e2e 夹具改回 docx（获得真实图片
 > 链路覆盖）。候选落点：P3c 前置任务，或 P3b Task 6。
 
+> **跨阶段缺口登记（2026-09-21，P3b Task 4-7 评审 A §4.4）——P3c/P3d 段子统计无生产者**：
+> `metadata_extraction`（P3d）与 `image`（P3c）两个角色在生产仍是 `_stub_sections()`
+> 占位，但**读取侧已在消费它们的 stats 键**：
+>
+> | 段 | 读取侧消费的键（`duplicateCheckStore.cjs`） | 当前状态 |
+> |---|---|---|
+> | metadata | `files`（逐文件 `{file_id, status, error}`）、`metadataExtraction`、`contentExtraction` | 仅 `contentExtraction` 由 `_merge_metadata_stats` 写 ✓；`files`/`metadataExtraction` 缺 |
+> | image | `files`、`extraction`、`totalImageCount` | 全缺 |
+>
+> **影响**：`/state` 会出现「段 `status: success` 而子统计 `pending`」的自相矛盾
+> （实测 `metadataAnalysis.metadataExtraction = {status:'pending', completed:0, total:1}`），
+> 前端显示「待提取」。这与 §4.1 的 P1（读侧消费、写侧缺失）**是同一类缺陷**。
+>
+> **处置（P3c/P3d 显式承接，阻塞性）**：实现 `metadata_extraction` 角色时**必须**写
+> `metadata` 段的 `files`（逐文件 `{file_id, status, error}`，参考 `svc.cjs:2394`）与
+> `metadataExtraction` 子统计；实现 `image` 角色时**必须**写 `image` 段的 `files`
+> （参考 `:845`）与 `totalImageCount`。**验收清单须逐键对照上表**——否则会复现本轮同类缺陷。
+> （P3b 计划无 Task 8+，故不在 P3b 范围内修复；本块为 P3c/P3d 的必办前置项。）
+
 **关于 P2a / P2b 为何不合并**：合起来约 13 个任务，单个计划的 TDD 步骤会到 90+ 条，可执行性下降。两者**没有依赖关系**（图片管线不读 markdown，文档解析不碰图片），可以任意顺序或并行实施。**若你更希望一个大计划，可以合并**——那是我对计划粒度的取舍，不是能力约束。
 
 §11.2 的金标准对照工具在 P2 起随各计划就地搭建，不单独成计划。
