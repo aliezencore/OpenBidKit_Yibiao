@@ -38,6 +38,7 @@ def _interleaved_docx(tmp_path, image, name="interleaved.docx"):
 
 
 def _docx_with_table_and_image(tmp_path, image):
+    """表格**之外**再放一张图（`image=None` → 只有表格，用于「无图表格不受影响」）。"""
     path = tmp_path / "table-and-image.docx"
     doc = Document()
     doc.add_heading("第一章 技术要求", level=1)
@@ -47,7 +48,22 @@ def _docx_with_table_and_image(tmp_path, image):
     table.rows[0].cells[1].text = "要求"
     table.rows[1].cells[0].text = "工期"
     table.rows[1].cells[1].text = "30 天"
-    doc.add_picture(str(image))
+    if image is not None:
+        doc.add_picture(str(image))
+    doc.save(path)
+    return path
+
+
+def _docx_with_table_image(tmp_path, image):
+    """图片**放在表格单元格里**（G1 的形状：标书里「证书贴在表格里」）。"""
+    path = tmp_path / "table-image.docx"
+    doc = Document()
+    doc.add_paragraph("表格之前的正文。")
+    table = doc.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].text = "项目"
+    table.rows[0].cells[1].text = "示意图"
+    table.rows[1].cells[0].text = "营业执照"
+    table.rows[1].cells[1].paragraphs[0].add_run().add_picture(str(image))
     doc.save(path)
     return path
 
@@ -148,6 +164,47 @@ def test_tables_and_headings_survive_with_images(tmp_path):
     assert "| 项目 | 要求 |" in markdown
     assert "| 工期 | 30 天 |" in markdown
     assert len(PLACEHOLDER_RE.findall(markdown)) == 1
+
+
+def test_table_embedded_image_keeps_its_placeholder(tmp_path):
+    """表格单元格里的图片**也必须留下占位**（spec §15 接线遗留登记 G1）。
+
+    根因：`markdown.extract_tables` 用 `cell.get_text()` 取单元格文本 → 单元格里的
+    `<img>` 被整个丢掉（0 占位），而资产照常落盘（**孤儿**）→ §8.5「图片占位数量与
+    位置一致」在该形状上不成立。标书里「营业执照/资质证书贴在表格里」很常见。
+
+    **两种渲染路线的差别**：参考把**原始表格 HTML** 回填（`convert.mjs:557-560`），
+    所以它的 `<img>` 天然活着、并专门有 `htmlImageSrcPattern` 去抓；本实现的表格按
+    spec §8.3 渲染成 **GFM**，故这里把单元格内的 `<img>` 渲染成**内联 markdown 图片**
+    ——与流水线其余部分形态统一，消费侧（P3c）只需认一种图片形态。
+    """
+    image = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    source = _docx_with_table_image(tmp_path, image)
+
+    markdown = docx_to_markdown(source, include_images=True)
+
+    assert len(PLACEHOLDER_RE.findall(markdown)) == 1, markdown
+    # 占位必须**留在表格行里**（不是掉到表格外的某处）
+    assert "| 营业执照 | ![](assets/" in markdown, markdown
+    assert "| 项目 | 示意图 |" in markdown
+
+
+def test_table_embedded_image_hash_matches_media(tmp_path):
+    """表内图片的哈希同样取自图片字节（与文档级图片同一契约）。"""
+    image = make_image(tmp_path / "a.png", size=(40, 30), color=(7, 90, 40))
+    source = _docx_with_table_image(tmp_path, image)
+
+    markdown = docx_to_markdown(source, include_images=True)
+
+    assert set(PLACEHOLDER_RE.findall(markdown)) == {
+        media.content_hash for media in list_media_files(source)}
+
+
+def test_table_without_images_is_unaffected(tmp_path):
+    """无图表格的输出**逐字节不变**（G1 的修复只该影响含图表格）。"""
+    source = _docx_with_table_and_image(tmp_path, None)
+
+    assert docx_to_markdown(source, include_images=True) == docx_to_markdown(source)
 
 
 def test_non_docx_include_images_is_a_noop(tmp_path):
