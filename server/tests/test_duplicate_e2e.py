@@ -82,8 +82,14 @@ def _setup_project(client, tmp_path):
     resp = client.post(
         f"{base}/files",
         files=[
-            ("tender", ("招标.txt", "招标要求正文".encode("utf-8"), "text/plain")),
-            ("bid", ("投标A.txt", "投标应答正文".encode("utf-8"), "text/plain")),
+            # 长句（≥12 内容字符）才能过 `isInformativeContentSentence`——T7 的
+            # stats 断言要求真实切句产出 ≥1 句（7 字短句会被正确地拒掉）。
+            ("tender", ("招标.txt",
+                        "招标文件要求投标人提供完整的技术方案与报价明细。".encode("utf-8"),
+                        "text/plain")),
+            ("bid", ("投标A.txt",
+                     "投标人已按招标文件要求提供完整技术方案与报价明细。".encode("utf-8"),
+                     "text/plain")),
         ])
     assert resp.status_code == 200, resp.text
     return project, base
@@ -116,6 +122,20 @@ def test_upload_then_analyze_reaches_success_with_four_sections(client, tmp_path
     assert set(state["sections"]) == {"metadata", "outline", "content", "image"}
     assert {s["status"] for s in state["sections"].values()} == {"success"}, \
         state["sections"]
+
+    # T7 升级：真实算法产出的 stats 经 `load_analysis` 可读——**键名必须是
+    # camelCase**（参考写入侧 :2487-2488/:2613-2615 与仓储读取侧
+    # `stats.get("tenderSentenceCount")` 三方一致）。这条断言同时钉住
+    # 「snake_case 会让 /state 恒 0」这个已被修复的缺陷。
+    outline_analysis = state["outlineAnalysis"]
+    content_analysis = state["contentAnalysis"]
+    assert outline_analysis["tenderSentenceCount"] >= 1, outline_analysis
+    assert content_analysis["totalSentenceCount"] >= 1, content_analysis
+    # 元数据段的提取子统计（contentExtraction）走同一 camelCase 键，
+    # 且**直接挂在 metadataAnalysis 上**（`_load_metadata_analysis` 的形状，
+    # 对齐参考 `updateAnalysis({contentExtraction: ...})`）
+    assert state["metadataAnalysis"]["contentExtraction"]["completed"] == 2, \
+        state["metadataAnalysis"]
 
 
 # ------------------------------------------------------------------- 用例 2
@@ -197,3 +217,56 @@ def test_api_rejects_analysis_without_files(client):
     assert resp.status_code == 400, resp.text
     assert client.app.state.yibiao.tasks.list_for_project(project) == [], \
         "不应提交任务"
+
+
+# ------------------------------------------------- 用例 5（T7）：真实算法闭环
+
+def test_e2e_duplicate_sentences_and_outline_groups_reachable(client, tmp_path):
+    """真实算法闭环：两份内容相同的投标 + 一份招标 → 目录组与正文重复句都可读。
+
+    这是 P3b 的端到端验收：`content_extraction` 重解析 → `outline`/`content`
+    段跑真实算法 → `_persist_rows` 落库 → `load_analysis` 组装 → `/state` 可读。
+    任何一环断裂（切句、matcher、落库、形状映射）都会让下面的断言之一变红。
+    """
+    project = client.post("/projects", json={"name": "算法闭环"}).json()["id"]
+    base = f"/projects/{project}/duplicate"
+
+    # 投标：相同标题（`#`/`##`）+ 相同长句（跨过 informative 门槛与 6 字下限）
+    bid_text = (
+        "# 项目概况\n"
+        "本项目的服务范围包括设备采购与安装调试工作。\n"
+        "## 技术要求\n"
+        "投标人应当提供完整的施工组织设计方案与质量保证措施。\n"
+    )
+    tender_text = "投标人须提供完整的服务方案与质量保证措施。\n"
+    resp = client.post(f"{base}/files", files=[
+        ("tender", ("招标.txt", tender_text.encode("utf-8"), "text/plain")),
+        ("bid", ("投标A.txt", bid_text.encode("utf-8"), "text/plain")),
+        ("bid", ("投标B.txt", bid_text.encode("utf-8"), "text/plain")),
+    ])
+    assert resp.status_code == 200, resp.text
+
+    started = client.post(f"{base}/analysis", json={"force": False})
+    assert started.status_code == 200, started.text
+    assert _wait_for_task(client, started.json()["taskId"])["status"] == "success"
+
+    state = client.get(f"{base}/state").json()
+    assert {s["status"] for s in state["sections"].values()} == {"success"}, \
+        state["sections"]
+
+    # 1) 目录：两份投标标题完全相同 → 至少一个 duplicate 组，且覆盖两个文件
+    outline = state["outlineAnalysis"]
+    groups = outline["duplicateGroups"]
+    assert groups, outline
+    assert any(len(group["file_ids"]) >= 2 for group in groups), groups
+    # pairwise 也应有（两两一对）
+    assert outline.get("pairwiseSimilarities"), outline
+
+    # 2) 正文：两份投标的同一长句 → 至少一条重复句，且命中两个 file_id
+    content = state["contentAnalysis"]
+    duplicates = content["duplicateSentences"]
+    assert duplicates, content
+    assert any(len(item["file_ids"]) >= 2 for item in duplicates), duplicates
+    # 3) stats 的 camelCase 键在同一响应里可读（T7 键名修复的回归钉子）
+    assert content["totalSentenceCount"] >= 2, content
+    assert outline["tenderSentenceCount"] >= 1, outline
