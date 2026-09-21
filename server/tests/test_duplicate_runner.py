@@ -537,6 +537,53 @@ def test_metadata_stats_carry_content_extraction_substats(repo):
         f"content_extraction 的子统计没并进 metadata：{stats}"
 
 
+def test_persist_rows_dispatches_every_supported_row_key(repo):
+    """`_persist_rows` 对**每个** rows 键都必须真的落库（T4-T7 评审 B-1）。
+
+    「runner 产出 → 落库」只有这一个分派点：仓储有 `replace_*` 而这里缺分支就是
+    **静默丢弃**。评审 A 的 P1 是它的镜像（分派表有了、`__call__` 没接线）；评审 B
+    在此抓到三组键无分支——`metadata_items` / `image_files` / `duplicate_images`
+    +`image_occurrences`（P3c/P3d 的产出形状，现已预接线）。
+
+    本用例逐键直调 `_persist_rows` 再**直读目标表**，把 8 组键全部钉住。
+    `replace_files` 不属本表——它由上传端点直接调用。
+    """
+    runner = DuplicateAnalysisRunner(repo=repo)
+    runner._persist_rows("p1", "metadata", SectionOutput(rows={
+        "content_files": [{"file_id": "b", "status": "success"}],
+        "metadata_items": [{"file_id": "b", "key": "k", "label": "标签"}],
+        "outline_items": [{"file_id": "b", "item_id": "b::i1", "level": 1,
+                           "title": "标题", "normalized_title": "标题",
+                           "path_titles": [], "normalized_path": "",
+                           "source": "own"}],
+        "outline_groups": [{"group_id": "g1", "type": "duplicate", "title": "组"}],
+        "outline_pairwise": [{"file_a_id": "b", "file_b_id": "b", "score": 0.5}],
+        "content_duplicates": [{"duplicate_id": "d1", "sentence": "句子",
+                                "normalized": "句子", "file_ids": ["b"]}],
+        "content_occurrences": [{"duplicate_id": "d1", "file_id": "b",
+                                 "occurrence_count": 2}],
+        "image_files": [{"file_id": "b", "status": "success"}],
+        "duplicate_images": [{"image_id": "i1", "hash": "h", "preview_url": "p",
+                              "file_ids": ["b"]}],
+        "image_occurrences": [{"image_id": "i1", "file_id": "b",
+                               "occurrence_count": 1, "locations": []}],
+    }))
+
+    tables = (
+        "duplicate_check_content_files", "duplicate_check_metadata_items",
+        "duplicate_check_outline_items", "duplicate_check_outline_groups",
+        "duplicate_check_outline_pairwise", "duplicate_check_content_duplicates",
+        "duplicate_check_content_occurrences", "duplicate_check_image_files",
+        "duplicate_check_duplicate_images", "duplicate_check_image_occurrences",
+    )
+    counts = {
+        name: repo._db.query(
+            f"SELECT COUNT(*) AS n FROM {name} WHERE project_id = 'p1'")[0]["n"]
+        for name in tables
+    }
+    assert all(count > 0 for count in counts.values()), counts
+
+
 def _content_blocked_driver(repo, stub):
     """造一个「content 阻塞、metadata 并行跑到」的驱动协程（F4）。
 
@@ -709,6 +756,13 @@ def test_extraction_role_raising_still_writes_terminal_states(repo):
     assert all(s in ("success", "error") for s in statuses.values()), \
         f"有段停在非终态（running）：{statuses}"
     assert repo.get_sections("p1")["metadata"]["message"] == "部分文件提取失败"
+    # T4-T7 评审 B-2：整角色崩溃时 `_failure_output` 的 `stats` 只有排障键
+    # `{"error": …}`，**不能**被当成 `contentExtraction` 子对象——读取侧
+    # （`_load_metadata_analysis` 的 `stats.get("contentExtraction") or …`）对该
+    # truthy 值**原样返回**，会让 `/state.metadataAnalysis.contentExtraction`
+    # 缺 `status`/`completed`/`total`（形状契约破坏）。这里钉住规范化结果。
+    substats = repo.get_sections("p1")["metadata"]["stats"]["contentExtraction"]
+    assert substats == {"status": "error", "completed": 0, "total": 0}, substats
 
 
 def test_metadata_extraction_raising_does_not_leave_sections_running(repo):

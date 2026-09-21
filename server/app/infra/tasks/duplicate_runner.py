@@ -560,8 +560,26 @@ class DuplicateAnalysisRunner:
             # （`_load_metadata_analysis` 的 `stats.get("contentExtraction")`）都是
             # camelCase；用 snake_case 会让 `/state` 的
             # `metadataAnalysis.stats.contentExtraction` 恒为空。
-            merged["contentExtraction"] = dict(
-                content_output.extraction or content_output.stats or {})
+            #
+            # **失败态的形状规范化（评审 B-2）**：`_guarded_call` 在整角色崩溃时
+            # 产出 `_failure_output`，它的 `stats` 只有排障键 `{"error": ...}`、
+            # `extraction` 为 `None`。若照旧取 `stats` 当子统计，
+            # `/state.metadataAnalysis.contentExtraction` 会变成 `{"error": ...}`
+            # ——缺 `status`/`completed`/`total`，破坏读取侧的形状契约
+            # （`_load_metadata_analysis` 的 `stats.get("contentExtraction") or …`
+            # 对该 truthy 值**原样返回**，不做补全）。
+            # 参考在整流水线崩溃时（:2764）只写整体 status/message、**不写**
+            # `contentExtraction`，因此该路径在参考里没有权威形状；这里显式写一个
+            # 合法形状的 `error` 进度对象——形状对齐读取侧，语义比 `pending` 明确。
+            substats = content_output.extraction
+            if substats is None and not content_output.failed:
+                # P3a 兼容：提取角色把子统计**直接放 `stats`**（无 `extraction` 字段）。
+                substats = content_output.stats
+            if substats is not None:
+                merged["contentExtraction"] = dict(substats)
+            elif content_output.failed:
+                merged["contentExtraction"] = {
+                    "status": "error", "completed": 0, "total": 0}
         return merged
 
     # ------------------------------------------------------------ 异常安全
@@ -787,10 +805,21 @@ class DuplicateAnalysisRunner:
         | rows 键 | 落库调用 |
         |---|---|
         | `content_files` | `replace_content_files(project_id, rows)` |
+        | `metadata_items` | `replace_metadata_items(project_id, rows)` |
         | `outline_items` | `replace_outline_items(project_id, rows)` |
         | `outline_groups` | `replace_outline_groups(project_id, rows)` |
         | `outline_pairwise` | `replace_outline_pairwise(project_id, rows)` |
         | `content_duplicates` + `content_occurrences` | `replace_content_duplicates(project_id, rows, occurrences)` |
+        | `image_files` | `replace_image_files(project_id, rows)` |
+        | `duplicate_images` + `image_occurrences` | `replace_duplicate_images(project_id, rows, occurrences)` |
+
+        **新增 rows 键必须在此登记**（评审 B-1）：本方法是「runner 产出 → 落库」的
+        唯一分派点，仓储有 `replace_*` 而这里没分支 = **静默丢弃**（评审 A 的 P1 是
+        「分派表有了、接线没落地」，这里是它的镜像）。`metadata_items` /
+        `image_files` / `duplicate_images` + `image_occurrences` 三组属于
+        P3d（metadata）与 P3c（image）的产出形状，**已预先接线**以免那两个阶段
+        重演同类缺陷（见 `docs/superpowers/specs/2026-09-15-fastapi-check-service-design.md`
+        §15 的跨阶段缺口块）。`replace_files` 不在本表——它由上传端点直接调用。
 
         落库失败（任一 replace 抛）→ 上抛 → `__call__` 顶层兜底把未终态段收 error
         （P3a F1 语义）——本方法不自己吞异常。
@@ -801,6 +830,9 @@ class DuplicateAnalysisRunner:
         content_files = rows.get("content_files")
         if content_files is not None:
             self._repo.replace_content_files(project_id, content_files)
+        metadata_items = rows.get("metadata_items")
+        if metadata_items is not None:
+            self._repo.replace_metadata_items(project_id, metadata_items)
         outline_items = rows.get("outline_items")
         if outline_items is not None:
             self._repo.replace_outline_items(project_id, outline_items)
@@ -815,6 +847,14 @@ class DuplicateAnalysisRunner:
             self._repo.replace_content_duplicates(
                 project_id, content_duplicates,
                 rows.get("content_occurrences") or [])
+        image_files = rows.get("image_files")
+        if image_files is not None:
+            self._repo.replace_image_files(project_id, image_files)
+        duplicate_images = rows.get("duplicate_images")
+        if duplicate_images is not None:
+            self._repo.replace_duplicate_images(
+                project_id, duplicate_images,
+                rows.get("image_occurrences") or [])
 
     # ---------------------------------------------------------------- 段执行
 

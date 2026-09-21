@@ -567,3 +567,41 @@ def test_load_analysis_guards_sister_json_columns_against_wrong_type(repo):
     assert group["file_ids"] == [], group
     assert group["item_ids"] == {}, group
     assert group["paths"] == {}, group
+
+
+def test_load_analysis_guards_content_and_image_json_columns_against_wrong_type(repo):
+    """T4-T7 评审 B-3：补齐 `_load_json` 守卫的**判别覆盖**（原先 3/8 无用例）。
+
+    原缺口：撤掉这三处守卫，全量仍 `517 passed`——即回归保护缺失。三处分别是
+    `content_duplicates.file_ids_json`（读取侧 `_load_content_analysis:1013`）、
+    `duplicate_images.file_ids_json`（:1068）、`image_occurrences.locations_json`
+    （:1061）。这里手工写**合法 JSON 但类型不符**的脏行（标量 `123`），三处都必须
+    回落成契约类型；不带守卫时它们会把标量原样漏进 `/state`。
+
+    注意：这三处**不会崩**（`_load_json` 只是原样返回解析结果），所以判别点必须
+    落在**值**上——`file_ids` 应为 `[]`、`locations` 应为 `{"b": []}`。
+    """
+    repo.replace_files("p1", "bid", [_file("b", "b.docx")])
+    repo.save_section("p1", "content", status="success", progress=100, message="c",
+                      updated_at="2026-01-01T00:00:00Z")
+    repo.save_section("p1", "image", status="success", progress=100, message="i",
+                      updated_at="2026-01-01T00:00:00Z")
+    repo._db.execute(
+        "INSERT INTO duplicate_check_content_duplicates"
+        "(project_id, duplicate_id, sentence, normalized, file_ids_json, first_order)"
+        " VALUES ('p1', 'd1', '句子', '句子', '123', 0)")
+    repo._db.execute(
+        "INSERT INTO duplicate_check_duplicate_images"
+        "(project_id, image_id, hash, preview_url, file_ids_json, sort_order)"
+        " VALUES ('p1', 'i1', 'h', 'p', '123', 0)")
+    repo._db.execute(
+        "INSERT INTO duplicate_check_image_occurrences"
+        "(project_id, id, image_id, file_id, occurrence_count, locations_json)"
+        " VALUES ('p1', 1, 'i1', 'b', 1, '123')")
+
+    analysis = repo.load_analysis("p1")
+    sentence = analysis["contentAnalysis"]["duplicateSentences"][0]
+    assert sentence["file_ids"] == [], sentence
+    image = analysis["imageAnalysis"]["duplicateImages"][0]
+    assert image["file_ids"] == [], image
+    assert image["locations"] == {"b": []}, image
