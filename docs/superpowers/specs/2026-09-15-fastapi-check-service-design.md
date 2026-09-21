@@ -543,6 +543,13 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
 > **跨阶段缺口登记（2026-09-21，P3b Task 4 评审 A 发现 F1/P1）——P2a↔P2b 未接线**：
+> **✅ 已闭合（2026-09-21）** ——计划
+> `docs/superpowers/plans/2026-09-21-fastapi-check-service-docx-image-wiring.md`。
+> 现状：`parse_document(..., include_images=True)` 的 docx 分支产出
+> `![](assets/<sha256>)` 占位（撤销 R2 的拒绝），`content_extraction` 段按**同一哈希**
+> 把资产落到 `<data_root>/projects/<pid>/assets/`；两侧对接由 `asset_store` 的共轭函数
+> `asset_target` / `resolve_asset_path` 钉住（哈希「按构造」对齐，无需映射表），
+> e2e 与签名单测的夹具均已回归 docx（含图片）。以下为**原始登记内容**（保留作裁定史）。
 > `parse_document(..., include_images=True)` 的 docx 分支仍走 P2a 的**显式拒绝**
 > （`parsing/docx.py:12-21`，裁定 R2：「真正的图片占位 + 资产提取属 P2b，此处显式拒绝
 > 而不是留一条『能用但会泄漏 base64』的路径」）。**R2 的拒绝以「P2b 未落地」为前提，

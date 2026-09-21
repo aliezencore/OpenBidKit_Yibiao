@@ -27,6 +27,7 @@ SSE 流在 stream 进入处挂死，见 `test_api_tasks.py:55-118` 的注释）�
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -66,17 +67,29 @@ def _wait_for_task(client, task_id, *, timeout=30.0):
     raise AssertionError(f"任务未在 {timeout}s 内结束，最后状态：{last}")
 
 
+def _docx_bytes(tmp_path, name, text, *, color=(200, 30, 30)):
+    """造一个**带图片**的 docx 并返回字节（e2e 全走 HTTP，故需要字节而非路径）。
+
+    每份文件用不同颜色的图片，避免两份文件因图片字节相同而共享同一份资产
+    （同一份资产当然是设计使然，但那样就测不到「多份资产各自落盘」这条路径）。
+    """
+    from tests.parsing_fixtures import build_docx_with_images, make_image
+
+    image = make_image(tmp_path / f"{Path(name).stem}.png", size=(40, 30), color=color)
+    path = build_docx_with_images(
+        tmp_path / name, blocks=[("p", text)], images=[image])
+    return path.read_bytes()
+
+
 def _setup_project(client, tmp_path):
     """建项目 + 上传 tender/bid 两组 multipart（Task 5 F-1 的形状）。
 
     返回 `(project_id, base)`，`base = /projects/{id}/duplicate`。
 
-    **夹具偏离登记（T4）**：用 `.txt` 而非 docx——P2a 的 docx 解析器在
-    `include_images=True` 时显式抛 not-implemented（P2a 裁定 R2，docx 图片
-    属 P2b），而 T4 的 content_extraction 按裁定 R-P3b-1 必须
-    `include_images=True` 重解析，docx 会让分析必 error。本测试验证的是
-    「编排到四段 success」的链路（与格式无关），txt 让链路真实走通；docx
-    图片链路待 P2b 落地后回归。
+    **夹具已回归 docx（P2a↔P2b 接线后）**：这里曾因「P2a 的 docx 解析器在
+    `include_images=True` 时显式拒绝」而临时改用 `.txt`（见 spec §15 的跨阶段缺口
+    登记）。接线完成后 docx 走真实图片链路——本夹具因此比 txt 覆盖更多：
+    解析带占位、资产落盘、下游段消费同一条链路。
     """
     project = client.post("/projects", json={"name": "查重项目"}).json()["id"]
     base = f"/projects/{project}/duplicate"
@@ -85,12 +98,13 @@ def _setup_project(client, tmp_path):
         files=[
             # 长句（≥12 内容字符）才能过 `isInformativeContentSentence`——T7 的
             # stats 断言要求真实切句产出 ≥1 句（7 字短句会被正确地拒掉）。
-            ("tender", ("招标.txt",
-                        "招标文件要求投标人提供完整的技术方案与报价明细。".encode("utf-8"),
-                        "text/plain")),
-            ("bid", ("投标A.txt",
-                     "投标人已按招标文件要求提供完整技术方案与报价明细。".encode("utf-8"),
-                     "text/plain")),
+            ("tender", ("招标.docx", _docx_bytes(
+                tmp_path, "招标.docx",
+                "招标文件要求投标人提供完整的技术方案与报价明细。"), DOCX_MIME)),
+            ("bid", ("投标A.docx", _docx_bytes(
+                tmp_path, "投标A.docx",
+                "投标人已按招标文件要求提供完整技术方案与报价明细。",
+                color=(10, 120, 200)), DOCX_MIME)),
         ])
     assert resp.status_code == 200, resp.text
     return project, base
@@ -175,19 +189,22 @@ def test_changing_files_invalidates_and_reruns(client, tmp_path):
     assert _wait_for_task(client, first.json()["taskId"])["status"] == "success"
     assert client.get(f"{base}/state").json()["overallProgress"] == 100
 
-    # 夹具与 _setup_project 保持一致用 .txt（docx + include_images=True 会让
-    # content_extraction 必 error——P2a 的 R2 拒绝路径，见 spec §15 跨阶段缺口）。
+    # 夹具与 `_setup_project` 一致用 docx（P2a↔P2b 接线后 docx 是生产路径）。
     # 评审 B B1：初版用 docx 替换时，重跑实际是 metadata 段 error 但
     # `analysis_progress` 对 error 也计 100 → 断言在失败下仍通过（假绿）。
+    # 那正是当初把夹具退回 txt 的原因；接线完成后 docx 走通，本用例因此恢复了
+    # 「真实格式 + 显式四段 success 断言」的判别力（下面 `assert ... section` 已加）。
     resp = client.post(
         f"{base}/files",
-        files=[("bid", ("投标B.txt", "换了一份投标文件".encode("utf-8"), "text/plain"))])
+        files=[("bid", ("投标B.docx", _docx_bytes(
+            tmp_path, "投标B.docx", "换了一份投标文件的内容与报价明细。",
+            color=(30, 160, 30)), DOCX_MIME))])
     assert resp.status_code == 200, resp.text
 
     # 全量替换语义：只传 bid 组 → tender 一并被清（Task 5 F-1，e2e 面再钉一次）。
     listing = client.get(f"{base}/files").json()
     assert listing["tender"] == [], listing
-    assert [f["file_name"] for f in listing["bid"]] == ["投标B.txt"]
+    assert [f["file_name"] for f in listing["bid"]] == ["投标B.docx"]
 
     # 作废断言（探针 2 敏感点）：上传后四段必须已归零，不得保留旧 success。
     invalidated = client.get(f"{base}/state").json()
@@ -306,13 +323,29 @@ def test_state_exposes_content_files_from_persisted_table(client, tmp_path):
     # 两个文件都提取成功 → 两行（缺陷态下这里是 []）
     assert len(content_files) == 2, content_files
     assert {row["status"] for row in content_files} == {"success"}, content_files
-    assert {row["file_name"] for row in content_files} == {"招标.txt", "投标A.txt"}, \
+    assert {row["file_name"] for row in content_files} == {"招标.docx", "投标A.docx"}, \
         content_files
     for row in content_files:
         assert row["content_length"] > 0, row
         # `content_path` 指向盘上真实产物（读取侧形状与参考 store.cjs:636-644 一致）
         assert row["content_path"] and Path(row["content_path"]).exists(), row
         assert row["error"] is None, row
+
+    # 图片链路端到端闭合（P2a↔P2b 接线）：产物 markdown 里的每个
+    # `assets/<hash>` 占位都必须能解析到**盘上真实存在的资产**。
+    # 判别点刻意分开写：占位是字符串（解析侧产物），资产是文件（落盘侧产物），
+    # 两者是两个独立的失败面——P3b 的 P1 正是「产物有了、落盘没接上」这类。
+    from app.infra.parsing.asset_store import resolve_asset_path
+
+    project_id = base.split("/")[2]
+    for row in content_files:
+        markdown = Path(row["content_path"]).read_text(encoding="utf-8")
+        digests = re.findall(r"!\[[^\]]*\]\(assets/([0-9a-f]{64})\)", markdown)
+        assert digests, markdown
+        for digest in digests:
+            resolved = resolve_asset_path(
+                data_root=tmp_path, project_id=project_id, target=f"assets/{digest}")
+            assert resolved is not None and resolved.exists(), (row["file_id"], digest)
     # `metadataAnalysis` 上的同一子对象走另一条读取路径，也必须非空
     assert state["metadataAnalysis"]["contentFiles"] == content_files, \
         state["metadataAnalysis"]

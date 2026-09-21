@@ -1,5 +1,20 @@
 # docx 图片占位接线（P2a↔P2b）实施计划
 
+> **状态：已完成（2026-09-21）** —— 4 个 Task 全部落地，519 → **544 测试**；
+> 4 条任务各有 2 条判别力探针（共 8 条）全部「探针态红 / 还原后绿」。
+> 提交区间 `6b03f92`（本计划）→ Task 1/2/3 各一个 commit → 本回填。
+> spec §15 的「P2a↔P2b 未接线」缺口块已标记**已闭合**；P2a 侧裁定 R2 的撤销
+> 记录在 `parsing/docx.py` / `parsing/docx_html.py` 的 docstring 里（P2a 计划
+> 保留原样作历史记录，指针在 spec §15）。
+>
+> **本次未做（属 P3c/P4，计划里已列）**：图片出现位置抽取、跨文件按 hash 分组、
+> `preview_url` 的 HTTP 形态、把图片喂给视觉模型。
+>
+> **夹具决策的两处例外（如实记录）**：①`test_duplicate_e2e.py` 的
+> `test_e2e_duplicate_sentences_and_outline_groups_reachable` **保留 txt**——它的断言
+> 是**精确句数**（`totalSentenceCount == 4`），换格式会让断言与解析器细节耦合而收益为零；
+> ②其余 e2e 与签名单测夹具已全部回归 docx（含图片）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 撤销 P2a 裁定 R2 的「`include_images=True` 显式拒绝」，把 P2b 已有的图片资产能力接到 docx 解析路径上——产出**带图片占位的 markdown**并把资产落到 `<data_root>/projects/<project_id>/assets/`，使「上传 docx → 查重正文提取」在生产路径下不再必 error，并为 P3c 的图片比对备好可解析的 target。
@@ -85,21 +100,21 @@
 - 解析是在 assets 目录里找 `<hash>.*`（扩展名由落盘时决定，见 W8）：**唯一命中**才返回，0 个或多个（理论上不会）返回 `None`。
 - `project_id` 必须过净化守卫（失败抛 `ParsingError`，与 `save_docx_assets` 同款）。
 
-- [ ] **Step 1: 写失败的测试**（`server/tests/test_asset_store.py` 追加）
+- [x] **Step 1: 写失败的测试**（`server/tests/test_asset_store.py` 追加）
   - `test_asset_target_is_content_hash_under_assets_prefix`：`asset_target(b"x") == f"assets/{hashlib.sha256(b'x').hexdigest()}"`。
   - `test_asset_target_matches_stored_filename`：造 1 张图 → `save_docx_assets`；断言 `asset_target(media_data)` 的哈希段 == 落盘文件的 stem（**这是全任务最关键的一条**：证明「生成侧」与「落盘侧」按构造对齐，W3）。
   - `test_resolve_asset_path_finds_file_regardless_of_extension`：手工在 `assets/` 放 `abc….png` 与 `abc….jpg` 两种，各用自己的哈希 target 解析成功。
   - `test_resolve_asset_path_rejects_foreign_and_escaping_targets`：参数化 `["yibiao-asset://x/y.png", "http://a/b.png", "assets/../secret", "assets/not-a-hash", "", "assets/A"*1]` → 全部 `None`。
   - `test_resolve_asset_path_returns_none_when_missing`：合法靶但盘上无文件 → `None`。
   - `test_resolve_asset_path_rejects_bad_project_id`：`project_id=".."` → `ParsingError`。
-- [ ] **Step 2: 跑测试确认失败**（`ImportError`/`AttributeError`）。
-- [ ] **Step 3: 写实现**（含 docstring 行号/来源注释；`resolve_asset_path` 的 glob 用 `assets_dir.glob(f"{hash}.*")` 并 `sorted()` 取唯一）。
-- [ ] **Step 4: 跑测试确认通过** + 全量 519+新增 零回归。
-- [ ] **Step 5: 变异探针（必做 2 条）**
+- [x] **Step 2: 跑测试确认失败**（`ImportError`/`AttributeError`）。
+- [x] **Step 3: 写实现**（含 docstring 行号/来源注释；`resolve_asset_path` 的 glob 用 `assets_dir.glob(f"{hash}.*")` 并 `sorted()` 取唯一）。
+- [x] **Step 4: 跑测试确认通过** + 全量 519+新增 零回归。
+- [x] **Step 5: 变异探针（必做 2 条）**
   - 探针 A：把 `asset_target` 的哈希算法改成 `sha1` → `test_asset_target_matches_stored_filename` **必须红**。
   - 探针 B：把 `resolve_asset_path` 的前缀校验去掉（直接当成文件名拼）→ `test_resolve_asset_path_rejects_foreign_and_escaping_targets` **必须红**。
   - 还原后 **grep 验证**。
-- [ ] **Step 6: 提交**：`feat(server): 资产 target 共轭函数——asset_target/resolve_asset_path`
+- [x] **Step 6: 提交**：`feat(server): 资产 target 共轭函数——asset_target/resolve_asset_path`
 
 ---
 
@@ -119,18 +134,18 @@
 - `include_images=True`：`convert_image` 读字节 → `{"src": asset_target(data)}`；**不再 decompose**；`ParsingError`（`docx-conversion-failed`）拦截逻辑保持不变。
 - `docx_to_markdown` 的 include_images=True 分支把占位交给既有的「摘表格 → turndown → 回填 → normalize」流水线，**不新增后处理**（占位是标准 markdown 图片语法，turndown 会原样保留）。
 
-- [ ] **Step 1: 写失败的测试**（新建 `test_parsing_docx_images.py`）
+- [x] **Step 1: 写失败的测试**（新建 `test_parsing_docx_images.py`）
   - `test_markdown_without_images_is_unchanged`：同一 docx，`include_images=False` 的 markdown **不含** `<img`、不含 `assets/`（回归钉子）。
   - `test_markdown_with_images_has_one_placeholder_per_occurrence`：2 张不同图 + 其中 1 张插两次 → 占位 **3 个**、`![](assets/<hash>)` 形态、**位置**在图片所在段落（顺序断言）。
   - `test_same_image_twice_shares_one_target`：3 个占位里只有 **2 个不同** target（W4）。
   - `test_placeholder_hash_equals_media_content_hash`：占位里的哈希 ∈ `{m.content_hash for m in list_media_files(docx)}`（**跨模块一致性**，W3）。
   - `test_non_docx_include_images_is_noop`：`.txt` + `include_images=True` → 无 `assets/`、无异常（R-DW-5）。
   - `test_tables_and_headings_still_intact_with_images`：带图 + 表格 + 标题的 docx → 表格行列数与标题层级仍正确（**图片不该破坏既有解析**）。
-- [ ] **Step 2: 确认失败**。**Step 3: 实现**。**Step 4: 全量零回归**（**P2a 的 golden 必须全绿**——这是本任务的红线）。
-- [ ] **Step 5: 变异探针（必做 2 条）**
+- [x] **Step 2: 确认失败**。**Step 3: 实现**。**Step 4: 全量零回归**（**P2a 的 golden 必须全绿**——这是本任务的红线）。
+- [x] **Step 5: 变异探针（必做 2 条）**
   - 探针 A：`include_images=True` 时仍 `decompose()` 掉图片 → `test_markdown_with_images_has_one_placeholder_per_occurrence` **必须红**。
   - 探针 B：把回调的哈希换成图片尺寸（如 `f"{width}x{height}"`）→ `test_placeholder_hash_equals_media_content_hash` **必须红**。
-- [ ] **Step 6: 提交**：`feat(server): docx 带图解析——mammoth 回调产出 assets/<hash> 占位（撤销 R2 拒绝）`
+- [x] **Step 6: 提交**：`feat(server): docx 带图解析——mammoth 回调产出 assets/<hash> 占位（撤销 R2 拒绝）`
 
 ---
 
@@ -142,15 +157,15 @@
 
 **行为**：`content_extraction` 跑某文件时，若 `include_images` 为真且扩展名是 `docx` → `save_docx_assets(data_root=..., project_id=..., docx_path=Path(file_path))`。非 docx 跳过（R-DW-5）。失败由既有逐文件 catch 兜成 error 行（R-DW-7）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
   - 把现有的桩用例（`fake_parse` 返回 `![图1](asset://img1.png)`）**换成真 docx**：`build_docx_with_images` 造文件 → 真跑 `content_extraction` → 断言 ① markdown 里有占位；② **每个 target 都能被 `resolve_asset_path` 解析到存在的文件**（这是「接线真的接上了」的判别点）；③ `assets/` 目录里的文件数 == 不同哈希数。
   - 新增 `test_content_extraction_skips_asset_storage_for_non_docx`：`.txt` + include_images=True → 不创建 assets 目录、不抛。
   - 新增 `test_content_extraction_asset_failure_is_per_file`：`monkeypatch` `save_docx_assets` 抛异常 → 该文件 error 行、**其余文件仍 success**、段 `failed=True`（不连坐，R-DW-7）。
-- [ ] **Step 2: 确认失败**。**Step 3: 实现**。**Step 4: 全量零回归**。
-- [ ] **Step 5: 变异探针（必做 2 条）**
+- [x] **Step 2: 确认失败**。**Step 3: 实现**。**Step 4: 全量零回归**。
+- [x] **Step 5: 变异探针（必做 2 条）**
   - 探针 A：删掉落资产那一步 → 「每个 target 都能解析」的用例 **必须红**。
   - 探针 B：把落资产的 `try` 拿掉、让异常冒泡到整批 → `test_content_extraction_asset_failure_is_per_file` **必须红**。
-- [ ] **Step 6: 提交**：`feat(server): content_extraction 落图片资产——docx+include_images 时按 hash 落盘`
+- [x] **Step 6: 提交**：`feat(server): content_extraction 落图片资产——docx+include_images 时按 hash 落盘`
 
 ---
 
@@ -163,7 +178,7 @@
 1. **夹具改回 docx**：P3b Task 4 曾因「docx 必 error」把 e2e 夹具临时 txt 化——现在**撤销该规避**，至少留一条用例走 docx + 图片，并断言 `/state` 的 `contentFiles[].status == "success"`。`test_api_duplicate_files.py` 的签名单测同理（若改动它，注意签名只依赖 `file_path|size|modified_at`，与格式无关）。
 2. **spec §15 回填**：把「跨阶段缺口登记 · P2a↔P2b 未接线」块标记为**已闭合**（附 commit 与验收证据）；更新 `parsing/docx.py` 相关的裁定 R2 描述（R2 的拒绝前提已消失，改为「已接线，见本计划」）。
 3. **本计划勾选**。
-- [ ] **Step 1-2**: 改夹具 → 确认仍绿（若红，先查清是不是真实的接线缺陷）。**Step 3**: 回填 spec 与计划。**Step 4**: 全量。**Step 5**: 提交 `docs(server): docx 图片接线完成回填（§15 缺口闭合）+ e2e 夹具回归 docx`。
+- [x] **Step 1-2**: 改夹具 → 确认仍绿（若红，先查清是不是真实的接线缺陷）。**Step 3**: 回填 spec 与计划。**Step 4**: 全量。**Step 5**: 提交 `docs(server): docx 图片接线完成回填（§15 缺口闭合）+ e2e 夹具回归 docx`。
 
 ---
 

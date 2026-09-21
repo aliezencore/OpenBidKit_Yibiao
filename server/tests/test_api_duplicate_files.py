@@ -206,7 +206,7 @@ def test_upload_clears_sections_and_rewrites_signature(client, project, docx_byt
 
 # --------------------------------------------------------------- 必有用例 8
 
-def test_upload_and_analysis_signatures_agree(client, project):
+def test_upload_and_analysis_signatures_agree(client, project, docx_bytes):
     """F-2 硬约束：上传路径与 POST /analysis 路径算出的签名必须一致。
 
     这是防「两处签名算法不一致」的唯一哨兵。
@@ -224,16 +224,15 @@ def test_upload_and_analysis_signatures_agree(client, project):
 
     这样即便换了实现路径，只要两处不一致，第 1 条立刻红。
 
-    **夹具偏离登记（T4）**：用 `.txt` 而非 docx——P2a 的 docx 解析器在
-    `include_images=True` 时显式抛 not-implemented（P2a 裁定 R2，docx 图片
-    属 P2b），而 T4 的 content_extraction 按裁定 R-P3b-1 必须
-    `include_images=True` 重解析。本测试验证的是签名一致性（与文件格式
-    无关），txt 让分析链路真实跑通；docx 图片链路待 P2b 落地后回归。
+    **夹具已回归 docx（P2a↔P2b 接线后）**：这里曾因「docx + `include_images=True`
+    会让 content_extraction 必 error」（P2a 裁定 R2 的拒绝路径）而临时改用 `.txt`。
+    R2 已随接线撤销，故恢复 docx——签名只依赖 `file_path|size|modified_at`，与格式
+    无关，用生产真实格式更贴近实际。
     """
     state = client.app.state.yibiao
     _post_files(client, project,
-                tender=[("招标.txt", "招标要求正文".encode("utf-8"))],
-                bid=[("投标.txt", "投标应答正文".encode("utf-8"))])
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标.docx", docx_bytes)])
 
     # 上传写入的签名
     uploaded = state.duplicate.get_meta(project)["current_signature"]
@@ -704,7 +703,7 @@ def _messages(client, task_id):
             for entry in client.app.state.yibiao.logs.list_for_task(task_id)]
 
 
-def test_force_true_reruns_and_skips_idempotent_log(client, project):
+def test_force_true_reruns_and_skips_idempotent_log(client, project, docx_bytes):
     """项 3（M-3）：force=True 经 HTTP 直达 → 真的重跑（日志不含幂等文案）。
 
     对照：同一签名下 force=False 的第二次分析**必须**命中幂等（含「无需重复分析」），
@@ -712,8 +711,8 @@ def test_force_true_reruns_and_skips_idempotent_log(client, project):
     """
     state = client.app.state.yibiao
     _post_files(client, project,
-                tender=[("招标.txt", "招标要求正文".encode("utf-8"))],
-                bid=[("投标.txt", "投标应答正文".encode("utf-8"))])
+                tender=[("招标.docx", docx_bytes)],
+                bid=[("投标.docx", docx_bytes)])
 
     first = client.post(f"/projects/{project}/duplicate/analysis", json={})
     assert first.status_code == 200, first.text
