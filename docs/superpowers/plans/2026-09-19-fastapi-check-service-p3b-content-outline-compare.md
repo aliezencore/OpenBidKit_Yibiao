@@ -1,5 +1,14 @@
 # P3b 正文与目录比对 实施计划
 
+> **状态：已完成（2026-09-21）** —— 22 提交（`a7bc172` → `371d5e0`），456 → **519 测试**；
+> 双评审 PASS WITH NOTES（`review-t4t7-a.md`：1×P1 + 4×P2 全部闭合；`review-t4t7-b.md`：
+> 0×P0 / 0×P1，3×P2 + 2 观察全部处置）。执行期裁定与偏离登记见 spec §15 的
+> 「P3b 执行期裁定回填」；逐任务证据与探针记录见 SDD ledger
+> `.superpowers/sdd/2026-09-19-fastapi-check-service-p3b-content-outline-compare/progress.md`。
+>
+> **本计划范围外但已登记**（交 P3c/P3d 承接）：P2a↔P2b 未接线（docx 的
+> `include_images=True` 仍显式拒绝）、metadata/image 两段的子统计与其 rows 落库分派。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把查重四段中的**两个真实算法段**搬进新服务：`content_extraction`（正文提取，共享上游）、`outline`（目录抽取三来源 + 跨文件分组/pairwise）、`content`（正文切句 + 招标要求五级匹配 + 跨文件重复句）。metadata 段留 stub（P3d）、image 段留 stub（P3c）。**编排、幂等、进度折算、签名作废全部不动**（P3a 已验收）。
@@ -159,7 +168,7 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
 
 ### TDD 步骤
 
-- [ ] **Step 1 写失败的测试**（`test_domain_outline.py`，纯函数直调）：
+- [x] **Step 1 写失败的测试**（`test_domain_outline.py`，纯函数直调）：
   1. `test_strip_markdown_for_outline_variants`——图片/链接/HTML/强调/实体五类各一断言。
   2. `test_normalize_outline_title_strips_numbering_and_punctuation`——`1.2.3 技术要求`→`技术要求`、`第一章 总则`→`总则`、`（一）概况`→`概况`、`① 背景`→`背景`；标点/空白/大小写。
   3. `test_clean_outline_title_strips_page_trails`——`项目概述……12`→`项目概述`、`服务要求 8`→`服务要求`。
@@ -174,13 +183,13 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
   12. `test_build_outline_comparison_similar_groups_threshold_and_level_gap`——0.86 阈值两侧 + level 差 ≤1 两侧。
   13. `test_build_outline_comparison_pairwise_formula_and_risk`——构造两文件三列表，断言 score=round(0.45a+0.35b+0.2c,2)、shared_count=max、risk 四档。
   14. `test_bigram_and_lcs_similarity_values`——数值精确断言（含空串 0、相等 1）。
-- [ ] **Step 2 跑测试确认失败**（ModuleNotFoundError）。
-- [ ] **Step 3 写实现**（对照上表逐字移植；每个正则加参考行号注释）。
-- [ ] **Step 4 跑测试确认通过** + 全量 456+新增 零回归。
-- [ ] **Step 5 变异探针（必做 2 条）**：
+- [x] **Step 2 跑测试确认失败**（ModuleNotFoundError）。
+- [x] **Step 3 写实现**（对照上表逐字移植；每个正则加参考行号注释）。
+- [x] **Step 4 跑测试确认通过** + 全量 456+新增 零回归。
+- [x] **Step 5 变异探针（必做 2 条）**：
   1. `buildOutlineComparison` 的 similar 阈值 `0.86 → 0.99` → 用例 12 **必须红**；还原 `git diff --exit-code`。
   2. pairwise 权重 `0.45 → 0.55` → 用例 13 **必须红**；还原。
-- [ ] **Step 6 提交**：`feat(server): P3b 目录纯函数——三来源抽取/分组/pairwise/riskFromScore`
+- [x] **Step 6 提交**：`feat(server): P3b 目录纯函数——三来源抽取/分组/pairwise/riskFromScore`
 
 ---
 
@@ -215,7 +224,7 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
 
 ### TDD 步骤
 
-- [ ] **Step 1 写失败的测试**：
+- [x] **Step 1 写失败的测试**：
   1. `test_decode_basic_html_entities_order_and_numeric`——`&amp;lt;` → `&lt;`（amp 在后→不二次解码）、`&#x4e2d;`→`中`、`&#20013;`→`中`、非法保留。
   2. `test_split_markdown_table_row_escapes_and_edges`——转义 `\|`、首尾管道、空单元格。
   3. `test_markdown_table_triple_becomes_per_cell_blocks`——表头+分隔+两行数据 → 每格独立块、分隔行不出现在任何块。
@@ -226,11 +235,11 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
   8. `test_normalize_content_sentence_control_chars_and_spaces`——控制字符类、`\u200b`、全角空格。
   9. `test_split_content_sentences_600_truncation_and_filter`——>600 截断成 `...600字...`+`...`；非 informative 被滤。
   10. `test_strip_images_three_pattern_forms`——`![]()`、`<img src=…>`、`<img …>` 三形态。
-- [ ] **Step 2 确认失败**。**Step 3 实现**（正则逐字移植，`(?<`→`(?P<`，每条带参考行号注释）。**Step 4 全量零回归**。
-- [ ] **Step 5 变异探针（必做 2 条）**：
+- [x] **Step 2 确认失败**。**Step 3 实现**（正则逐字移植，`(?<`→`(?P<`，每条带参考行号注释）。**Step 4 全量零回归**。
+- [x] **Step 5 变异探针（必做 2 条）**：
   1. `isInformativeContentSentence` 的内容字符门槛 `4 → 40` → 用例 6 **必须红**；还原。
   2. 弱边界累计阈值 `20 → 200` → 用例 5 **必须红**；还原。
-- [ ] **Step 6 提交**：`feat(server): P3b 正文纯函数——文本块提取(GFM表格)/切句/信息量判据`
+- [x] **Step 6 提交**：`feat(server): P3b 正文纯函数——文本块提取(GFM表格)/切句/信息量判据`
 
 ---
 
@@ -263,7 +272,7 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
 
 ### TDD 步骤
 
-- [ ] **Step 1 写失败的测试**：
+- [x] **Step 1 写失败的测试**：
   1. `test_normalize_tender_comparable_text_pipeline`——全角→半角、`不低于`→`>=`、日期两形态归一、表前缀循环剥、目录页尾剥。
   2. `test_strict_and_loose_keys_normalize_punctuation_case`——同文异形（标点/空白/大小写）→ 同 key。
   3. `test_skeleton_key_placeholder_order_and_allowed_gate`——`2026年1月2日前支付100万元`→`{date}前支付{money}`（万元先于元）；allowed 门（<8、无 `{}`、短文本无评分词各拒一例）。
@@ -273,11 +282,11 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
   7. `test_gram_index_candidate_reset_semantics`——同一候选在多 gram 命中时 shared 计数正确（构造共享多 bigram 的句子对）。
   8. `test_build_duplicate_sentences_filter_sort_and_ids`——单文件句滤掉；排序三级逐级断言；`S000001` 形状。
   9. `test_tender_sentence_count_is_exact_set_size`——重复 normalized 只计一次。
-- [ ] **Step 2 确认失败**。**Step 3 实现**。**Step 4 全量零回归**。
-- [ ] **Step 5 变异探针（必做 2 条）**：
+- [x] **Step 2 确认失败**。**Step 3 实现**。**Step 4 全量零回归**。
+- [x] **Step 5 变异探针（必做 2 条）**：
   1. near 严格档 dice `0.88 → 0.99` → 用例 6 **必须红**；还原。
   2. `buildDuplicateSentences` 的 `> 1` → `> 2` → 用例 8 **必须红**；还原。
-- [ ] **Step 6 提交**：`feat(server): P3b 招标匹配器——exact/strict/field/skeleton/near 五级与重复句汇总`
+- [x] **Step 6 提交**：`feat(server): P3b 招标匹配器——exact/strict/field/skeleton/near 五级与重复句汇总`
 
 ---
 
@@ -302,15 +311,15 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
 
 ### TDD 步骤
 
-- [ ] **Step 1 写失败的测试**（构造 `DuplicateAnalysisRunner` + 注入本 runner；docx 夹具用 `tests.parsing_fixtures.build_docx`）：
+- [x] **Step 1 写失败的测试**（构造 `DuplicateAnalysisRunner` + 注入本 runner；docx 夹具用 `tests.parsing_fixtures.build_docx`）：
   1. `test_content_extraction_writes_per_file_content_and_rows`——tender+bid 各一 → content 目录两份 `{file_id}.md`、rows 两行 success、`content_length`/`content_hash` 正确（sha256 手算对照）。
   2. `test_content_extraction_markdown_includes_images`——带图片的 docx → 产出的 content markdown **含图片语法**（与上传解析 documents/ 的差异，R-P3b-1 的判别证据）。
   3. `test_content_extraction_failed_file_does_not_poison_batch`——一个坏文件（如伪造 `.pdf` 走 fail 路径或 monkeypatch `parse_document` 抛）→ 其余文件仍 success、`failed=True`。
   4. `test_upload_clears_duplicate_content_directory`（R-P3b-6）——先跑一次分析产 content 目录 → 重新上传文件 → 目录被清空/不存在。
   5. `test_content_extraction_progress_reports_per_file`——`section_progress` 回调被逐文件调用（回调用测试桩收集调用参数；completed/total 递增）。
-- [ ] **Step 2 确认失败**。**Step 3 实现**（`duplicate_sections.py` 提供 `build_content_extraction(data_root)` 返回 runner 闭包；`create_app` 的 runner 构造处注入）。**Step 4 全量零回归**（P3a 的 `test_failure_branch_is_unreachable_in_p3a` 若因此变红——**不会**，本任务只动 content_extraction，四段终态仍未接逐文件失败——若红，停下来查清再动）。
-- [ ] **Step 5 变异探针（必做 1 条）**：`content_extraction` 的 error 行改成「抛出中断整批」→ 用例 3 **必须红**（单文件失败连坐 = 参考 `:2336` 的 catch 被删）；还原。
-- [ ] **Step 6 提交**：`feat(server): P3b content_extraction 角色——重解析/content 目录/落库/上传清理`
+- [x] **Step 2 确认失败**。**Step 3 实现**（`duplicate_sections.py` 提供 `build_content_extraction(data_root)` 返回 runner 闭包；`create_app` 的 runner 构造处注入）。**Step 4 全量零回归**（P3a 的 `test_failure_branch_is_unreachable_in_p3a` 若因此变红——**不会**，本任务只动 content_extraction，四段终态仍未接逐文件失败——若红，停下来查清再动）。
+- [x] **Step 5 变异探针（必做 1 条）**：`content_extraction` 的 error 行改成「抛出中断整批」→ 用例 3 **必须红**（单文件失败连坐 = 参考 `:2336` 的 catch 被删）；还原。
+- [x] **Step 6 提交**：`feat(server): P3b content_extraction 角色——重解析/content 目录/落库/上传清理`
 
 ---
 
@@ -358,7 +367,7 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
 
 ### TDD 步骤
 
-- [ ] **Step 1 写失败的测试**：
+- [x] **Step 1 写失败的测试**：
   1. `test_outline_section_extracts_groups_and_persists`——两份投标 docx 含相同目录标题 → 段 success；`outline_items`（scoped id、父子、from_tender）、`outline_groups`（score=1 的 path 组）、`outline_pairwise`（score/risk）全部落库可读（经 `repo` 直查）。
   2. `test_outline_section_tender_whitelist_failure_continues`——tender 的 content 条目缺失 → 广播文案逐字断言（经 `client.app.state.yibiao.logs` 或段 stats/message 桩）、分析继续。
   3. `test_outline_section_file_error_marks_failed_and_keeps_rest`——一个 bid 的 content 条目缺失（抛「正文内容尚未成功提取，无法进行目录分析」）→ 该文件 error 行、`failed=True`、其余文件 items 保留。
@@ -368,13 +377,13 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
   7. `test_section_progress_running_rows_without_signature`——大文件（构造长正文触发 500 句粒度或直接小 batch 断言文件尾回调）→ 段状态行出现 `running` 行且 `signature` 为 NULL（P3a 裁定 P12）；终态后为 success + 签名。
   8. `test_persist_rows_is_implemented_now`——`DuplicateAnalysisRunner._persist_rows` 对带 rows 的产出不再抛 `NotImplementedError`（P3a 占位正式退役）。
   9. `test_terminal_message_from_output`——outline 全成 → 终态 message「目录分析完成」（**不是** P3a 的统一文案「分析完成」）；部分失败 →「部分文件目录分析失败」。
-- [ ] **Step 2 确认失败**。**Step 3 实现**。**Step 4 全量零回归**：
+- [x] **Step 2 确认失败**。**Step 3 实现**。**Step 4 全量零回归**：
   - **`test_failure_branch_is_unreachable_in_p3a` 必须更新**（R-P3b-4：它就是提醒器）——新形状：可控 runner 令 outline 段产 `failed=True` → 编排器写 outline=error、**content/image 段不受连坐**（各自 success）；改名 `test_section_failure_marks_only_own_section`。
   - `_merge_metadata_stats` 按 `extraction` 字段把 `content_extraction` 子统计填实（P3a docstring 预留点，`duplicate_runner.py:493-512`）——补断言进用例 1。
-- [ ] **Step 5 变异探针（必做 2 条）**：
+- [x] **Step 5 变异探针（必做 2 条）**：
   1. content 段的文件级 catch 改成「置 failed=True」→ 用例 6 **必须红**（R-P3b-4 的判别核心：content 恒 success）；还原。
   2. `_persist_rows` 的 `content_occurrences` 分支注释掉 → 用例 4 **必须红**（occurrences 表空）；还原。
-- [ ] **Step 6 提交**：`feat(server): P3b outline/content 段接线——段runner/_persist_rows/段内进度/终态文案`
+- [x] **Step 6 提交**：`feat(server): P3b outline/content 段接线——段runner/_persist_rows/段内进度/终态文案`
 
 ---
 
@@ -398,7 +407,7 @@ JS 的 `str.length` / `slice` / `for` 循环按 UTF-16 码元；Python 按码点
 
 ### TDD 步骤（每项：先红后绿，探针按判别点自选，还原判据同全局约束）
 
-- [ ] Step 1-6 同前格式；提交：`chore(server): P3b 编排收口——真并发用例/cancel HTTP/force 直达/stats_json 加固/旧形状钉子`
+- [x] Step 1-6 同前格式；提交：`chore(server): P3b 编排收口——真并发用例/cancel HTTP/force 直达/stats_json 加固/旧形状钉子`
 
 ---
 

@@ -3,7 +3,7 @@
 全部预期值经 Node 直接运行参考实现
 `client/electron/services/duplicateCheckService.cjs`（:108-112 + :1453-1754）
 取地面真值核对，非手工推演。对拍脚本：
-`.superpowers/sdd/2026-09-19-fastapi-check-service-p3b-content-outline-compare/oracle-probe-task2.cjs`
+`.superpowers/sdd/2026-09-19-fastapi-check-service-p3b-content-outline-compare/oracle-probe.cjs`
 """
 
 from __future__ import annotations

@@ -514,12 +514,31 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | **已完成** |
 | P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | 计划待写 |
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
-| **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | 计划待写 |
+| **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | 计划待写 |
 | **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | 计划待写 |
 | P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
 
 > **P3a 执行期裁定回填（2026-09-18）**：上表 P3a 描述里「招标 / 投标按 `role` 入表」在执行时被**修正**——参考实现 `replaceFiles` 的第一条语句 `DELETE FROM duplicate_check_files` 无 role 过滤，真实语义是「**tender/bid 两组一次性全量替换**」，且上传需在同一事务内作废四段并重写签名（否则幂等判据会误命中旧结果）。四段当前仍为「零算法」stub；**P3b 起逐段替换真实算法，编排（`DuplicateAnalysisRunner` 的五角色/段级异常隔离/签名守卫）与状态机不动**。
+
+> **P3b 执行期裁定回填（2026-09-21）**：
+> ① **stats 子统计键名一律 camelCase**（`contentExtraction` / `tenderSentenceCount` /
+> `tenderMatchedItemCount` / `tenderMatchedSentenceCount` / `totalSentenceCount`）——
+> 判据是「参考**写入侧**（`duplicateCheckService.cjs`）与参考**读取侧**
+> （`duplicateCheckStore.cjs` 从各表重建）两处一致」；唯 `tender_match_reason_counts`
+> 保持 snake（参考 `:2625` 原样）。计划 Task 5 写的 snake_case 是**计划措辞偏差**，
+> 照它实现会让 `/state` 的对应键恒 0/空。
+> ② **参考缺陷逐字复刻（P3b 段第 2 处）**：`buildTenderSkeletonKey`（`:1839`）的标点剥除
+> 正则把 `{}` 纳入字符集 → `{date}/{money}/{num}` 的花括号被剥 → `isTenderSkeletonAllowed`
+> （`:1847`）的 `!/[{}]/` 恒成立 → **恒返回 False**，五级匹配的 skeleton 级事实不可达。
+> 不「修复」——修复会让比对结果偏离参考。
+> ③ **JS 的 `\d`/`\b`/`\w` 是纯 ASCII，Python `re` 默认 Unicode**——移植参考正则时
+> 一律加 `re.ASCII`（否则 `\b\d+\b` 在「2026年」这类中文数字边界上两侧行为分歧）。
+> 这是**对齐手段**，不登记为偏离。
+> ④ **中间态（running）偏离，有意保留**：参考每次 running 更新都携带
+> `extraction`/`files`/各类计数；本实现的段内进度回调被冻结为 `(percent, message)`
+> （R-P3b-3，为保进度单调），故分析**进行中**的轮询看不到子统计——**终态全部正确**，
+> 差异只在运行中的快照。若要运行中的子进度条，需扩回调签名（接口变更）。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
@@ -557,6 +576,15 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > `metadataExtraction` 子统计；实现 `image` 角色时**必须**写 `image` 段的 `files`
 > （参考 `:845`）与 `totalImageCount`。**验收清单须逐键对照上表**——否则会复现本轮同类缺陷。
 > （P3b 计划无 Task 8+，故不在 P3b 范围内修复；本块为 P3c/P3d 的必办前置项。）
+>
+> **补登（评审 B 的 B-1 面）——落库分派表**：上表是「stats 键」这一面，还有对称的
+> **第二面**：`DuplicateAnalysisRunner._persist_rows` 是「runner 产出 → 落库」的
+> **唯一分派点**——仓储有 `replace_*` 而分派表没分支就是**静默丢弃**（评审 A 的 P1
+> 是它的镜像：分派表有分支、但 `__call__` 没接线）。P3c/P3d 实现角色时除 stats 键外
+> **必须**确认产出的 rows 键能落库：`metadata_items`（P3d）、`image_files` /
+> `duplicate_images`(+`image_occurrences`)（P3c）三组已在 `371d5e0` **预先接线**，
+> 且由直读目标表的覆盖用例 `test_persist_rows_dispatches_every_supported_row_key` 钉住。
+> 新角色若产出**其它** rows 键，必须同时补分派分支 + 扩展该用例。
 
 **关于 P2a / P2b 为何不合并**：合起来约 13 个任务，单个计划的 TDD 步骤会到 90+ 条，可执行性下降。两者**没有依赖关系**（图片管线不读 markdown，文档解析不碰图片），可以任意顺序或并行实施。**若你更希望一个大计划，可以合并**——那是我对计划粒度的取舍，不是能力约束。
 
