@@ -260,7 +260,8 @@ def build_outline_runner(data_root: Path | str):
     - `build_outline_comparison` → `outline_items` / `outline_groups` / `outline_pairwise`
       三类落库行；`failed = any(文件 error)`；`message = 部分文件目录分析失败/目录分析完成`
       （:2483）；`extraction = {status, completed: len(results), total: len(bid_files)}`（:2485）；
-      stats 含 `tender_sentence_count` / `tender_matched_item_count`（:2487-2488）。
+      stats 含 **camelCase** 的 `tenderSentenceCount` / `tenderMatchedItemCount`（:2487-2488）
+      与 `files`（逐文件摘要，:2486）——键名以参考写入侧与仓储读取侧为准，非计划措辞的 snake。
     """
 
     async def run_outline(section_ctx: SectionRunContext) -> SectionOutput:
@@ -418,16 +419,16 @@ def build_content_runner(data_root: Path | str):
       继续比对投标正文：{error}」（:2519）。
     - 逐 bid（按序全局递增 `first_order`）：`split_content_sentences` → 逐句
       `matcher.match`（`reason` 计数）；未命中 → 收集进 local map。
-      每 500 句 `section_progress(min(89, round(5 + ((file_index + processed/len)/
-      bid_count)*80)), "正文比对 {i+1}/{n}（{processed}/{len} 句）")`（:2562）+ `await
-      asyncio.sleep(0)`（:2570 让出）。**文件级 catch → 只广播 `{file_name} 正文比对失败：
-      {error}`（:2588），不产 error 行、不置 failed**。文件尾
-      `section_progress(round((10 if global else 5) + (i+1)/n*80), "正文比对 {i+1}/{n}")`（:2598）。
+      每 500 句 `section_progress(min(89, half_up(5 + ((file_index + processed/len)/
+      bid_count)*80)), "正文比对 {i+1}/{n}（{processed}/{len} 句）")`（:2562，`Math.round`
+      = half-up）+ `await asyncio.sleep(0)`（:2570 让出）。**文件级 catch → 只广播
+      `{file_name} 正文比对失败：{error}`（:2588），不产 error 行、不置 failed**。文件尾
+      `section_progress(half_up((10 if global else 5) + (i+1)/n*80), "正文比对 {i+1}/{n}")`（:2598）。
     - `build_duplicate_sentences(global)` → `content_duplicates` / `content_occurrences`；
       `message = 正文比对完成`（:2611）；`failed = False` 恒；`extraction =
-      {status: success, completed: bid_count, total: bid_count}`；stats 含
-      `tender_sentence_count` / `tender_matched_sentence_count` / `total_sentence_count`
-      + `tender_match_reason_counts`（:2613-2615）。
+      {status: success, completed: bid_count, total: bid_count}`；stats 含 **camelCase** 的
+      `tenderSentenceCount` / `tenderMatchedSentenceCount` / `totalSentenceCount`（:2613-2615）
+      + `tender_match_reason_counts`（:2625，**参考此处自己就是 snake，逐字保留**）。
     """
 
     async def run_content(section_ctx: SectionRunContext) -> SectionOutput:
