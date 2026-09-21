@@ -92,17 +92,24 @@ def test_parse_document_detects_format(tmp_path):
 def test_parse_document_forwards_include_images_to_docx(tmp_path):
     """裁定 R23：include_images 必须转发到 docx 路径，而不是被静默丢弃。
 
-    转发后由 docx 侧的 R2 守卫拒绝，调用方拿到 not-implemented；
-    若参数被丢弃，这里会「成功返回 markdown」而不是抛错——该用例即失败。
+    本用例原先靠「docx 侧的 R2 守卫抛 not-implemented」来**间接**观测转发；
+    R2 已随 P2a↔P2b 接线撤销，故改为直接观测**转发结果**：同一个带图 docx，
+    转发 `True` 时 markdown 有 `assets/<hash>` 占位、不转发时没有。
+    若参数被丢弃，两者会相同 → 该用例失败。判别力不依赖「抛错」这个副作用。
     """
-    from app.domain.shared.errors import ParsingError
+    import re
 
-    p = build_docx(tmp_path / "a.docx", blocks=[("p", "正文")])
+    from tests.parsing_fixtures import build_docx_with_images, make_image
 
-    with pytest.raises(ParsingError) as info:
-        parse_document(p, provider="local", include_images=True)
+    image = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    p = build_docx_with_images(tmp_path / "a.docx", blocks=[("p", "正文。")], images=[image])
 
-    assert info.value.code == "not-implemented"
+    forwarded = parse_document(p, provider="local", include_images=True)
+    dropped = parse_document(p, provider="local")
+
+    assert re.search(r"!\[[^\]]*\]\(assets/[0-9a-f]{64}\)", forwarded.markdown), \
+        forwarded.markdown
+    assert "assets/" not in dropped.markdown
 
 
 def test_parser_exception_is_normalised_to_parsing_error(tmp_path):

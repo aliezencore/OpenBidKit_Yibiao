@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from app.domain.shared.errors import ParsingError
@@ -57,18 +59,26 @@ def test_empty_document_yields_empty_string(tmp_path):
     assert docx_to_markdown(p).strip() == ""
 
 
-def test_include_images_true_is_rejected(tmp_path):
-    """裁定 R2：P2a 不产出图片。mammoth 默认会把整图编成 base64 data URL
-    塞进 markdown，污染 LLM 提示词与正文比对；真正实现属 P2b。
-    本用例把「拒绝」这一行为钉住，避免它被无声移除。"""
-    from app.domain.shared.errors import ParsingError
+def test_include_images_true_keeps_asset_placeholders(tmp_path):
+    """P2a↔P2b 接线：`include_images=True` 产出 `![](assets/<sha256>)` 占位。
 
-    p = build_docx(tmp_path / "img.docx", blocks=[("p", "正文")])
+    本用例原先钉的是**裁定 R2 的拒绝**（`not-implemented`）。R2 的拒绝前提
+    「P2b 的图片占位 + 资产提取未落地」已消失，且新实现不走 base64（mammoth 的
+    默认转换才会塞 data URL，这里回调只写 `assets/<hash>`），故拒绝被撤销——
+    本用例改为钉**新行为**，同时用同源的 `include_images=False` 做对照，
+    保证「开关真的在起作用」而不是两条路径恰好同形。
+    """
+    from tests.parsing_fixtures import build_docx_with_images, make_image
 
-    with pytest.raises(ParsingError) as info:
-        docx_to_markdown(p, include_images=True)
+    image = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    p = build_docx_with_images(tmp_path / "img.docx", blocks=[("p", "正文。")], images=[image])
 
-    assert info.value.code == "not-implemented"
+    with_images = docx_to_markdown(p, include_images=True)
+    without_images = docx_to_markdown(p)
+
+    assert re.search(r"!\[[^\]]*\]\(assets/[0-9a-f]{64}\)", with_images), with_images
+    assert "assets/" not in without_images
+    assert "data:image" not in with_images, "不得退回 base64 内联（R2 的原始顾虑）"
 
 
 def test_extract_tables_returns_gfm_and_escaped_marker():
