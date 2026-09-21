@@ -1,12 +1,17 @@
 import hashlib
 import os
 import zipfile
+from pathlib import Path
 
 import pytest
 
 from app.domain.shared.errors import ParsingError
 import app.infra.parsing.asset_store as asset_store
-from app.infra.parsing.asset_store import save_docx_assets
+from app.infra.parsing.asset_store import (
+    asset_target,
+    resolve_asset_path,
+    save_docx_assets,
+)
 from tests.parsing_fixtures import build_docx_with_images, make_image
 
 
@@ -254,3 +259,96 @@ def test_stray_occurrence_without_matching_media_is_not_attached(tmp_path):
     assert "media/ghost.png" not in all_occurrence_media
     # 真实图片的出现位置仍然被挂上
     assert "media/image1.png" in all_occurrence_media
+
+
+# ------------------------------------------------ P2a↔P2b 接线：target 的共轭两端
+
+
+def test_asset_target_is_content_hash_under_assets_prefix():
+    """target 形态 = `assets/<sha256>`，**不带扩展名**（裁定 R-DW-1）。
+
+    不带扩展名是刻意的：落盘扩展名取自 prep 结果（`compress`/`transcode` 会换容器，
+    见 `_asset_extension`），markdown 生成侧无法在不重复跑一遍 Pillow 的前提下预知它。
+    """
+    assert asset_target(b"x") == f"assets/{hashlib.sha256(b'x').hexdigest()}"
+
+
+def test_asset_target_matches_stored_filename(tmp_path):
+    """**接线最关键的一条**：生成侧与落盘侧必须**按构造**对齐。
+
+    mammoth 回调拿到的图片字节与 `list_media_files` 读出的 `word/media/*` 字节是同一份，
+    两侧都用 `sha256` → 落盘文件名 `<hash>.<ext>` 的 stem 就是 target 里的那段哈希。
+    这条断言一旦红，说明 markdown 的占位指向了一个不存在的资产。
+    """
+    real = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    source = _docx(tmp_path, [real])
+
+    assets = save_docx_assets(data_root=tmp_path / "data", project_id="p1", docx_path=source)
+
+    assert len(assets) == 1
+    asset = assets[0]
+    assert Path(asset.path).stem == asset.content_hash
+    assert asset_target(real.read_bytes()) == f"assets/{asset.content_hash}"
+
+
+@pytest.mark.parametrize("extension", [".png", ".jpg", ".bmp"])
+def test_resolve_asset_path_finds_file_regardless_of_extension(tmp_path, extension):
+    """解析侧不得假设扩展名——三种容器（原图 / 转码 / 压缩）都要能命中。"""
+    digest = hashlib.sha256(b"whatever").hexdigest()
+    assets_dir = tmp_path / "data" / "projects" / "p1" / "assets"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / f"{digest}{extension}").write_bytes(b"payload")
+
+    resolved = resolve_asset_path(
+        data_root=tmp_path / "data", project_id="p1", target=f"assets/{digest}")
+
+    assert resolved == assets_dir / f"{digest}{extension}"
+
+
+@pytest.mark.parametrize("target", [
+    "",
+    "yibiao-asset://imported-images/x/y.png",
+    "https://example.com/a.png",
+    "assets/../secret.png",
+    "assets/not-a-hash",
+    "assets/",
+    "data:image/png;base64,AAAA",
+    "assets/" + "A" * 64,
+])
+def test_resolve_asset_path_rejects_foreign_and_escaping_targets(tmp_path, target):
+    """外来 scheme、目录穿越、非法哈希**一律返回 None，不抛**。
+
+    返回 None 而不是抛异常是刻意的：调用方（P3c 的图片抽取）会逐行遍历 markdown，
+    遇到不认识的 target 应该**跳过那一行**而不是让整个文件的图片段失败。
+    """
+    assert resolve_asset_path(
+        data_root=tmp_path / "data", project_id="p1", target=target) is None
+
+
+def test_resolve_asset_path_returns_none_when_missing(tmp_path):
+    """合法靶但盘上没有（例如资产还没落盘）→ None，调用方自行降级。"""
+    digest = hashlib.sha256(b"gone").hexdigest()
+    assert resolve_asset_path(
+        data_root=tmp_path / "data", project_id="p1", target=f"assets/{digest}") is None
+
+
+def test_resolve_asset_path_does_not_escape_the_assets_dir(tmp_path):
+    """穿越必须在**哈希校验**那一层就被拦住——造一个「穿越后真的存在」的文件。
+
+    否则「返回 None」可能只是因为恰好没找到（弱断言）。permissive 实现（直接
+    `glob(f"{target}.*")`）会在这里匹配到 `projects/p1/secret.png` 并返回它 → 红。
+    """
+    root = tmp_path / "data" / "projects" / "p1"
+    (root / "assets").mkdir(parents=True)
+    (root / "secret.png").write_bytes(b"leak")
+
+    assert resolve_asset_path(
+        data_root=tmp_path / "data", project_id="p1", target="assets/../secret") is None
+
+
+def test_resolve_asset_path_rejects_bad_project_id(tmp_path):
+    """与 `save_docx_assets` 同一道净化守卫（不在这里另写一份）。"""
+    digest = hashlib.sha256(b"x").hexdigest()
+    with pytest.raises(ParsingError):
+        resolve_asset_path(
+            data_root=tmp_path / "data", project_id="..", target=f"assets/{digest}")

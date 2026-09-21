@@ -18,7 +18,9 @@ docx 不该因为一条悬空引用就整体失败。这不是丢信息：`extra
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +28,51 @@ from pathlib import Path
 from app.infra.parsing.docx_assets import AssetOccurrence, MediaFile, extract_docx_visual_assets
 from app.infra.parsing.image_codec import DEFAULT_MAX_EDGE, PreparedImage, prepare_image
 from app.infra.parsing.path_safety import validate_project_id
+
+# target 前缀：markdown 里图片占位的相对路径形态（P2a↔P2b 接线，裁定 R-DW-1）。
+ASSET_TARGET_PREFIX = "assets/"
+_ASSET_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def asset_target(data: bytes) -> str:
+    """图片字节 → markdown 占位 target：`assets/<sha256>`。
+
+    与 `list_media_files` 的 `content_hash` **同一算法、同一输入**（都是
+    `sha256` over `word/media/*` 的字节），所以这个 target 与 `save_docx_assets`
+    落盘的文件名 `<hash>.<ext>` 是**按构造对齐**的，不需要任何 rId→hash 映射。
+
+    **刻意不带扩展名**（裁定 R-DW-1）：落盘扩展名取自 prep 结果
+    （`_asset_extension`：`compress`/`transcode` 可能把容器从 PNG 换成 JPEG），
+    markdown 生成侧无法在不重复跑一遍 Pillow 的前提下预知它。target 的职责只是
+    「标识同一份资产」，哈希即身份；解析交给 `resolve_asset_path`。
+
+    空字节不特判：伪资产（`data=b""`）由上游 `list_media_files` 的布局校验拦掉
+    （P2b 的 F1），这里再加一层会让两处规则漂移。
+    """
+    return f"{ASSET_TARGET_PREFIX}{hashlib.sha256(data).hexdigest()}"
+
+
+def resolve_asset_path(*, data_root: Path, project_id: str,
+                       target: str) -> Path | None:
+    """把 markdown 里的图片 target 解析回磁盘文件；解析不了返回 `None`。
+
+    **返回 None 而不是抛**：调用方（P3c 的逐行图片抽取）遇到外来 scheme
+    （`yibiao-asset://` / `http(s)://` / `data:`）或不存在资产时应该**跳过那一行**，
+    而不是让整个文件的图片段失败。
+
+    接受范围**只有** `assets/<64 位小写十六进制>`——哈希正则本身就是目录穿越的
+    屏障（文件名里不可能有分隔符），无需再做包含判定。扩展名按
+    `assets_dir.glob("<hash>.*")` 解析（落盘时才确定），**唯一命中**才返回。
+    """
+    validate_project_id(project_id)
+    if not isinstance(target, str) or not target.startswith(ASSET_TARGET_PREFIX):
+        return None
+    digest = target[len(ASSET_TARGET_PREFIX):]
+    if not _ASSET_HASH_RE.match(digest):
+        return None
+    assets_dir = Path(data_root) / "projects" / project_id / "assets"
+    matches = sorted(assets_dir.glob(f"{digest}.*"))
+    return matches[0] if len(matches) == 1 else None
 
 
 @dataclass(frozen=True)
