@@ -1,9 +1,12 @@
 """Task 5：outline / content 两段 runner 接线测试（P3b）。
 
-覆盖计划 :361-370 的 9 条用例。夹具沿用 T4 的 `.txt` 真文件约定（P2a 的 docx
-解析器在 include_images=True 时抛 not-implemented，与 T4 报告登记的环境偏离一致）：
+覆盖计划 :361-370 的 9 条用例。夹具沿用 T4 的 `.txt` 真文件约定：
 `content_extraction` 用一个写盘桩替代（直接把受控 markdown 落盘并产出
 `content_files` 行），从而完全控制 outline/content 段读到的正文，不依赖解析器。
+
+（注：P2a↔P2b 接线前 docx 在 `include_images=True` 时会抛 `not-implemented`，
+本文件当年据此选了 txt；接线完成后该限制已撤销，但**本文件仍用 txt + 写盘桩**
+——这里要的不是真实解析，而是**受控正文**，桩比真解析更精确。）
 
 对齐参考实现 svc.cjs:2412-2502（runOutlineAnalysis）与 :2504-2630
 （runContentDuplicateAnalysis）。逐字文案/失败语义/R-P3b-4 由 runner 实现保证，

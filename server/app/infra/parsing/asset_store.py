@@ -34,6 +34,16 @@ ASSET_TARGET_PREFIX = "assets/"
 _ASSET_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+def assets_dir_for(data_root: Path | str, project_id: str) -> Path:
+    """资产目录：`<data_root>/projects/<project_id>/assets/`（spec §5.3 的存放布局）。
+
+    **布局的唯一来源**——落盘（`save_docx_assets`）、解析（`resolve_asset_path`）与
+    清理（`api/duplicate.py`）都从这里取，避免三处各拼一次路径而漂移。
+    `project_id` 的净化守卫仍由各调用点自己做（本函数不做校验，保持纯路径计算）。
+    """
+    return Path(data_root) / "projects" / project_id / "assets"
+
+
 def asset_target(data: bytes) -> str:
     """图片字节 → markdown 占位 target：`assets/<sha256>`。
 
@@ -70,7 +80,7 @@ def resolve_asset_path(*, data_root: Path, project_id: str,
     digest = target[len(ASSET_TARGET_PREFIX):]
     if not _ASSET_HASH_RE.match(digest):
         return None
-    assets_dir = Path(data_root) / "projects" / project_id / "assets"
+    assets_dir = assets_dir_for(data_root, project_id)
     matches = sorted(assets_dir.glob(f"{digest}.*"))
     return matches[0] if len(matches) == 1 else None
 
@@ -129,7 +139,7 @@ def save_docx_assets(
         if content_hash is not None:
             grouped[content_hash][1].append(occurrence)
 
-    assets_dir = data_root / "projects" / project_id / "assets"
+    assets_dir = assets_dir_for(data_root, project_id)
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     saved: list[StoredAsset] = []

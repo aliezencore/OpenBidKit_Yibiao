@@ -56,19 +56,38 @@ def _docx_with_table_and_image(tmp_path, image):
 
 
 def test_markdown_without_images_has_no_image_traces(tmp_path):
-    """R-DW-3 红线：`include_images=False` 的输出不得出现任何图片痕迹。"""
-    markdown = docx_to_markdown(_plain_docx(tmp_path))
+    """R-DW-3 红线：`include_images=False` 的输出不得出现任何图片痕迹。
+
+    **必须用「有图」的 docx**（T4-T7 评审 A 的 F1）：初版这里用的是**无图** docx，
+    断言恒真——把 `docx_html.py` 的 `if not include_images:` 改成 `if False:`
+    （永不剥空 `<img>`），全量 544 仍全绿。现在两种模式对同一个带图 docx 断言。
+    """
+    image = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    source = build_docx_with_images(
+        tmp_path / "img.docx", blocks=[("p", "正文段落。")], images=[image])
+
+    markdown = docx_to_markdown(source)
 
     assert "<img" not in markdown
     assert "assets/" not in markdown
-    assert "标题" in markdown and "正文段落。" in markdown
+    # 空 src 占位必须被剥干净——mammoth 会留下 `<img>`，只剥标签不剥残留就会
+    # 产出 `![]( )` / `![]()` 这类空图语法（变异探针实测的失败形态）。
+    assert "![]" not in markdown, markdown
+    assert "正文段落。" in markdown
 
 
-def test_explicit_false_is_the_same_path_as_default(tmp_path):
-    """默认值与显式 `False` 必须走同一条路径——不给未来留分叉。"""
-    source = _plain_docx(tmp_path)
+def test_image_presence_does_not_change_the_no_image_output(tmp_path):
+    """更强的不变式：`include_images=False` 时，**有没有图**必须产出同一段文本。
 
-    assert docx_to_markdown(source, include_images=False) == docx_to_markdown(source)
+    比「default == 显式 False」强：那两条只证明开关一致，证明不了「图片真的被剥干净
+    且没留残余」。这里拿「同段落文本 + 一张图」与「同段落文本、无图」对拍。
+    """
+    image = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    with_image = build_docx_with_images(
+        tmp_path / "with.docx", blocks=[("p", "正文段落。")], images=[image])
+    without_image = build_docx(tmp_path / "without.docx", blocks=[("p", "正文段落。")])
+
+    assert docx_to_markdown(with_image) == docx_to_markdown(without_image)
 
 
 # ------------------------------------------------------------------ 占位与位置

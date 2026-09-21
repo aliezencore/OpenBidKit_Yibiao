@@ -346,6 +346,35 @@ def test_resolve_asset_path_does_not_escape_the_assets_dir(tmp_path):
         data_root=tmp_path / "data", project_id="p1", target="assets/../secret") is None
 
 
+def test_resolve_asset_path_requires_a_unique_match(tmp_path):
+    """同 hash 存在两个容器 → 返回 `None` 而不是随便挑一个（计划 Task 1 的明写语义）。
+
+    正常写法下不可达（一个 hash 只落一个扩展名），但盘上可能残留（上次运行的
+    `compress` 产物 + 本次的 `passthrough` 产物）。挑错一个会让消费侧读到**另一个
+    容器的字节**——宁可返回 None 让调用方跳过。
+    """
+    digest = hashlib.sha256(b"dup").hexdigest()
+    assets_dir = tmp_path / "data" / "projects" / "p1" / "assets"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / f"{digest}.png").write_bytes(b"png")
+    (assets_dir / f"{digest}.jpg").write_bytes(b"jpg")
+
+    assert resolve_asset_path(
+        data_root=tmp_path / "data", project_id="p1", target=f"assets/{digest}") is None
+
+
+def test_assets_dir_for_is_the_single_source_of_the_layout(tmp_path):
+    """布局只有一处定义（`asset_store.assets_dir_for`）：落盘/解析/清理都从它取。"""
+    from app.infra.parsing.asset_store import assets_dir_for
+
+    assert assets_dir_for(tmp_path, "p1") == tmp_path / "projects" / "p1" / "assets"
+
+    real = make_image(tmp_path / "a.png", size=(40, 30), color=(200, 30, 30))
+    source = _docx(tmp_path, [real])
+    assets = save_docx_assets(data_root=tmp_path, project_id="p1", docx_path=source)
+    assert Path(assets[0].path).parent == assets_dir_for(tmp_path, "p1")
+
+
 def test_resolve_asset_path_rejects_bad_project_id(tmp_path):
     """与 `save_docx_assets` 同一道净化守卫（不在这里另写一份）。"""
     digest = hashlib.sha256(b"x").hexdigest()

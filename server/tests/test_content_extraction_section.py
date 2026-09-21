@@ -219,12 +219,23 @@ def test_content_extraction_skips_asset_storage_for_non_docx(tmp_path):
     assert not (tmp_path / "projects" / "p1" / "assets").exists()
 
 
-def test_content_extraction_asset_failure_is_per_file(tmp_path, monkeypatch):
-    """落资产失败 → 该文件 error 行，**其余文件不连坐**（R-DW-7 = R-P3b-4）。"""
+def test_content_extraction_asset_failure_does_not_lose_the_text(
+        tmp_path, monkeypatch, caplog):
+    """落资产失败**不拖累正文**（T4-T7 评审 A 的 F4 裁定）。
+
+    初版把落资产放在写 markdown **之前**且不兜异常，于是「一个坏 CRC 的、正文
+    未引用的 `word/media/*` 孤儿条目」就能让整篇正文从查重里消失
+    （`save_docx_assets` 会读全部媒体条目，而 mammoth 只读被引用的）。
+
+    裁定：**正文与图片是两个独立交付物**。资产失败 → 正文照写、该行仍 `success`、
+    记一条 warning；缺失的资产由消费侧（P3c）的 `resolve_asset_path → None` 逐图跳过。
+    """
+    import logging
+
     import app.infra.tasks.duplicate_sections as mod
 
     def boom(**_kwargs):
-        raise OSError("磁盘满了")
+        raise OSError("坏 CRC 的孤儿媒体条目")
 
     monkeypatch.setattr(mod, "save_docx_assets", boom)
 
@@ -232,14 +243,19 @@ def test_content_extraction_asset_failure_is_per_file(tmp_path, monkeypatch):
     txt_file = _mk_file(tmp_path, "招标.txt", "纯文本正文。")
     runner = build_content_extraction(tmp_path)
 
-    output = asyncio.run(runner(SectionRunContext(
-        project_id="p1", section=CONTENT_EXTRACTION, files=[docx_file, txt_file])))
+    with caplog.at_level(logging.WARNING, logger="app.infra.tasks.duplicate_sections"):
+        output = asyncio.run(runner(SectionRunContext(
+            project_id="p1", section=CONTENT_EXTRACTION, files=[docx_file, txt_file])))
 
     rows = {r["file_id"]: r for r in output.rows["content_files"]}
-    assert rows["投标"]["status"] == "error", rows
-    assert "磁盘满了" in rows["投标"]["error"], rows
+    # 正文照常产出：行 success、`.md` 真的写出
+    assert rows["投标"]["status"] == "success", rows
+    assert Path(rows["投标"]["content_path"]).exists(), rows
     assert rows["招标"]["status"] == "success", rows
-    assert output.failed is True
+    assert output.failed is False
+    # 失败必须**可观测**（不是静默吞掉）
+    assert any("图片资产落盘失败" in record.getMessage() for record in caplog.records), \
+        [record.getMessage() for record in caplog.records]
 
 
 # ----------------------------------------------------------- 用例 3：坏文件不连坐整批
@@ -280,8 +296,8 @@ def test_content_extraction_failed_file_does_not_poison_batch(
 def test_upload_clears_duplicate_content_directory(client, project, tmp_path, monkeypatch):
     """先跑一次分析产 content 目录 → 重新上传文件 → 目录被清空/不存在（R-P3b-6）。
 
-    用 `.txt` 真文件：txt + include_images=True 在解析器里是 no-op，分析能真实跑完
-    并写出 content 目录（docx 会因 P2a 限制走 error，这里用 txt 保证 happy path）。
+    用 `.txt` 真文件：txt + include_images=True 在解析器里是 no-op，能跑通真实
+    重解析链路（本用例验的是「上传清目录」这条编排行为，与格式无关）。
     """
     import app.infra.tasks.duplicate_sections as mod
 
@@ -312,6 +328,27 @@ def test_upload_clears_duplicate_content_directory(client, project, tmp_path, mo
                      bid=[("投标2.txt", "新的投标正文。")])
     assert not content_dir.exists() or not list(content_dir.glob("*.md")), \
         "重新上传后 content 目录应被清空"
+
+
+def test_upload_clears_stale_image_assets(client, project, tmp_path):
+    """上传全量替换 → 上一轮的图片资产一并作废（T4-T7 评审 A 的 F5）。
+
+    参考的 `clearDuplicateContentArtifacts`（store.cjs:958-964）在删 content 的
+    同一处还调 `deleteImportedImageBatches`，即「换文件 → 旧图片资产失效」。
+    不清也不会**指错图**（资产按内容哈希寻址），但会无界累积。
+    """
+    from app.infra.parsing.asset_store import assets_dir_for
+
+    state = client.app.state.yibiao
+    assets_dir = assets_dir_for(state.settings.data_root, project)
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "deadbeef.png").write_bytes(b"stale")
+
+    _post_text_files(client, project,
+                     tender=[("招标2.txt", "新的招标正文。")],
+                     bid=[("投标2.txt", "新的投标正文。")])
+
+    assert not assets_dir.exists(), "重新上传后旧图片资产应被清掉"
 
 
 # ----------------------------------------------------------- 用例 5：stats.completed 断言

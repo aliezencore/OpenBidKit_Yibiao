@@ -505,7 +505,8 @@ class DuplicateAnalysisRunner:
         # stats —— 但它的 `rows` 必须显式交给 `_persist_rows`，否则：
         #   1. `duplicate_check_content_files` 表恒空 → `/state.contentFiles` 与
         #      `/state.metadataAnalysis.contentFiles` 恒 `[]` → 前端「部分文件正文提取
-        #      失败」警示永不出现（真实场景：docx 在 P2a/P2b 未接线时必 error）；
+        #      失败」警示永不出现（当年 docx 因 P2a/P2b 未接线必 error，该路径尤其明显；
+        #      接线后 docx 走通，但「有产物没接线」的缺陷形态与格式无关）；
         #   2. `duplicate_check_files.content_hash` 永不回写（唯一写点在该仓储方法内）。
         # 该角色与 `metadata` 段同属「元数据提取」语义，故沿用 `"metadata"` 段名
         # （`_persist_rows` 的 `section` 参数不参与分派，分派只按 `rows` 键）。

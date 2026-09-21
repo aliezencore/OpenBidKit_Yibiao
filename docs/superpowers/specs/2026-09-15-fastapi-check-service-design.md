@@ -565,6 +565,30 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > 接入 P2b 的资产提取并产出图片占位 markdown，随后把 e2e 夹具改回 docx（获得真实图片
 > 链路覆盖）。候选落点：P3c 前置任务，或 P3b Task 6。
 
+> **接线遗留登记（2026-09-21，docx 图片接线评审 A）——图片覆盖面的四个已知缺口**：
+> 接线本身已闭合（见上块），但以下形状的图片**拿不到占位**——对 P3c 的图片比对是覆盖
+> 缺口，**不阻塞开工**，但必须在 P3c 立项时逐条裁定：
+>
+> | # | 缺口 | 证据 | 影响 |
+> |---|---|---|---|
+> | G1 | **表格单元格内的图片占位丢失** | `parsing/markdown.py` 的 `extract_tables` 用 `cell.get_text()` 只取文本 → 单元格里的 `<img>` 被丢（0 占位），资产却照常落盘（孤儿）。参考 `convert.mjs:557-563` 把**原始表格 HTML** 回填，并用 `htmlImageSrcPattern`（`svc.cjs:109`）专抓它——那正是该正则存在的理由 | §8.5「图片占位数量与位置一致」在该形状上**不成立**；标书里「证书/执照贴在表格里」很常见 |
+> | G2 | **`.doc`（legacy）图片全链路缺失** | `legacy_doc.doc_to_markdown` 调 `docx_to_markdown` **不带** `include_images`；落资产的门控 `format_kind == "docx"` 也排除了 `doc`。参考 `convert.mjs:1243` 的 `convertLegacyWordFile` **是带图的** | 同一缺口在 `.doc` 上重现（且 soffice 产出的临时 docx 目前在 `TemporaryDirectory` 里即删，落盘侧拿不到） |
+> | G3 | **图片不在 `word/media/` 下 → 占位悬空** | 实测：条目移到 `word/images/` + 改 rels → markdown 占位 1、`list_media_files` 0、`resolve_asset_path → None`。参考同构（mammoth + `word/media/` 提取） | 共同边界；`resolve_asset_path` 返回 `None` 已是正确降级（消费侧跳过该行） |
+> | G4 | **`alt`（docx `descr`）含 `]` 时占位解析不出来** | docx `descr='图[附件]'` → `![图[附件]](assets/<hash>)`；参考的 `markdownImagePattern`（`svc.cjs:108`）是 `!\[(?<alt>[^\]]*)\]\(…` → 命中 **0**。参考侧同形 | 共同局限；**P3c 必须裁定**（放宽正则 / 或占位固定空 alt） |
+>
+> **P3c 立项时的三条硬约束**（本次实测得出）：①`preview_url` **不得**输出服务器绝对路径
+> （`resolve_asset_path` 返回绝对路径，透出即泄漏部署路径）——应是
+> `/projects/{pid}/…/{hash}` 形态的相对端点；②markdown 占位面**小于** P2b 的 occurrence 面
+> （页眉页脚图、无引用媒体不进 markdown）——「页眉页脚图片是否参与比对」须显式裁定；
+> ③资产 mime 未落库（`StoredAsset.mime` 只存在于内存），需按扩展名反推或复用
+> `image_plan.detect_image_format` 嗅探。
+>
+> **另两处待办（与接线无关，但由它暴露）**：①**docx 改名 `.txt` 会被当文本读**
+> （`read_text_with_encoding` 把 zip 读成 3.5 万字符乱码）→ `content_extraction` 判
+> `success` → 垃圾文本进入切句与比对（P2a 既有行为，建议另立任务）；②**性能**：
+> `content_extraction` 每轮都全量重解析 docx 并重跑 `save_docx_assets`
+> （实测 ≈14 ms/图，20 图 ≈0.28 s，与解析同量级）——签名幂等已抵消「每轮重做」，暂不优化。
+
 > **跨阶段缺口登记（2026-09-21，P3b Task 4-7 评审 A §4.4）——P3c/P3d 段子统计无生产者**：
 > `metadata_extraction`（P3d）与 `image`（P3c）两个角色在生产仍是 `_stub_sections()`
 > 占位，但**读取侧已在消费它们的 stats 键**：

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -38,6 +39,8 @@ from app.infra.tasks.duplicate_runner import (
     SectionOutput,
     SectionRunContext,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def content_dir_for(data_root: Path | str, project_id: str) -> Path:
@@ -113,15 +116,26 @@ def build_content_extraction(data_root: Path | str):
                     parse_document, Path(file_path),
                     provider="local", include_images=True)
                 markdown = parsed.markdown.strip()
-                if parsed.format_kind == "docx":
-                    # P2a↔P2b 接线：markdown 里的 `assets/<hash>` 占位必须有盘上
-                    # 对应的文件，P3c 才拿得到图片字节。顺序刻意在**写 markdown 之前**
-                    # ——落盘失败就不该留下一份指向空资产的内容文件。
-                    # 同步的 Pillow 编解码经 to_thread 包一层（与解析同一理由）。
-                    await asyncio.to_thread(
-                        _store_docx_assets, data_root, project_id, Path(file_path))
                 content_path = content_dir / f"{file_id}.md"
                 content_path.write_text(markdown, encoding="utf-8", newline="\n")
+                if parsed.format_kind == "docx":
+                    # P2a↔P2b 接线：markdown 里的 `assets/<hash>` 占位需要盘上有对应
+                    # 文件，P3c 才拿得到图片字节。
+                    #
+                    # **图片资产是独立交付物**（评审 A 的 F4 裁定）：一张图读不出来
+                    # 不该让整篇正文从查重里消失。`save_docx_assets` 会读**全部**
+                    # `word/media/*`——**含正文未引用的孤儿条目**（而 mammoth 只读被引用
+                    # 的），所以一个坏 CRC 的孤儿媒体就能把它顶掉。故：
+                    # ①顺序改为**先写正文再落资产**（正文永不因图片失败而丢）；
+                    # ②失败只记 warning，该文件仍是 success；缺失的资产由消费侧
+                    # （P3c）的 `resolve_asset_path → None` 逐图跳过。
+                    try:
+                        await asyncio.to_thread(
+                            _store_docx_assets, data_root, project_id, Path(file_path))
+                    except Exception as error:  # noqa: BLE001 —— 图片失败不拖累正文
+                        _logger.warning(
+                            "图片资产落盘失败（正文已提取，该文件的图片将缺失）："
+                            "project=%s file=%s error=%s", project_id, file_name, error)
                 results.append({
                     "file_id": file_id,
                     "file_name": file_name,

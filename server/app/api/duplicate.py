@@ -33,6 +33,7 @@ from app.domain.duplicate.progress import latest_analysis_message, overall_progr
 from app.domain.duplicate.signature import stable_file_id
 from app.domain.duplicate.state import ANALYSIS_SECTIONS, SectionState
 from app.domain.shared.errors import ParsingError
+from app.infra.parsing.asset_store import assets_dir_for
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.repositories.duplicate import DuplicateFileInput
 from app.infra.tasks.duplicate_runner import (
@@ -195,6 +196,11 @@ async def upload_files(
         # 复用 `_remove_tree` 的可观测清理（与参考 `saveFiles` 事务后调
         # `clearDuplicateContentArtifacts` 语义对齐，:924）。
         _remove_tree(content_dir_for(state.settings.data_root, project_id))
+        # P2a↔P2b 接线（评审 A 的 F5）：资产目录同样作废——参考的
+        # `clearDuplicateContentArtifacts`（store.cjs:958-964）在删 content 的同一处
+        # 还调 `deleteImportedImageBatches` 清 image batch，即「换文件 → 上一轮的图片
+        # 资产一并失效」。不清也不会指错图（资产按内容哈希寻址），但会无界累积。
+        _remove_tree(assets_dir_for(state.settings.data_root, project_id))
     except BaseException:
         # 滚回：DB 回滚由仓储的事务负责，这里补上「盘上不留孤儿」。
         # 兜 `BaseException` 而非 `Exception`：取消（`asyncio.CancelledError`）
@@ -267,6 +273,8 @@ def delete_files(project_id: str, state: AppState = Depends(get_state)) -> dict:
     # imported image batches（content 产物路径清理）。服务端此处同样清
     # `duplicate_content/` 目录，与 POST /files 的清理保持一致。
     _remove_tree(content_dir_for(state.settings.data_root, project_id))
+    # 资产目录一并清（评审 A 的 F5：与参考的 image batches 清理对齐，见 POST /files 处注释）。
+    _remove_tree(assets_dir_for(state.settings.data_root, project_id))
     return {"tender": [], "bid": []}
 
 
