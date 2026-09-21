@@ -303,7 +303,7 @@ def test_content_extraction_stats_reports_completed(repo, tmp_path):
     asyncio.run(DuplicateAnalysisRunner(repo=repo, sections=sections)(
         FakeCtx(), payload, None))
 
-    sub = repo.get_sections("p1")["metadata"]["stats"]["content_extraction"]
+    sub = repo.get_sections("p1")["metadata"]["stats"]["contentExtraction"]
     assert sub["status"] == "success"
     assert sub["completed"] == 2
     assert sub["total"] == 2

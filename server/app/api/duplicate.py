@@ -532,9 +532,14 @@ def _remove_tree(path: Path) -> None:
 
     这里**不把异常抛给调用方**：临时目录的清理失败不应该让一次本来成功的上传变成
     500（那比泄漏更糟）。所以是「记录并继续」而不是「抛出」。
+
+    P3b Task 7 补充：**路径不存在**是正常的「无需删」（如 content 目录尚未产出），
+    不属于清理失败——先 `exists()` 短路，避免每次上传都刷一条误导性 warning。
     """
     import shutil
 
+    if not path.exists():
+        return
     try:
         shutil.rmtree(path, ignore_errors=False)
     except OSError as error:

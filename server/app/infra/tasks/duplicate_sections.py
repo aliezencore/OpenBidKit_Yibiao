@@ -368,8 +368,13 @@ def build_outline_runner(data_root: Path | str):
             "total": total,
         }
         stats = {
-            "tender_sentence_count": len(tender_sentences),
-            "tender_matched_item_count": sum(
+            # 键名必须与**参考写入侧**（:2487-2488）和**仓储读取侧**
+            # （`_load_outline_analysis` 的 `stats.get("tenderSentenceCount")`）一致：
+            # camelCase。计划 Task 5 :334 写的 snake_case 是计划措辞的偏差——
+            # 该 stats 会被 `load_analysis` 原样读成 `/state` 的
+            # `outlineAnalysis.tenderSentenceCount`，snake 键读出来恒 0。
+            "tenderSentenceCount": len(tender_sentences),
+            "tenderMatchedItemCount": sum(
                 r.get("tender_matched_count", 0) for r in results),
         }
         return SectionOutput(
@@ -514,9 +519,11 @@ def build_content_runner(data_root: Path | str):
         message = "正文比对完成"
         extraction = {"status": "success", "completed": bid_count, "total": bid_count}
         stats = {
-            "tender_sentence_count": tender_matcher.tender_sentence_count,
-            "tender_matched_sentence_count": tender_matched_sentence_count,
-            "total_sentence_count": total_sentence_count,
+            # camelCase 对齐参考 :2613-2615 与仓储读取侧（同上）。
+            "tenderSentenceCount": tender_matcher.tender_sentence_count,
+            "tenderMatchedSentenceCount": tender_matched_sentence_count,
+            "totalSentenceCount": total_sentence_count,
+            # 例外：参考 :2625 自己这里就是 snake_case（逐字保留，不"修正"）。
             "tender_match_reason_counts": tender_match_reason_counts,
         }
         return SectionOutput(

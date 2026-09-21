@@ -183,8 +183,8 @@ def test_outline_section_extracts_groups_and_persists(repo, tmp_path):
 
     # metadata stats 的 content_extraction 子统计被填实
     meta = repo.get_sections("p1")["metadata"]["stats"]
-    assert meta["content_extraction"]["completed"] == 2
-    assert meta["content_extraction"]["total"] == 2
+    assert meta["contentExtraction"]["completed"] == 2
+    assert meta["contentExtraction"]["total"] == 2
 
 
 # ----------------------------------------------------------- 用例 2：白名单失败继续
@@ -258,7 +258,7 @@ def test_content_section_tender_sentences_are_not_duplicates(repo, tmp_path):
     assert len(dup) == 0
 
     stats = repo.get_sections("p1")["content"]["stats"]
-    assert stats["tender_matched_sentence_count"] >= 2  # 两个投标句都被招标命中
+    assert stats["tenderMatchedSentenceCount"] >= 2  # 两个投标句都被招标命中
 
 
 # ----------------------------------------------------------- 用例 6：content 单文件错误 → success

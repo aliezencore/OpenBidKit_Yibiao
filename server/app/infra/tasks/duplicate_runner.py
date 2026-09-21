@@ -542,7 +542,12 @@ class DuplicateAnalysisRunner:
             # P3b Task 5：按 `extraction` 字段填实 content_extraction 子统计
             # （T4 的 content_extraction 同时设了 `stats` 与 `extraction`，二者同形；
             # 优先用 `extraction` 字段，与计划 Task 5 :357 对齐）。
-            merged["content_extraction"] = dict(
+            #
+            # **键名 camelCase**（Task 7 修正）：参考 :2347 与仓储读取侧
+            # （`_load_metadata_analysis` 的 `stats.get("contentExtraction")`）都是
+            # camelCase；用 snake_case 会让 `/state` 的
+            # `metadataAnalysis.stats.contentExtraction` 恒为空。
+            merged["contentExtraction"] = dict(
                 content_output.extraction or content_output.stats or {})
         return merged
 

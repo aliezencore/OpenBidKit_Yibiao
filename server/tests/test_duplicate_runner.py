@@ -533,7 +533,7 @@ def test_metadata_stats_carry_content_extraction_substats(repo):
 
     stats = repo.get_sections("p1")["metadata"]["stats"]
     assert stats["rows"] == 7, f"metadata_extraction 的 stats 丢了：{stats}"
-    assert stats["content_extraction"] == {"extracted": 2}, \
+    assert stats["contentExtraction"] == {"extracted": 2}, \
         f"content_extraction 的子统计没并进 metadata：{stats}"
 
 
