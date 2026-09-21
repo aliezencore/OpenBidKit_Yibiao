@@ -257,6 +257,16 @@ def _normalize_content_line_breaks(value: str) -> str:
     return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
+def normalize_content_line_breaks(value: str) -> str:
+    """`_normalize_content_line_breaks` 的**公开别名**。
+
+    P3c 的图片出现位置抽取与正文段用同一口径（参考里就是同一个
+    `normalizeContentLineBreaks`，:255），跨模块 import 私有名不合适，故在此开一个
+    公开入口；实现仍只有一处。
+    """
+    return _normalize_content_line_breaks(value)
+
+
 def add_content_text_block(blocks: list[str], value: str) -> None:
     """对齐 svc.cjs:1494：解码实体 + cleanContentSentence → 按换行拆行逐块收集
     （空行跳过）。就地 append 到 ``blocks``（镜像 JS 对数组的 push）。"""
