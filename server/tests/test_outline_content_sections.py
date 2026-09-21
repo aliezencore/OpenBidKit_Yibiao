@@ -242,6 +242,28 @@ def test_outline_section_failed_file_reports_error_in_state(repo, tmp_path):
     assert by_id["b1"]["item_count"] == 4, by_id["b1"]
 
 
+def test_outline_section_empty_but_successful_file_reports_success(repo, tmp_path):
+    """成功但 0 个目录项的正文，在 `/state` 里必须报 `success`（而非 `pending`）。
+
+    同一判别点：兜底 `items.length ? 'success' : 'pending'`（store.cjs:740）无法
+    区分「成功但空」与「尚未开始」——只有 `stats.files` 里的 `status` 能区分。
+    纯散文（无标题、无编号、无语义目录）正是这种情形。
+    """
+    plain = (
+        "本项目的建设目标是提升整体信息化水平。\n"
+        "技术方案采用分层架构设计。\n"
+        "商务条款包括报价与付款方式。\n"
+    )
+    _drive(tmp_path, repo, spec=[("b1", "b1.txt", plain)], bids=[("b1", "b1.txt")])
+
+    files = repo.load_analysis("p1")["outlineAnalysis"]["files"]
+    assert len(files) == 1, files
+    assert files[0]["item_count"] == 0, files[0]
+    assert files[0]["status"] == "success", files[0]
+    # 段整体也是 success（无 error 文件 → failed=False）
+    assert repo.get_sections("p1")["outline"]["status"] == "success"
+
+
 # ----------------------------------------------------------- 用例 4：content 重复句落库
 
 def test_content_section_duplicate_sentences_persisted(repo, tmp_path):
