@@ -153,17 +153,19 @@ def test_changing_files_invalidates_and_reruns(client, tmp_path):
     assert _wait_for_task(client, first.json()["taskId"])["status"] == "success"
     assert client.get(f"{base}/state").json()["overallProgress"] == 100
 
-    from tests.parsing_fixtures import build_docx
-    new_bid = build_docx(tmp_path / "投标B.docx", blocks=[("p", "换了一份投标文件")])
+    # 夹具与 _setup_project 保持一致用 .txt（docx + include_images=True 会让
+    # content_extraction 必 error——P2a 的 R2 拒绝路径，见 spec §15 跨阶段缺口）。
+    # 评审 B B1：初版用 docx 替换时，重跑实际是 metadata 段 error 但
+    # `analysis_progress` 对 error 也计 100 → 断言在失败下仍通过（假绿）。
     resp = client.post(
         f"{base}/files",
-        files=[("bid", ("投标B.docx", new_bid.read_bytes(), DOCX_MIME))])
+        files=[("bid", ("投标B.txt", "换了一份投标文件".encode("utf-8"), "text/plain"))])
     assert resp.status_code == 200, resp.text
 
     # 全量替换语义：只传 bid 组 → tender 一并被清（Task 5 F-1，e2e 面再钉一次）。
     listing = client.get(f"{base}/files").json()
     assert listing["tender"] == [], listing
-    assert [f["file_name"] for f in listing["bid"]] == ["投标B.docx"]
+    assert [f["file_name"] for f in listing["bid"]] == ["投标B.txt"]
 
     # 作废断言（探针 2 敏感点）：上传后四段必须已归零，不得保留旧 success。
     invalidated = client.get(f"{base}/state").json()
@@ -174,7 +176,11 @@ def test_changing_files_invalidates_and_reruns(client, tmp_path):
     second_id = second.json()["taskId"]
     task = _wait_for_task(client, second_id)
     assert task["status"] == "success", task
-    assert client.get(f"{base}/state").json()["overallProgress"] == 100
+    # 评审 B B1 加固：`overallProgress == 100` 对「段 error」不敏感（error 也计
+    # 100，见 progress.py 的 analysis_progress），必须显式断言四段真的 success。
+    reran = client.get(f"{base}/state").json()
+    assert reran["overallProgress"] == 100
+    assert {s["status"] for s in reran["sections"].values()} == {"success"}, reran["sections"]
 
     # 真的重跑了：第二次任务的日志里不得出现幂等文案。
     messages = _task_messages(client, second_id)
