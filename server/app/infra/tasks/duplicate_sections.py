@@ -128,14 +128,26 @@ def build_content_extraction(data_root: Path | str):
 # ---------------------------------------------------------------- 文件项读取
 
 def _file_id_of(file: Any) -> str:
-    """文件 id：dict 取 `file_id`（已是 stable_file_id 结果），对象取属性。
+    """文件 id：对齐参考 `stableFileId`（:118-120）——
+    `file.id || sha1(file.file_path || file.file_name || '')`。
 
-    用 `file_id` 直接作 content 文件名与 `content_files` 行键，保证与
-    `duplicate_check_files.file_id` 对齐 —— 下游 outline/content 段据此 join。
+    正常路径下 `file_id` 恒存在（P3a 的 `list_files()` 产物 = `duplicate_check_files.file_id`），
+    直接作 content 文件名与 `content_files` 行键，与 `duplicate_check_files.file_id`
+    对齐 —— 下游 outline/content 段据此 join。**兜底分支**（id 缺失时对路径/文件名
+    求 sha1）与参考逐字对齐：若沿用「直接用路径串当 id」会让路径分隔符进入文件名
+    （可能逃逸 content_dir）且与参考 id 不一致。
     """
     if isinstance(file, Mapping):
-        return file.get("file_id") or file.get("file_path") or ""
-    return getattr(file, "file_id", None) or ""
+        raw_id = file.get("file_id")
+        if raw_id:
+            return str(raw_id)
+        seed = file.get("file_path") or file.get("file_name") or ""
+    else:
+        raw_id = getattr(file, "file_id", None)
+        if raw_id:
+            return str(raw_id)
+        seed = getattr(file, "file_path", None) or getattr(file, "file_name", None) or ""
+    return hashlib.sha1(str(seed).encode("utf-8")).hexdigest()
 
 
 def _file_name_of(file: Any) -> str:

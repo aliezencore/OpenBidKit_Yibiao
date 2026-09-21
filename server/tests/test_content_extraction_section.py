@@ -309,6 +309,42 @@ def test_content_extraction_stats_reports_completed(repo, tmp_path):
     assert sub["total"] == 2
 
 
+# ----------------------------------------------------------- 用例 6：file_id 兜底对齐参考
+
+def test_file_id_fallback_matches_stable_file_id():
+    """`_file_id_of` 的兜底分支对齐参考 `stableFileId`（:118-120）。
+
+    评审 A F2：实现初版回退 `file_id or file_path` 直接用路径串当 id——路径
+    分隔符会进入 content 文件名（可能逃逸 content_dir）且与参考 id 不一致。
+    参考语义是 `file.id || sha1(file.file_path || file.file_name || '')`。
+    """
+    from app.infra.tasks.duplicate_sections import _file_id_of
+
+    # 主路径：file_id 直取
+    assert _file_id_of({"file_id": "abc"}) == "abc"
+    # 兜底：对路径求 sha1（参考 :119）
+    assert _file_id_of({"file_path": "/tmp/x.txt"}) == hashlib.sha1(
+        b"/tmp/x.txt").hexdigest()
+    # 路径缺失时退到 file_name
+    assert _file_id_of({"file_name": "x.txt"}) == hashlib.sha1(
+        b"x.txt").hexdigest()
+    # 全空 → sha1('')
+    assert _file_id_of({}) == hashlib.sha1(b"").hexdigest()
+    # 对象（非 Mapping）分支同样语义
+    class _Obj:
+        file_id = "obj-id"
+        file_path = "/tmp/y.txt"
+
+    assert _file_id_of(_Obj()) == "obj-id"
+
+    class _ObjNoId:
+        file_id = None
+        file_path = "/tmp/y.txt"
+        file_name = None
+
+    assert _file_id_of(_ObjNoId()) == hashlib.sha1(b"/tmp/y.txt").hexdigest()
+
+
 # ----------------------------------------------------------- HTTP 辅助（用例 4）
 
 DOCX_MIME = ("application/vnd.openxmlformats-officedocument"
