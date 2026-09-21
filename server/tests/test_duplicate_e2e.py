@@ -28,6 +28,7 @@ SSE 流在 stream 进入处挂死，见 `test_api_tasks.py:55-118` 的注释）�
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -270,3 +271,54 @@ def test_e2e_duplicate_sentences_and_outline_groups_reachable(client, tmp_path):
     # 3) stats 的 camelCase 键在同一响应里可读（T7 键名修复的回归钉子）
     assert content["totalSentenceCount"] >= 2, content
     assert outline["tenderSentenceCount"] >= 1, outline
+
+
+# --------------------------- 用例 6（T7 评审 A §4.1 的 P1）：content_files 生产接线
+
+def test_state_exposes_content_files_from_persisted_table(client, tmp_path):
+    """生产接线钉子：`/state.contentFiles` 必须来自 `duplicate_check_content_files` 表。
+
+    **这条测试钉的是 T7 评审 A §4.1 的 P1**：`content_extraction` 角色的产出
+    `rows["content_files"]` 曾被 `_commit_terminal_states` 遗漏——该角色只经
+    `_merge_metadata_stats` 把 `stats`/`extraction` 并入 `metadata` 段，`rows` 从未
+    交给 `_persist_rows`（后者虽有 `content_files` 分派分支，但**分派表落地了、
+    接线没落地**）。后果：该表恒 0 行、`/state.contentFiles` 与
+    `/state.metadataAnalysis.contentFiles` 恒 `[]`、`duplicate_check_files.content_hash`
+    永不回写，且前端「部分文件正文提取失败」警示永不出现。
+
+    **为什么必须是 e2e**：既有 5 条 `content_files` 测试**全部注入自定义 runner
+    直连 repo**（`test_content_extraction_section.py` 直接调 `build_content_extraction`
+    后查表），对「编排器是否把该产出接到落库」零覆盖——本缺陷正是在 515 passed
+    全绿下存在的。
+    """
+    _, base = _setup_project(client, tmp_path)
+    started = client.post(f"{base}/analysis", json={"force": False})
+    assert started.status_code == 200, started.text
+    assert _wait_for_task(client, started.json()["taskId"])["status"] == "success"
+
+    state = client.get(f"{base}/state").json()
+    content_files = state["contentFiles"]
+    # 两个文件都提取成功 → 两行（缺陷态下这里是 []）
+    assert len(content_files) == 2, content_files
+    assert {row["status"] for row in content_files} == {"success"}, content_files
+    assert {row["file_name"] for row in content_files} == {"招标.txt", "投标A.txt"}, \
+        content_files
+    for row in content_files:
+        assert row["content_length"] > 0, row
+        # `content_path` 指向盘上真实产物（读取侧形状与参考 store.cjs:636-644 一致）
+        assert row["content_path"] and Path(row["content_path"]).exists(), row
+        assert row["error"] is None, row
+    # `metadataAnalysis` 上的同一子对象走另一条读取路径，也必须非空
+    assert state["metadataAnalysis"]["contentFiles"] == content_files, \
+        state["metadataAnalysis"]
+
+    # 次生交付物：`content_hash` 必须回写（`replace_content_files` 是唯一写点）。
+    # 直读表证明「落库真的发生了」，而不是读取侧凭空造出形状。
+    project_id = base.split("/")[2]
+    db = client.app.state.yibiao.duplicate._db
+    rows = db.query(
+        "SELECT file_id, content_hash FROM duplicate_check_files WHERE project_id = ?",
+        (project_id,))
+    assert len(rows) == 2, rows
+    assert all(row["content_hash"] for row in rows), rows
+

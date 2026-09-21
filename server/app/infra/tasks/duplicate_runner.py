@@ -499,6 +499,19 @@ class DuplicateAnalysisRunner:
             message="部分文件提取失败" if metadata_failed else "元数据分析完成",
             signature=signature, stats=metadata_stats)
         self._persist_rows(project_id, "metadata", metadata_output)
+        # T4 交付物补接线（T7 评审 A §4.1 的 P1）：`content_extraction` 角色的产出
+        # `rows["content_files"]` **也必须落库**。该角色不写自己的段状态行（见模块
+        # docstring 的角色表），产出只经 `_merge_metadata_stats` 并入 `metadata` 段的
+        # stats —— 但它的 `rows` 必须显式交给 `_persist_rows`，否则：
+        #   1. `duplicate_check_content_files` 表恒空 → `/state.contentFiles` 与
+        #      `/state.metadataAnalysis.contentFiles` 恒 `[]` → 前端「部分文件正文提取
+        #      失败」警示永不出现（真实场景：docx 在 P2a/P2b 未接线时必 error）；
+        #   2. `duplicate_check_files.content_hash` 永不回写（唯一写点在该仓储方法内）。
+        # 该角色与 `metadata` 段同属「元数据提取」语义，故沿用 `"metadata"` 段名
+        # （`_persist_rows` 的 `section` 参数不参与分派，分派只按 `rows` 键）。
+        content_output = content_output_of(content_files)
+        if content_output is not None:
+            self._persist_rows(project_id, "metadata", content_output)
 
         failed = metadata_failed
         for section, output in zip(("outline", "content", "image"), gather_outputs):
