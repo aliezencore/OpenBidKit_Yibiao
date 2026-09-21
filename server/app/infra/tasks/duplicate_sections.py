@@ -376,6 +376,20 @@ def build_outline_runner(data_root: Path | str):
             "tenderSentenceCount": len(tender_sentences),
             "tenderMatchedItemCount": sum(
                 r.get("tender_matched_count", 0) for r in results),
+            # `files`：逐文件摘要（参考 :2486 终态的 `files: results`）。读取侧
+            # `_load_outline_analysis`（repositories/duplicate.py:931）用它建
+            # `summaryByFile`，逐文件决定 `/state` 的 `status`/`error`/`source`/
+            # `confidence`。**缺这个键的后果**：兜底是 store.cjs:740 的
+            # `summary.status || (items.length ? 'success' : 'pending')` ——
+            # 失败文件（items 为空）会被误报成 `pending` 且丢掉错误信息。
+            #
+            # **有意偏离**：省略每条记录的 `items` 字段。参考把整份 items 数组塞进
+            # stats（:2471/:2486），但读取侧是从 `duplicate_check_outline_items`
+            # 表重建的（store.cjs:725 的 `itemsByFile`），stats 里的 `items` 从不被读
+            # ——属 wire-invisible；保留它会把这批数据在 stats_json 里重复写一遍。
+            "files": [
+                {k: v for k, v in r.items() if k != "items"} for r in results
+            ],
         }
         return SectionOutput(
             stats=stats,

@@ -220,6 +220,28 @@ def test_outline_section_file_error_marks_failed_and_keeps_rest(repo, tmp_path):
     assert {row["file_id"] for row in items} == {"b1"}
 
 
+def test_outline_section_failed_file_reports_error_in_state(repo, tmp_path):
+    """失败文件必须在 `/state` 的 `outlineAnalysis.files[]` 里报 `error` + 错误信息。
+
+    判别点：`_load_outline_analysis` 用 `stats["files"]` 建 `summaryByFile`
+    （参考 store.cjs:733）逐文件决定 `status`/`error`/`source`/`confidence`。
+    若 runner 不写该键，兜底是 store.cjs:740 的
+    `summary.status || (items.length ? 'success' : 'pending')` —— 失败文件
+    （items 为空）会被**误报成 `pending`** 且错误信息丢失（本轮实测复现）。
+    """
+    spec = [("b1", "b1.txt", OUTLINE_MD)]  # b2 缺 content → 该文件 error
+    _drive(tmp_path, repo, spec, bids=[("b1", "b1.txt"), ("b2", "b2.txt")])
+
+    files = repo.load_analysis("p1")["outlineAnalysis"]["files"]
+    by_id = {f["file_id"]: f for f in files}
+    assert by_id["b1"]["status"] == "success", by_id["b1"]
+    assert by_id["b2"]["status"] == "error", by_id["b2"]
+    assert by_id["b2"]["error"] == "正文内容尚未成功提取，无法进行目录分析", \
+        by_id["b2"]
+    # 成功文件的逐文件摘要仍来自 stats.files（不是 items[0] 兜底）
+    assert by_id["b1"]["item_count"] == 4, by_id["b1"]
+
+
 # ----------------------------------------------------------- 用例 4：content 重复句落库
 
 def test_content_section_duplicate_sentences_persisted(repo, tmp_path):
