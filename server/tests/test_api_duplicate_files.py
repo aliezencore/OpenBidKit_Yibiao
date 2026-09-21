@@ -693,3 +693,75 @@ def _seed_child_rows(state, project, file_id):
         "INSERT INTO duplicate_check_content_occurrences"
         "(project_id, id, duplicate_id, file_id, occurrence_count)"
         " VALUES (?, 1, 'd1', ?, 1)", (project, file_id))
+
+
+# =========================================== P3b Task 6：遗留清单（项 3/4/5）
+
+
+def _messages(client, task_id):
+    """直读 task_logs 表，返回该任务的日志消息列表（同 e2e 的 `_task_messages`）。"""
+    return [entry.get("message", "")
+            for entry in client.app.state.yibiao.logs.list_for_task(task_id)]
+
+
+def test_force_true_reruns_and_skips_idempotent_log(client, project):
+    """项 3（M-3）：force=True 经 HTTP 直达 → 真的重跑（日志不含幂等文案）。
+
+    对照：同一签名下 force=False 的第二次分析**必须**命中幂等（含「无需重复分析」），
+    否则本用例的判据（force 后不含该文案）就没有判别力。
+    """
+    state = client.app.state.yibiao
+    _post_files(client, project,
+                tender=[("招标.txt", "招标要求正文".encode("utf-8"))],
+                bid=[("投标.txt", "投标应答正文".encode("utf-8"))])
+
+    first = client.post(f"/projects/{project}/duplicate/analysis", json={})
+    assert first.status_code == 200, first.text
+    assert _wait_for_task(state, first.json()["taskId"])["status"] == "success"
+
+    # 第二次 force=False：签名未变 → 幂等命中（判据的对照面）
+    second = client.post(f"/projects/{project}/duplicate/analysis", json={})
+    second_id = second.json()["taskId"]
+    assert _wait_for_task(state, second_id)["status"] == "success"
+    assert any("无需重复分析" in m for m in _messages(client, second_id)), \
+        "对照组失效：force=False 的重复分析应命中幂等"
+
+    # 第三次 force=True：必须绕过幂等真的重跑
+    third = client.post(f"/projects/{project}/duplicate/analysis",
+                        json={"force": True})
+    assert third.status_code == 200, third.text
+    third_id = third.json()["taskId"]
+    assert _wait_for_task(state, third_id)["status"] == "success"
+    assert not any("无需重复分析" in m for m in _messages(client, third_id)), \
+        "force=True 不得走幂等短路"
+
+
+def test_state_survives_non_dict_stats_json(client, project):
+    """项 4：`stats_json` 是合法 JSON 但非 dict（标量）→ `GET /state` 回落 `{}` 不 500。"""
+    state = client.app.state.yibiao
+    state.db.execute(
+        "INSERT INTO duplicate_check_analysis_sections"
+        "(project_id, section, status, progress, message, stats_json, updated_at)"
+        " VALUES (?, 'metadata', 'success', 100, '', '123', 'now')",
+        (project,))
+
+    resp = client.get(f"/projects/{project}/duplicate/state")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sections"]["metadata"]["stats"] == {}
+
+
+def test_error_of_legacy_failed_row_without_separator():
+    """项 5：`_error_of` 对**旧形状**（只有 code、无 `\\x1f<name>`）仍解出 code。
+
+    把「旧形状兼容」钉成显式契约：`upload-failed:<code>` 与
+    `upload-failed:<code>\\x1f<name>` 两种行都返回**干净的 code**；
+    非失败行返回 `None`。
+    """
+    from app.api.duplicate import _error_of
+
+    assert _error_of({"file_path": "upload-failed:format-mismatch"}) == "format-mismatch"
+    assert _error_of(
+        {"file_path": "upload-failed:format-mismatch\x1f坏文件.docx"}
+    ) == "format-mismatch"
+    assert _error_of({"file_path": "C:/normal/path.docx"}) is None
+    assert _error_of({}) is None

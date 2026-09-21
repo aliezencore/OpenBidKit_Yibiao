@@ -211,3 +211,89 @@ def test_build_state_shuts_down_cpu_pool_then_database_when_ai_construction_fail
         deps.build_state(settings)
 
     assert events == ["cpu.shutdown", "db.close"]
+
+
+# =================================== P3b Task 6（I-1）：cancel HTTP happy path
+
+
+def _submit_slow_task(client):
+    """提交一个「慢但要能被取消」的任务，返回 task_id。
+
+    取消是**协作式**的（`TaskContext.mark_cancelled` 只置标志，runner 在下一个
+    `raise_if_cancelled()` 处退出），所以慢 runner 必须是**带检查点的轮询**，
+    而不是裸 `await Event.wait()`（后者永不退出 → 本用例会挂死）。
+
+    注入缝：`TaskEngine.submit(..., runner=...)`（P10 前提已核实），经
+    `TestClient.portal` 在应用自身的事件循环里提交。
+    """
+    import asyncio
+    import time
+    from functools import partial
+
+    from app.api.duplicate import ANALYSIS_DOMAIN, ANALYSIS_KIND
+
+    async def slow_runner(ctx, payload, previous_state):
+        for _ in range(2000):  # 最长 ~10s；取消后 <=5ms 退出
+            ctx.raise_if_cancelled()
+            await asyncio.sleep(0.005)
+
+    state = client.app.state.yibiao
+    project_id = client.post("/projects", json={"name": "取消用例"}).json()["id"]
+    task_id = client.portal.call(partial(
+        state.engine.submit, project_id=project_id, domain=ANALYSIS_DOMAIN,
+        kind=ANALYSIS_KIND, payload={}, runner=slow_runner))
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if client.get(f"/tasks/{task_id}").json()["status"] == "running":
+            return task_id
+        time.sleep(0.02)
+    raise AssertionError("任务未在 5s 内进入 running")
+
+
+def _wait_status(client, task_id, wanted, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    status = None
+    while time.monotonic() < deadline:
+        status = client.get(f"/tasks/{task_id}").json()["status"]
+        if status == wanted:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(f"任务未在 {timeout}s 内到达 {wanted}（当前 {status}）")
+
+
+def test_cancel_active_task_returns_true_and_reaches_cancelled(client):
+    """I-1：活跃任务 → `POST /tasks/{id}/cancel` → 200 `{"cancelled": true}` → 终态 `cancelled`。"""
+    task_id = _submit_slow_task(client)
+
+    resp = client.post(f"/tasks/{task_id}/cancel")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"cancelled": True}
+
+    assert _wait_status(client, task_id, "cancelled") == "cancelled"
+
+
+def test_cancel_finished_task_returns_false(client):
+    """已完成/不存在于 `_running` 的任务 → `{"cancelled": false}`（引擎语义，非 404）。"""
+    import asyncio
+    import time
+    from functools import partial
+
+    from app.api.duplicate import ANALYSIS_DOMAIN, ANALYSIS_KIND
+
+    async def quick_runner(ctx, payload, previous_state):
+        await asyncio.sleep(0)
+
+    state = client.app.state.yibiao
+    project_id = client.post("/projects", json={"name": "快任务"}).json()["id"]
+    task_id = client.portal.call(partial(
+        state.engine.submit, project_id=project_id, domain=ANALYSIS_DOMAIN,
+        kind=ANALYSIS_KIND, payload={}, runner=quick_runner))
+
+    assert _wait_status(client, task_id, "success") == "success"
+
+    resp = client.post(f"/tasks/{task_id}/cancel")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"cancelled": False}

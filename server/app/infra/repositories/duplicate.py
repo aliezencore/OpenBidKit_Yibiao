@@ -414,7 +414,11 @@ class DuplicateRepository:
         result: dict[str, dict] = {}
         for row in rows:
             item = dict(row)
-            item["stats"] = _load_json(item.pop("stats_json", None), {})
+            # P3b Task 6（项 4）：`stats_json` 若是合法 JSON 但**非 dict**（历史/脏数据里
+            # 的标量或数组），`_load_json` 会原样返回该值，下游（`/state` 序列化、
+            # 编排器的 `dict.update` 语义）会以各种方式炸。此处显式回落 `{}`。
+            stats = _load_json(item.pop("stats_json", None), {})
+            item["stats"] = stats if isinstance(stats, dict) else {}
             result[row["section"]] = item
         return result
 
