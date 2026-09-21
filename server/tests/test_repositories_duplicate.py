@@ -532,3 +532,38 @@ def test_save_files_clears_content_hash_from_previous_upload(repo):
                                        "content_hash": "abc"}])
     repo.save_files("p1", [_file("t", "t.docx")], [])
     assert all(row["content_hash"] is None for row in repo.list_files("p1"))
+
+
+def test_load_analysis_guards_sister_json_columns_against_wrong_type(repo):
+    """T7 评审 A §4.3：姊妹 JSON 列是**合法 JSON 但类型不符**（标量）→ 回落默认值。
+
+    纵深防御：所有写点都是内部 `json.dumps`、类型自洽，但脏数据（手工改库、
+    旧版本残留）会让非预期类型原样漏进 `/state`。修复前：`path_titles_json`
+    为标量时 `outlineAnalysis.files[].items[].path_titles` 输出该标量而非 `[]`；
+    `item_ids_json` 为标量时读取侧的 `.items()` 直接 `AttributeError` → 500。
+    与 `stats_json` 的 `isinstance(dict)` 守卫同形。
+    """
+    repo.replace_files("p1", "bid", [_file("b", "b.docx")])
+    repo.save_section("p1", "outline", status="success", progress=100, message="o",
+                      updated_at="2026-01-01T00:00:00Z")
+    # 手工写脏数据：两个 JSON 列都是合法 JSON，但类型与契约不符。
+    repo._db.execute(
+        "INSERT INTO duplicate_check_outline_items"
+        "(project_id, item_id, file_id, parent_item_id, level, number, title,"
+        " normalized_title, path_titles_json, normalized_path, source, confidence,"
+        " sort_order, from_tender)"
+        " VALUES ('p1', 'b::i1', 'b', NULL, 1, NULL, '标题', '标题',"
+        " '123', '', 'own', 0.9, 0, 0)")
+    repo._db.execute(
+        "INSERT INTO duplicate_check_outline_groups"
+        "(project_id, group_id, type, title, score, file_ids_json, item_ids_json,"
+        " paths_json, sort_order)"
+        " VALUES ('p1', 'g1', 'duplicate', '组', 0.9, '123', '123', '123', 0)")
+
+    outline = repo.load_analysis("p1")["outlineAnalysis"]
+    assert outline["files"][0]["items"][0]["path_titles"] == [], \
+        outline["files"][0]["items"][0]
+    group = outline["duplicateGroups"][0]
+    assert group["file_ids"] == [], group
+    assert group["item_ids"] == {}, group
+    assert group["paths"] == {}, group

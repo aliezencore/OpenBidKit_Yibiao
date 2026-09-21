@@ -74,13 +74,26 @@ def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _load_json(raw: str | None, fallback: Any) -> Any:
+def _load_json(raw: str | None, fallback: Any,
+               expected_type: type | tuple[type, ...] | None = None) -> Any:
+    """解析 JSON 文本列；`raw` 为空或解析失败时回落 `fallback`。
+
+    `expected_type` 是**纵深防御**（T7 评审 A §4.3）：所有写点都是内部
+    `json.dumps`、类型自洽，但脏数据（手工改库、旧版本残留）会让非预期类型
+    原样漏进 `/state` 的线上形状——实测 `path_titles_json` 为标量时，
+    `/state` 的 `outlineAnalysis.files[].items[].path_titles` 会输出该标量
+    而非 `[]`。给定 `expected_type` 后类型不符即回落 `fallback`，与
+    `stats_json` 的 `isinstance(dict)` 守卫同形。
+    """
     if not raw:
         return fallback
     try:
-        return json.loads(raw)
+        value = json.loads(raw)
     except (TypeError, ValueError):
         return fallback
+    if expected_type is not None and not isinstance(value, expected_type):
+        return fallback
+    return value
 
 
 def _normalize_status(value: Any, fallback: str = "pending") -> str:
@@ -415,10 +428,9 @@ class DuplicateRepository:
         for row in rows:
             item = dict(row)
             # P3b Task 6（项 4）：`stats_json` 若是合法 JSON 但**非 dict**（历史/脏数据里
-            # 的标量或数组），`_load_json` 会原样返回该值，下游（`/state` 序列化、
-            # 编排器的 `dict.update` 语义）会以各种方式炸。此处显式回落 `{}`。
-            stats = _load_json(item.pop("stats_json", None), {})
-            item["stats"] = stats if isinstance(stats, dict) else {}
+            # 的标量或数组），下游（`/state` 序列化、编排器的 `dict.update` 语义）会以
+            # 各种方式炸。`expected_type=dict` 让类型不符时回落 `{}`（T7 评审 A §4.3 统一）。
+            item["stats"] = _load_json(item.pop("stats_json", None), {}, dict)
             result[row["section"]] = item
         return result
 
@@ -889,7 +901,7 @@ class DuplicateRepository:
                 "number": item["number"] or None,
                 "title": item["title"],
                 "normalized_title": item["normalized_title"],
-                "path_titles": _load_json(item["path_titles_json"], []),
+                "path_titles": _load_json(item["path_titles_json"], [], list),
                 "normalized_path": item["normalized_path"],
                 "source": item["source"],
                 "confidence": _as_float(item["confidence"]),
@@ -911,9 +923,9 @@ class DuplicateRepository:
                 "type": group["type"],
                 "title": group["title"],
                 "score": _as_float(group["score"]),
-                "file_ids": _load_json(group["file_ids_json"], []),
-                "item_ids": _load_json(group["item_ids_json"], {}),
-                "paths": _load_json(group["paths_json"], {}),
+                "file_ids": _load_json(group["file_ids_json"], [], list),
+                "item_ids": _load_json(group["item_ids_json"], {}, dict),
+                "paths": _load_json(group["paths_json"], {}, dict),
             }
             for group in group_rows
         ]
@@ -998,7 +1010,7 @@ class DuplicateRepository:
                 "id": item["duplicate_id"],
                 "sentence": item["sentence"],
                 "normalized": item["normalized"],
-                "file_ids": _load_json(item["file_ids_json"], []),
+                "file_ids": _load_json(item["file_ids_json"], [], list),
                 "occurrences": occurrences_by_duplicate.get(item["duplicate_id"], {}),
                 "first_order": _as_int(item["first_order"]),
             }
@@ -1046,14 +1058,14 @@ class DuplicateRepository:
             occurrences_by_image.setdefault(item["image_id"], {})[
                 item["file_id"]] = _as_int(item["occurrence_count"])
             locations_by_image.setdefault(item["image_id"], {})[
-                item["file_id"]] = _load_json(item["locations_json"], [])
+                item["file_id"]] = _load_json(item["locations_json"], [], list)
 
         duplicate_images = [
             {
                 "id": item["image_id"],
                 "hash": item["hash"],
                 "preview_url": item["preview_url"],
-                "file_ids": _load_json(item["file_ids_json"], []),
+                "file_ids": _load_json(item["file_ids_json"], [], list),
                 "occurrences": occurrences_by_image.get(item["image_id"], {}),
                 "locations": locations_by_image.get(item["image_id"], {}),
             }
