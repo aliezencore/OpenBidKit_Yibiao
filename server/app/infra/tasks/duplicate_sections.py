@@ -31,6 +31,7 @@ from app.domain.duplicate.tender_matcher import (
     build_duplicate_sentences,
     build_tender_source_matcher,
 )
+from app.infra.parsing.asset_store import save_docx_assets
 from app.infra.parsing.router import parse_document
 from app.infra.tasks.duplicate_runner import (
     CONTENT_EXTRACTION,
@@ -48,6 +49,20 @@ def content_dir_for(data_root: Path | str, project_id: str) -> Path:
     登记偏离，不追究）。
     """
     return Path(data_root) / "projects" / project_id / "duplicate_content"
+
+
+def _store_docx_assets(data_root: Path | str, project_id: str, docx_path: Path) -> None:
+    """把 docx 里的图片资产落到 `<data_root>/projects/{pid}/assets/`（P2a↔P2b 接线）。
+
+    **调用方只对 docx 调用**（R-DW-5）：只有 docx 的 markdown 才会带
+    `assets/<hash>` 占位（`.doc` 走 soffice 转换、pdf/xlsx/txt/md 本就没有图片占位），
+    对它们落盘只会写出 markdown 里没有任何引用的孤儿资产。
+
+    与 `parse_document(..., include_images=True)` 是**同一份字节来源**：mammoth 回调
+    读到的图片字节与 `list_media_files` 读出的 `word/media/*` 相同、哈希算法相同，
+    所以这里写出的文件名就是 markdown 占位里的那个哈希（裁定 R-DW-2，不需要映射表）。
+    """
+    save_docx_assets(data_root=data_root, project_id=project_id, docx_path=docx_path)
 
 
 def build_content_extraction(data_root: Path | str):
@@ -98,6 +113,13 @@ def build_content_extraction(data_root: Path | str):
                     parse_document, Path(file_path),
                     provider="local", include_images=True)
                 markdown = parsed.markdown.strip()
+                if parsed.format_kind == "docx":
+                    # P2a↔P2b 接线：markdown 里的 `assets/<hash>` 占位必须有盘上
+                    # 对应的文件，P3c 才拿得到图片字节。顺序刻意在**写 markdown 之前**
+                    # ——落盘失败就不该留下一份指向空资产的内容文件。
+                    # 同步的 Pillow 编解码经 to_thread 包一层（与解析同一理由）。
+                    await asyncio.to_thread(
+                        _store_docx_assets, data_root, project_id, Path(file_path))
                 content_path = content_dir / f"{file_id}.md"
                 content_path.write_text(markdown, encoding="utf-8", newline="\n")
                 results.append({

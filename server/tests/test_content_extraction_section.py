@@ -1,11 +1,9 @@
 """Task 4：content_extraction 角色接线测试。
 
-覆盖计划 :305-310 的 5 条用例。docx 夹具用 `tests.parsing_fixtures.build_docx`
-的**等价真实文档**——本任务实测发现 P2a 的本地 `docx_to_markdown` 在
-`include_images=True` 时抛 `not-implemented`（见 `docx.py:12-21`），故 happy-path
-改用 `.txt` 真文件（`.txt` + `include_images=True` 在解析器里是 no-op，能跑通
-真实重解析链路；runner 逻辑与文件格式无关）。该环境偏离在报告中登记，待 P2b
-图片解析落地后改回 build_docx。
+覆盖计划 :305-310 的 5 条用例；图片相关的 3 条由 P2a↔P2b 接线（docx 带图解析）
+补齐——原先 P2a 在 `include_images=True` 时抛 `not-implemented`（裁定 R2，
+`docx.py:12-21`），故当时只能改用 `.txt` 真文件 + 解析桩；R2 已随接线撤销，
+现在图片用例走**真 docx + 真图片**，桩已移除。
 
 参考实现：svc.cjs:2302-2354 `runContentExtraction`。
 """
@@ -14,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -102,6 +101,27 @@ def _mk_file(tmp_path, name: str, text: str) -> dict:
     }
 
 
+def _mk_docx_file(tmp_path, name: str, *, image_name="pic.png") -> dict:
+    """造一个**带真图片**的 docx + 同一形状的入参 dict。
+
+    图片由 `tests.parsing_fixtures.make_image`（Pillow）产，docx 由
+    `build_docx_with_images` 产——P2b 的既有夹具，无需手搓。
+    """
+    from tests.parsing_fixtures import build_docx_with_images, make_image
+
+    image = make_image(tmp_path / image_name, size=(40, 30), color=(200, 30, 30))
+    path = build_docx_with_images(
+        tmp_path / name, blocks=[("p", "正文段落。")], images=[image])
+    return {
+        "file_id": path.stem,
+        "file_name": name,
+        "file_path": str(path),
+        "extension": "docx",
+        "size": path.stat().st_size,
+        "modified_at": "2026-01-01T00:00:00.000Z",
+    }
+
+
 def _runner_output(tmp_path, files) -> SectionOutput:
     """直接驱动 content_extraction runner，返回 SectionOutput。"""
     runner = build_content_extraction(tmp_path)
@@ -150,51 +170,76 @@ def test_content_extraction_writes_per_file_content_and_rows(tmp_path):
         assert row["content_path"] == str(content_dir / f"{file}.md")
 
 
-# ----------------------------------------------------------- 用例 2：重解析带图片（含图片语法）
+# ------------------------------------------------- 用例 2：重解析带图片 + 资产落盘
 
-def test_content_extraction_markdown_includes_images(tmp_path, monkeypatch):
-    """content_extraction 调 parse_document 时 **带 include_images=True**（与上传
-    解析 documents/ 的 include_images=False 差异，R-P3b-1 的判别证据）。
+def test_content_extraction_requests_images_and_stores_assets(tmp_path):
+    """content_extraction 请求 `include_images=True`，**且**把图片资产落盘。
 
-    环境偏离登记：P2a 本地 docx 解析器在 include_images=True 时抛 not-implemented，
-    无法产出真实图片 markdown。故此处用 monkeypatch 的解析桩验证「当请求
-    include_images=True 时，正文里会出现图片语法」这条接线语义——桩在
-    include_images=True 时返回含 `![](...)` 的 markdown，False 时不含。这把
-    R-P3b-1 的判别点（content_extraction 走图片路径、上传解析不走）钉成可运行契约，
-    真实图片语法待 P2b 解析器落地后由同一断言覆盖。
+    与上传解析（`include_images=False`）的差异是本任务的判别点。真 docx 让这条
+    断言变成**直接证据**而不是间接代理：若 runner 传了 `False`，markdown 里就
+    不会有任何占位（`docx_to_markdown` 的 False 分支剥掉所有 `<img>`）。
+
+    「落盘」的判别点必须落在**文件真的存在**上：占位只是字符串，`assets/<hash>`
+    指向的文件不见得写出来了——两者是两个独立的失败面（P3b 的 P1 就是这类）。
     """
-    import app.infra.tasks.duplicate_sections as mod
+    from app.infra.parsing.asset_store import resolve_asset_path
 
-    captured = {}
-
-    def fake_parse(path, *, provider="local", include_images=False):
-        from app.infra.parsing.router import ParsedDocument
-        captured["include_images"] = include_images
-        if include_images:
-            return ParsedDocument(
-                markdown="![图1](asset://img1.png)\n正文带图。",
-                format_kind="docx", extension=".docx", parser_label="local")
-        return ParsedDocument(
-            markdown="正文不带图。", format_kind="docx", extension=".docx",
-            parser_label="local")
-
-    monkeypatch.setattr(mod, "parse_document", fake_parse)
-
-    file = _mk_file(tmp_path, "doc.txt", "任意内容")
+    docx_file = _mk_docx_file(tmp_path, "投标.docx")
     runner = build_content_extraction(tmp_path)
     section_ctx = SectionRunContext(
-        project_id="p1", section=CONTENT_EXTRACTION, files=[file])
+        project_id="p1", section=CONTENT_EXTRACTION, files=[docx_file])
     output = asyncio.run(runner(section_ctx))
 
-    # 关键接线：content_extraction 必须请求 include_images=True
-    assert captured["include_images"] is True
     row = output.rows["content_files"][0]
-    assert row["status"] == "success"
-    # 带图片的产物 markdown 含图片语法（上传解析 documents/ 无此内容）。
-    # 图片语法与桩产出逐字一致（解析器保留 alt 文本是 P2a 既定行为）。
+    assert row["status"] == "success", row
     content = Path(row["content_path"]).read_text(encoding="utf-8")
-    assert "![图1](asset://img1.png)" in content
-    assert "asset://" in content
+    hashes = re.findall(r"!\[[^\]]*\]\(assets/([0-9a-f]{64})\)", content)
+    assert hashes, content
+
+    # 每个占位都必须能解析到**存在的文件**（接线真的接上了）
+    for digest in hashes:
+        resolved = resolve_asset_path(
+            data_root=tmp_path, project_id="p1", target=f"assets/{digest}")
+        assert resolved is not None and resolved.exists(), digest
+
+    # 资产目录里恰好是「不同哈希数」份（同图重复出现只落一份）
+    assets_dir = tmp_path / "projects" / "p1" / "assets"
+    assert len(list(assets_dir.iterdir())) == len(set(hashes))
+
+
+def test_content_extraction_skips_asset_storage_for_non_docx(tmp_path):
+    """非 docx 不落资产（R-DW-5）：txt 没有图片占位，落盘是纯浪费。"""
+    file = _mk_file(tmp_path, "doc.txt", "纯文本正文。")
+    runner = build_content_extraction(tmp_path)
+
+    output = asyncio.run(runner(SectionRunContext(
+        project_id="p1", section=CONTENT_EXTRACTION, files=[file])))
+
+    assert output.rows["content_files"][0]["status"] == "success"
+    assert not (tmp_path / "projects" / "p1" / "assets").exists()
+
+
+def test_content_extraction_asset_failure_is_per_file(tmp_path, monkeypatch):
+    """落资产失败 → 该文件 error 行，**其余文件不连坐**（R-DW-7 = R-P3b-4）。"""
+    import app.infra.tasks.duplicate_sections as mod
+
+    def boom(**_kwargs):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(mod, "save_docx_assets", boom)
+
+    docx_file = _mk_docx_file(tmp_path, "投标.docx")
+    txt_file = _mk_file(tmp_path, "招标.txt", "纯文本正文。")
+    runner = build_content_extraction(tmp_path)
+
+    output = asyncio.run(runner(SectionRunContext(
+        project_id="p1", section=CONTENT_EXTRACTION, files=[docx_file, txt_file])))
+
+    rows = {r["file_id"]: r for r in output.rows["content_files"]}
+    assert rows["投标"]["status"] == "error", rows
+    assert "磁盘满了" in rows["投标"]["error"], rows
+    assert rows["招标"]["status"] == "success", rows
+    assert output.failed is True
 
 
 # ----------------------------------------------------------- 用例 3：坏文件不连坐整批
