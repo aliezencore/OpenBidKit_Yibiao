@@ -16,10 +16,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from app.domain.duplicate.content import split_content_sentences
+from app.domain.duplicate.outline import (
+    build_outline_comparison,
+    build_outline_items,
+    split_tender_sentences,
+)
+from app.domain.duplicate.tender_matcher import (
+    build_duplicate_sentences,
+    build_tender_source_matcher,
+)
 from app.infra.parsing.router import parse_document
 from app.infra.tasks.duplicate_runner import (
     CONTENT_EXTRACTION,
@@ -160,3 +171,363 @@ def _file_path_of(file: Any) -> str:
     if isinstance(file, Mapping):
         return file.get("file_path")
     return getattr(file, "file_path", None)
+
+
+# ---------------------------------------------------------------- 段内共享辅助
+
+def _half_up(value: float) -> int:
+    """half-up 取整（对齐 JS `Math.round` / `math.floor(x + 0.5)`，计划 R-P3b-7）。"""
+    return math.floor(value + 0.5)
+
+
+def _content_file_rows(section_ctx: SectionRunContext) -> list[dict[str, Any]]:
+    """从段上下文取出正文提取产物（`content_files` 行）。
+
+    `section_ctx.content_files` 是 `content_extraction` 角色的 `SectionOutput`
+    （经 `with_dependency(CONTENT_FILES_DEPENDENCY, ...)` 注入）；其 `rows`
+    携带 `content_files` 列表。缺失/失败 → 空列表（下游 `read_content_markdown`
+    据此抛「正文内容尚未成功提取」）。
+    """
+    cf = section_ctx.content_files
+    if isinstance(cf, SectionOutput):
+        return list(getattr(cf, "rows", {}).get("content_files") or [])
+    return []
+
+
+def _read_content_markdown(content_rows: Sequence[dict[str, Any]], file: Any) -> str:
+    """对齐参考 `readContentMarkdown`（svc.cjs:2405-2410）。
+
+    在 `content_files` 行里找本文件的 success 条目并读其 `content_path`；
+    找不到（含非 success / 缺 content_path）→ 抛**逐字**异常，由调用方决定
+    「目录分析」或「正文比对」语义下如何处理。
+    """
+    file_id = _file_id_of(file)
+    item = next(
+        (entry for entry in content_rows
+         if entry.get("file_id") == file_id
+         and entry.get("status") == "success"
+         and entry.get("content_path")),
+        None)
+    if item is None:
+        raise RuntimeError("正文内容尚未成功提取，无法进行目录分析")
+    return Path(item["content_path"]).read_text(encoding="utf-8")
+
+
+def _read_combined_tender_markdown(content_rows: Sequence[dict[str, Any]],
+                                   tender_files: Sequence[Any]) -> str:
+    """对齐参考 `readCombinedTenderMarkdown`（svc.cjs:2356-2363）：逐 tender 文件读
+    content markdown，`\\n\\n` join 非空片段。任一文件读取抛错 → 向上抛（由调用方 catch
+    广播白名单失败、继续比对，R-P3b-4）。"""
+    parts: list[str] = []
+    for file in tender_files:
+        markdown = _read_content_markdown(content_rows, file)
+        if str(markdown or "").strip():
+            parts.append(str(markdown).strip())
+    return "\n\n".join(parts)
+
+
+def _report_progress(section_ctx: SectionRunContext, percent: int, message: str) -> None:
+    """段内进度回调（仅当编排器注入了 `section_progress` 时上报）。"""
+    if section_ctx.section_progress is not None:
+        section_ctx.section_progress(int(percent), message)
+
+
+def _broadcast(section_ctx: SectionRunContext, message: str) -> None:
+    """广播一条中段文案：经 `ctx.log` 留痕（测试可断言），并写该段 running 行 message。
+
+    参考里中段广播只更新 `message`、不动 `progress`；本端进度恒由后续
+    `section_progress` 调用接管，这里固定带一个初始进度 5（与参考初始 `progress: 5`
+    同义）仅用于占位。
+    """
+    if section_ctx.ctx is not None:
+        section_ctx.ctx.log(message)
+    if section_ctx.section_progress is not None:
+        section_ctx.section_progress(5, message)
+
+
+# ---------------------------------------------------------------- outline 段
+
+def build_outline_runner(data_root: Path | str):
+    """构造 `outline` 段的 runner 闭包（对齐 `runOutlineAnalysis` svc.cjs:2412-2502）。
+
+    行为（R-P3b-4 / 逐字文案）：
+    - tender 白名单：`readCombinedTenderMarkdown` → `split_tender_sentences`；读不到/失败 →
+      广播「招标文件句子白名单生成失败，继续对比投标文件目录：{error}」（:2426）继续。
+    - 逐 bid：`read_content_markdown`（缺 success 条目抛「正文内容尚未成功提取，
+      无法进行目录分析」:2408）→ `build_outline_items` → 成功/错误行（错误行 `items: []`，继续）。
+    - 逐文件后 `section_progress(round((completed/total)*80), "目录提取 {completed}/{total}")`；
+      total=0 → 80（:2469 三元式）。
+    - `build_outline_comparison` → `outline_items` / `outline_groups` / `outline_pairwise`
+      三类落库行；`failed = any(文件 error)`；`message = 部分文件目录分析失败/目录分析完成`
+      （:2483）；`extraction = {status, completed: len(results), total: len(bid_files)}`（:2485）；
+      stats 含 `tender_sentence_count` / `tender_matched_item_count`（:2487-2488）。
+    """
+
+    async def run_outline(section_ctx: SectionRunContext) -> SectionOutput:
+        bid_files = list(section_ctx.bid_files)
+        tender_files = list(section_ctx.tender_files)
+        content_rows = _content_file_rows(section_ctx)
+        total = len(bid_files)
+
+        # 1) 招标白名单
+        tender_sentences: list[dict[str, str]] = []
+        if tender_files:
+            try:
+                tender_markdown = _read_combined_tender_markdown(content_rows, tender_files)
+                tender_sentences = split_tender_sentences(tender_markdown)
+            except Exception as error:  # noqa: BLE001
+                _broadcast(
+                    section_ctx,
+                    f"招标文件句子白名单生成失败，继续对比投标文件目录：{error}")
+
+        # 2) 逐 bid 文件
+        results: list[dict[str, Any]] = []
+        for file in bid_files:
+            file_id = _file_id_of(file)
+            file_name = _file_name_of(file)
+            try:
+                markdown = _read_content_markdown(content_rows, file)
+                extracted = build_outline_items(markdown, tender_sentences)
+                tender_matched_count = sum(
+                    1 for item in extracted["items"] if item.get("from_tender"))
+                results.append({
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "success",
+                    "source": extracted["source"],
+                    "confidence": extracted["confidence"],
+                    "item_count": len(extracted["items"]),
+                    "tender_matched_count": tender_matched_count,
+                    "items": extracted["items"],
+                })
+            except Exception as error:  # noqa: BLE001 —— 单文件失败不连坐
+                results.append({
+                    "file_id": file_id, "file_name": file_name, "status": "error",
+                    "item_count": 0, "tender_matched_count": 0, "items": [],
+                    "error": str(error) or "目录提取失败"})
+            # 段内进度（参考 :2469）
+            completed = len(results)
+            progress = _half_up((completed / total) * 80) if total else 80
+            _report_progress(section_ctx, progress, f"目录提取 {completed}/{total}")
+
+        # 3) 跨文件比对
+        comparison = build_outline_comparison(results)
+        failed = any(r["status"] == "error" for r in results)
+        message = "部分文件目录分析失败" if failed else "目录分析完成"
+
+        outline_items_rows: list[dict[str, Any]] = []
+        for r in results:
+            for item in r.get("items") or []:
+                outline_items_rows.append({
+                    # 落库行键名与 `replace_outline_items` 一致；`item_id` / `parent_item_id`
+                    # 传**未 scoped** 的 id，scoped 形式由仓储 `_scope_outline_row` 负责。
+                    "item_id": item["id"],
+                    "file_id": r["file_id"],
+                    "parent_item_id": item.get("parent_id"),
+                    "level": item.get("level"),
+                    "number": item.get("number"),
+                    "title": item.get("title"),
+                    "normalized_title": item.get("normalized_title"),
+                    "path_titles": item.get("path_titles"),
+                    "normalized_path": item.get("normalized_path"),
+                    "source": item.get("source"),
+                    "confidence": item.get("confidence"),
+                    "sort_order": item.get("order"),
+                    "from_tender": bool(item.get("from_tender")),
+                    "matched_tender_sentence": item.get("matched_tender_sentence"),
+                })
+
+        outline_groups_rows: list[dict[str, Any]] = []
+        for group in comparison["duplicateGroups"]:
+            outline_groups_rows.append({
+                "group_id": group["id"],
+                "type": group["type"],
+                "title": group["title"],
+                "score": group["score"],
+                "file_ids": group["file_ids"],
+                "item_ids": group["item_ids"],
+                "paths": group["paths"],
+            })
+
+        outline_pairwise_rows: list[dict[str, Any]] = []
+        for pair in comparison["pairwiseSimilarities"]:
+            outline_pairwise_rows.append({
+                "file_a_id": pair["file_a_id"],
+                "file_b_id": pair["file_b_id"],
+                "score": pair["score"],
+                "title_overlap": pair["title_overlap"],
+                "path_overlap": pair["path_overlap"],
+                "order_similarity": pair["order_similarity"],
+                "shared_count": pair["shared_count"],
+                "risk": pair["risk"],
+            })
+
+        extraction = {
+            "status": "error" if failed else "success",
+            "completed": len(results),
+            "total": total,
+        }
+        stats = {
+            "tender_sentence_count": len(tender_sentences),
+            "tender_matched_item_count": sum(
+                r.get("tender_matched_count", 0) for r in results),
+        }
+        return SectionOutput(
+            stats=stats,
+            rows={
+                "outline_items": outline_items_rows,
+                "outline_groups": outline_groups_rows,
+                "outline_pairwise": outline_pairwise_rows,
+            },
+            failed=failed,
+            message=message,
+            extraction=extraction,
+        )
+
+    return run_outline
+
+
+# ---------------------------------------------------------------- content 段
+
+def build_content_runner(data_root: Path | str):
+    """构造 `content` 段的 runner 闭包（对齐 `runContentDuplicateAnalysis`
+    svc.cjs:2504-2630）。
+
+    行为（R-P3b-4 / 逐字文案/公式）：
+    - tender matcher：`readCombinedTenderMarkdown` → `split_content_sentences` →
+      `build_tender_source_matcher`；失败 → 广播「招标文件句子白名单生成失败，
+      继续比对投标正文：{error}」（:2519）。
+    - 逐 bid（按序全局递增 `first_order`）：`split_content_sentences` → 逐句
+      `matcher.match`（`reason` 计数）；未命中 → 收集进 local map。
+      每 500 句 `section_progress(min(89, round(5 + ((file_index + processed/len)/
+      bid_count)*80)), "正文比对 {i+1}/{n}（{processed}/{len} 句）")`（:2562）+ `await
+      asyncio.sleep(0)`（:2570 让出）。**文件级 catch → 只广播 `{file_name} 正文比对失败：
+      {error}`（:2588），不产 error 行、不置 failed**。文件尾
+      `section_progress(round((10 if global else 5) + (i+1)/n*80), "正文比对 {i+1}/{n}")`（:2598）。
+    - `build_duplicate_sentences(global)` → `content_duplicates` / `content_occurrences`；
+      `message = 正文比对完成`（:2611）；`failed = False` 恒；`extraction =
+      {status: success, completed: bid_count, total: bid_count}`；stats 含
+      `tender_sentence_count` / `tender_matched_sentence_count` / `total_sentence_count`
+      + `tender_match_reason_counts`（:2613-2615）。
+    """
+
+    async def run_content(section_ctx: SectionRunContext) -> SectionOutput:
+        bid_files = list(section_ctx.bid_files)
+        tender_files = list(section_ctx.tender_files)
+        content_rows = _content_file_rows(section_ctx)
+        bid_count = len(bid_files)
+
+        # 1) 招标 matcher
+        tender_matcher = build_tender_source_matcher([])
+        tender_match_reason_counts: dict[str, int] = {}
+        if tender_files:
+            try:
+                tender_markdown = _read_combined_tender_markdown(content_rows, tender_files)
+                tender_matcher = build_tender_source_matcher(
+                    split_content_sentences(tender_markdown))
+            except Exception as error:  # noqa: BLE001
+                _broadcast(
+                    section_ctx,
+                    f"招标文件句子白名单生成失败，继续比对投标正文：{error}")
+
+        global_sentences: dict[str, dict[str, Any]] = {}
+        total_sentence_count = 0
+        tender_matched_sentence_count = 0
+        first_order = 0
+
+        for file_index, file in enumerate(bid_files):
+            file_id = _file_id_of(file)
+            file_name = _file_name_of(file)
+            try:
+                markdown = _read_content_markdown(content_rows, file)
+                sentences = split_content_sentences(markdown)
+                total_sentence_count += len(sentences)
+                local: dict[str, dict[str, Any]] = {}
+                for sentence_index, sentence in enumerate(sentences):
+                    match_result = tender_matcher.match({
+                        "sentence": sentence["sentence"],
+                        "normalized": sentence["normalized"],
+                    })
+                    if match_result:
+                        tender_matched_sentence_count += 1
+                        reason = match_result.get("reason") or "unknown"
+                        tender_match_reason_counts[reason] = (
+                            tender_match_reason_counts.get(reason, 0) + 1)
+                    else:
+                        normalized = sentence["normalized"]
+                        current = local.get(normalized) or {
+                            "sentence": sentence["sentence"], "count": 0,
+                            "order": first_order}
+                        current["count"] += 1
+                        if normalized not in local:
+                            first_order += 1  # order 在首次出现时分配（对齐 :2553 firstOrder++）
+                        local[normalized] = current
+
+                    processed = sentence_index + 1
+                    if processed % 500 == 0 and processed < len(sentences):
+                        progress = _half_up(
+                            5 + ((file_index + processed / len(sentences)) / bid_count) * 80)
+                        progress = min(89, progress)
+                        _report_progress(
+                            section_ctx, progress,
+                            f"正文比对 {file_index + 1}/{bid_count}"
+                            f"（{processed}/{len(sentences)} 句）")
+                        await asyncio.sleep(0)  # 让出事件循环（对应 :2570 setImmediate）
+
+                # local → global（按 normalized 合并；file_ids 去重、occurrences 计数）
+                for normalized, item in local.items():
+                    global_item = global_sentences.get(normalized) or {
+                        "sentence": item["sentence"], "normalized": normalized,
+                        "file_ids": [], "occurrences": {}, "first_order": item["order"]}
+                    if file_id not in global_item["file_ids"]:
+                        global_item["file_ids"].append(file_id)
+                    global_item["occurrences"][file_id] = item["count"]
+                    global_sentences[normalized] = global_item
+            except Exception as error:  # noqa: BLE001 —— 单文件失败只广播，不连坐
+                _broadcast(section_ctx, f"{file_name} 正文比对失败：{error}")
+
+            # 文件尾进度（参考 :2598）
+            progress = _half_up(
+                (10 if len(global_sentences) else 5)
+                + (file_index + 1) / bid_count * 80) if bid_count else 85
+            _report_progress(
+                section_ctx, progress,
+                f"正文比对 {file_index + 1}/{bid_count}")
+
+        duplicates = build_duplicate_sentences(global_sentences)
+        content_duplicates_rows = [{
+            "duplicate_id": d["id"],
+            "sentence": d["sentence"],
+            "normalized": d["normalized"],
+            "file_ids": d["file_ids"],
+            "first_order": d["first_order"],
+        } for d in duplicates]
+        content_occurrences_rows = []
+        for d in duplicates:
+            for fid in d["file_ids"]:
+                content_occurrences_rows.append({
+                    "duplicate_id": d["id"],
+                    "file_id": fid,
+                    "occurrence_count": d.get("occurrences", {}).get(fid, 0),
+                })
+
+        message = "正文比对完成"
+        extraction = {"status": "success", "completed": bid_count, "total": bid_count}
+        stats = {
+            "tender_sentence_count": tender_matcher.tender_sentence_count,
+            "tender_matched_sentence_count": tender_matched_sentence_count,
+            "total_sentence_count": total_sentence_count,
+            "tender_match_reason_counts": tender_match_reason_counts,
+        }
+        return SectionOutput(
+            stats=stats,
+            rows={
+                "content_duplicates": content_duplicates_rows,
+                "content_occurrences": content_occurrences_rows,
+            },
+            failed=False,
+            message=message,
+            extraction=extraction,
+        )
+
+    return run_content

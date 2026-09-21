@@ -16,6 +16,7 @@ from app.infra.tasks.duplicate_runner import (
     METADATA_EXTRACTION,
     DuplicateAnalysisRunner,
     SectionOutput,
+    _stub_sections,
 )
 
 
@@ -927,18 +928,29 @@ def test_signature_is_preserved_when_not_carried_and_cleared_when_none(repo):
 
 # ------------------------------------------------------------------ F7
 
-def test_failure_branch_is_unreachable_in_p3a(repo):
-    """P3a 的段失败分支**不可达**——这是刻意边界，不是遗漏（F7）。
+def test_section_failure_marks_only_own_section(repo):
+    """段级失败**只影响该段终态**——某段声明 `failed=True`，其余段仍 `success`
+    （R-P3b-4 的段间隔离；P3a 的「失败分支不可达」在 P3b 被「可控失败」取代）。
 
-    `_stub_sections()` 恒返回 `SectionOutput()`（`failed=False`），也没有段抛异常，
-    所以四段终态必然是 `success`。将来 P3b–P3d 把逐文件状态接上 `failed`
-    （或改成抛异常）时，这条会变红并提醒更新 `_output_failed` 的说明与调用方契约。
+    用可控 runner：仅 `outline` 返回 `failed=True` 的产出，content/image/两个提取角色
+    全部用 stub（`failed=False`）。断言：outline=error，content/image/metadata=success；
+    metadata 不受任一分析段失败牵连。
     """
-    _run(repo, _payload())
+    sections = dict(_stub_sections())
+
+    async def fail_outline(section_ctx):
+        return SectionOutput(failed=True, message="部分文件目录分析失败")
+
+    sections["outline"] = fail_outline
+    runner = DuplicateAnalysisRunner(repo=repo, sections=sections)
+
+    ctx = FakeCtx()
+    asyncio.run(runner(ctx, _payload(), None))
     statuses = _terminal_statuses(repo)
-    assert set(statuses.values()) == {"success"}, (
-        "失败分支变得可达了——请更新 _output_failed 的 F7 说明与 P3b 的接线："
-        f"{statuses}")
+    assert statuses["outline"] == "error"
+    assert statuses["content"] == "success"
+    assert statuses["image"] == "success"
+    assert statuses["metadata"] == "success"
 
 
 # ------------------------------------------------------------------ F8

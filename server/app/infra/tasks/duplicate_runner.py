@@ -188,6 +188,10 @@ class SectionRunContext:
     tender_files: Sequence[Any] = ()
     signature: str | None = None
     content_files: Sequence[Any] = ()
+    # 段内进度回调（P3b Task 5 注入）：`section_progress(percent, message)` 由主编排
+    # 转成「写该段的 running 行（不带签名，P3a 裁定 P12）」。提取角色
+    # （content_extraction / metadata_extraction）不写自己的状态行，故注入 None。
+    section_progress: Callable[[int, str], None] | None = None
 
     def with_dependency(self, name: str, value: Any) -> "SectionRunContext":
         """返回带上了依赖产物的新实例（`name` 必须是本类的字段名）。"""
@@ -501,11 +505,17 @@ class DuplicateAnalysisRunner:
             output = self._as_output(output)
             section_failed = self._output_failed(output)
             failed = failed or section_failed
+            # P3b Task 5：终态文案用段产出的 `message`（逐字文案；None 时回退统一文案），
+            # 并把 `extraction` 子统计并入段 stats（对齐参考 :2485 / :2617 的 `extraction`）。
+            stats = dict(output.stats or {})
+            if output.extraction:
+                stats["extraction"] = output.extraction
+            message = output.message if output.message else (
+                "分析失败" if section_failed else "分析完成")
             self._save_section(
                 ctx, project_id, section,
                 status="error" if section_failed else "success", progress=100,
-                message="分析失败" if section_failed else "分析完成",
-                signature=signature, stats=output.stats)
+                message=message, signature=signature, stats=stats)
             self._persist_rows(project_id, section, output)
 
         ctx.progress(overall_progress(self._section_states(project_id)))
@@ -529,7 +539,11 @@ class DuplicateAnalysisRunner:
         merged: dict[str, Any] = dict(metadata_output.stats or {})
         content_output = content_output_of(content_files)
         if content_output is not None:
-            merged["content_extraction"] = dict(content_output.stats or {})
+            # P3b Task 5：按 `extraction` 字段填实 content_extraction 子统计
+            # （T4 的 content_extraction 同时设了 `stats` 与 `extraction`，二者同形；
+            # 优先用 `extraction` 字段，与计划 Task 5 :357 对齐）。
+            merged["content_extraction"] = dict(
+                content_output.extraction or content_output.stats or {})
         return merged
 
     # ------------------------------------------------------------ 异常安全
@@ -745,17 +759,44 @@ class DuplicateAnalysisRunner:
 
     def _persist_rows(self, project_id: str, section: str,
                       output: SectionOutput) -> None:
-        """把段产出的结果行落库。
+        """把段产出的结果行落库（P3b Task 5 实现）。
 
-        P3a 的 stub 返回空 `rows`，四张核心结果表因此保持为空——这正是本阶段的边界。
-        真实的落库映射（哪张表吃哪个键）属于 P3b–P3d：那些阶段的结果形状还没定，
-        在 P3a 先写一套猜测的映射只会变成后续阶段要拆掉的假接口。
+        按 `output.rows` 里**出现过的键**分派到对应仓储 `replace_*` 方法；缺键即不写
+        该表（P3a 的 stub 仍返回空 `rows` → 这里直接 return，行为不变）。
+
+        分派映射（计划 :347-354）：
+
+        | rows 键 | 落库调用 |
+        |---|---|
+        | `content_files` | `replace_content_files(project_id, rows)` |
+        | `outline_items` | `replace_outline_items(project_id, rows)` |
+        | `outline_groups` | `replace_outline_groups(project_id, rows)` |
+        | `outline_pairwise` | `replace_outline_pairwise(project_id, rows)` |
+        | `content_duplicates` + `content_occurrences` | `replace_content_duplicates(project_id, rows, occurrences)` |
+
+        落库失败（任一 replace 抛）→ 上抛 → `__call__` 顶层兜底把未终态段收 error
+        （P3a F1 语义）——本方法不自己吞异常。
         """
         rows = output.rows
         if not rows:
             return
-        raise NotImplementedError(
-            f"{section} 段的结果行落库由 P3b–P3d 接入（P3a 的 stub 不产出结果行）")
+        content_files = rows.get("content_files")
+        if content_files is not None:
+            self._repo.replace_content_files(project_id, content_files)
+        outline_items = rows.get("outline_items")
+        if outline_items is not None:
+            self._repo.replace_outline_items(project_id, outline_items)
+        outline_groups = rows.get("outline_groups")
+        if outline_groups is not None:
+            self._repo.replace_outline_groups(project_id, outline_groups)
+        outline_pairwise = rows.get("outline_pairwise")
+        if outline_pairwise is not None:
+            self._repo.replace_outline_pairwise(project_id, outline_pairwise)
+        content_duplicates = rows.get("content_duplicates")
+        if content_duplicates is not None:
+            self._repo.replace_content_duplicates(
+                project_id, content_duplicates,
+                rows.get("content_occurrences") or [])
 
     # ---------------------------------------------------------------- 段执行
 
@@ -772,10 +813,20 @@ class DuplicateAnalysisRunner:
         runner = self._sections.get(role)
         if runner is None:
             raise ValueError(f"未知的分析角色：{role}")
+        # 段内进度回调（P3b Task 5）：提取角色不写状态行 → None；outline/content/image
+        # 三段 → 写对应段的 running 行（不带签名，P3a 裁定 P12）。
+        if role in ("outline", "content", "image"):
+            progress_cb: Callable[[int, str], None] | None = (
+                lambda percent, message, _role=role: self._save_section(
+                    ctx, project_id, _role, status="running",
+                    progress=percent, message=message))
+        else:
+            progress_cb = None
         section_ctx = SectionRunContext(
             project_id=project_id, section=role, ctx=ctx,
             files=list(all_files), bid_files=list(bid_files),
-            tender_files=list(tender_files), signature=signature)
+            tender_files=list(tender_files), signature=signature,
+            section_progress=progress_cb)
         for name, value in (extra_ctx or {}).items():
             section_ctx = section_ctx.with_dependency(name, value)
         output = await runner(section_ctx)
