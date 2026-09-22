@@ -169,8 +169,12 @@ def test_analysis_requires_files(client, project):
 
 # --------------------------------------------------------------- 必有用例 6
 
-def test_export_is_not_implemented_in_p3a(client, project):
-    assert client.get(f"/projects/{project}/duplicate/export").status_code == 501
+def test_export_requires_exportable_results(client, project):
+    """P3d-2 T3：501 占位已替换为真实现（R-P3d2-5）。空项目（无段、签名 None）
+    不可导出 → 400，detail 逐字参考实现 :520。"""
+    resp = client.get(f"/projects/{project}/duplicate/export")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "没有可导出的当前标书查重结果"
 
 
 # --------------------------------------------------------------- 必有用例 7

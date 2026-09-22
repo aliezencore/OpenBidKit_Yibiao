@@ -582,3 +582,76 @@ def test_e2e_metadata_upload_failed_row_becomes_error(client, tmp_path):
     assert len(ok_rows) == 1 and ok_rows[0]["status"] == "success", ok_rows
     assert ok_rows[0]["metadata"], ok_rows
 
+
+# --------------------------- 用例 11（P3d-2 T3）：查重 Excel 导出闭环
+
+def test_e2e_export_duplicate_workbook_after_success(client, tmp_path):
+    """上传+分析到 success → `GET /export` 下载 xlsx → openpyxl 读回断言六表。
+
+    R-P3d2-1 的行为证明：本测试全程不经任何请求参数传签名，导出仍命中
+    exportable——signature 由服务端自持（`current_signature`）。
+
+    Content-Disposition 中文文件名走 RFC 5987 `filename*`（RFC 6266 双形态）。
+    """
+    from io import BytesIO
+    from urllib.parse import unquote
+
+    from openpyxl import load_workbook
+
+    _, base = _setup_project(client, tmp_path)
+    started = client.post(f"{base}/analysis", json={"force": False})
+    assert started.status_code == 200, started.text
+    assert _wait_for_task(client, started.json()["taskId"])["status"] == "success"
+
+    resp = client.get(f"{base}/export")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    disposition = resp.headers["content-disposition"]
+    assert "attachment" in disposition
+    assert "filename*=UTF-8''" in disposition
+    raw_name = disposition.split("filename*=UTF-8''", 1)[1]
+    # 形态断言（时间戳 = now()，不钉具体值）：sanitizeFile 后无非法字符
+    assert re.fullmatch(r"标书查重结果_\d{8}_\d{6}\.xlsx", unquote(raw_name)), disposition
+
+    book = load_workbook(BytesIO(resp.content))
+    assert book.sheetnames == ["查重概览", "元数据", "目录重复",
+                               "文件相似度", "重复句子", "重复图片"]
+
+    overview = book["查重概览"]
+    assert overview["A1"].value == "导出时间"
+    # 四段全 success → 概览四维度行状态全「已完成」（ getResultStatus success 分支）
+    assert [overview.cell(row=row, column=2).value for row in range(4, 8)] == \
+        ["已完成", "已完成", "已完成", "已完成"]
+    # 概览无 autofilter；数据表 filterHeaderRow=0
+    assert overview.auto_filter.ref is None
+
+    # 夹具 1 份 bid → metadata 表头动态列 1 列「投标文件1：投标A.docx」
+    meta = book["元数据"]
+    assert meta["D1"].value == "投标文件1：投标A.docx"
+    assert meta.auto_filter.ref is not None
+    # load_analysis 的 rows 经 _build_rows：file_name 行恒首现；单份 bid
+    # 无同值可重复 → 重复文件列空（openpyxl 空串折叠为 None，见 T2 登记）
+    assert meta["A2"].value == "文件名"
+    assert meta["B2"].value is None
+
+    # 目录重复/文件相似度表的百分比格式（T2 读回验证的 e2e 面）。
+    # 真实算法组数可为 0（单 bid 夹具目录无重复）——有数据行才断言 D 列格式。
+    outline = book["目录重复"]
+    formats = {cell.coordinate: cell.number_format
+               for row in outline.iter_rows(min_row=2, min_col=4, max_col=4)
+               for cell in row if cell.value is not None}
+    if formats:
+        assert set(formats.values()) == {"0.00%"}, formats
+
+
+def test_export_rejected_before_any_analysis(client, tmp_path):
+    """上传后未分析：四段 pending + 签名一致但无数据 → exportable False → 400。
+
+    钉 R-P3d2-5 的「签名一致还不够，得有 success 或重复行」分支在 API 面生效。
+    """
+    _, base = _setup_project(client, tmp_path)
+    resp = client.get(f"{base}/export")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "没有可导出的当前标书查重结果"
+

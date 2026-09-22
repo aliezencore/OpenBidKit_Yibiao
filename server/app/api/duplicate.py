@@ -23,14 +23,20 @@ import logging
 import mimetypes
 import tempfile
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, StrictBool
 
 from app.api.deps import AppState, get_state
+from app.domain.duplicate.export_workbook import (
+    build_duplicate_workbook_plan,
+    select_current_duplicate_results,
+)
 from app.domain.duplicate.progress import latest_analysis_message, overall_progress
 from app.domain.duplicate.signature import stable_file_id
 from app.domain.duplicate.state import ANALYSIS_SECTIONS, SectionState
@@ -39,6 +45,7 @@ from app.infra.parsing.asset_store import ASSET_TARGET_PREFIX, assets_dir_for, r
 from app.infra.parsing.image_plan import detect_image_format
 from app.infra.parsing.path_safety import validate_project_id
 from app.infra.parsing.service import save_uploaded_document
+from app.infra.exporting.duplicate_xlsx import write_duplicate_xlsx
 from app.infra.repositories.duplicate import DuplicateFileInput
 from app.infra.tasks.duplicate_runner import (
     CONTENT_EXTRACTION,
@@ -65,8 +72,6 @@ ANALYSIS_KIND = "duplicate-analysis"
 # 两组文件的字段名（brief F-1）。前端 `persistSelectedFiles` 每次都传完整两组。
 _GROUP_TENDER = "tender"
 _GROUP_BID = "bid"
-
-_EXPORT_NOT_IMPLEMENTED = "导出功能在 P3d 提供（P3a 不实现）。"
 
 # 解析失败行的 `file_path` 编码：`upload-failed:<code>\x1f<file_name>`。
 # `\x1f`（ASCII Unit Separator）在正常错误码与文件名里都不可能出现，故分隔无歧义。
@@ -405,9 +410,41 @@ async def start_analysis(project_id: str, body: AnalysisRequest | None = None,
 
 @router.get("/projects/{project_id}/duplicate/export")
 def export_analysis(project_id: str,
-                    state: AppState = Depends(get_state)) -> dict:
-    """导出属 P3d → P3a 返回 501（不实现）。"""
-    raise HTTPException(status_code=501, detail=_EXPORT_NOT_IMPLEMENTED)
+                    state: AppState = Depends(get_state)) -> Response:
+    """查重结果 Excel 导出（P3d-2 T3，spec §9.3 查重六工作表）。
+
+    **R-P3d2-1（有意偏离）**：参考实现由前端从 state 传入 `request.signature`；
+    服务端没有「前端 state」概念，signature **自持**——直接读
+    `duplicate_check_meta.current_signature` 作判据输入，等价且更强。
+
+    **R-P3d2-5（exportable 判定）**：四段任一 `valid`（段 signature 与当前
+    签名一致且段存在）且（`status=='success'` 或有重复行）才可导出；
+    否则 400，detail 逐字参考 :520「没有可导出的当前标书查重结果」。
+
+    参考的 `dialog.showSaveDialog` 保存语义属 Electron；此处改为 **HTTP 下载**
+    （xlsx 字节 + `Content-Disposition`）。文件名形态照搬参考
+    （``标书查重结果_<YYYYMMDD_HHMMSS>.xlsx``，已过 sanitizeFile）；
+    中文文件名按 RFC 6266 双形态（ASCII fallback + RFC 5987 `filename*`）。
+
+    只读端点（纯 DB 读 + 内存序列化，不碰文件系统、不拼路径）——与
+    `GET /state` 同类，不走 `validate_project_id`（那是破坏性/路径类操作的纪律）。
+    """
+    signature = (state.duplicate.get_meta(project_id) or {}).get("current_signature")
+    analysis = state.duplicate.load_analysis(project_id)
+    selected = select_current_duplicate_results(analysis, signature)
+    if not selected["exportable"]:
+        raise HTTPException(status_code=400, detail="没有可导出的当前标书查重结果")
+    plan = build_duplicate_workbook_plan(analysis, signature, datetime.now())
+    payload = write_duplicate_xlsx(plan)
+    return Response(
+        content=payload,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition":
+                "attachment; filename=\"duplicate-check-export.xlsx\""
+                f"; filename*=UTF-8''{quote(plan.file_name)}",
+        },
+    )
 
 
 # ---------------------------------------------------------------------- 内部实现
