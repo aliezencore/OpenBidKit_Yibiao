@@ -40,6 +40,7 @@ _PREVIOUS_SENTENCE_LIMIT = 500          # 参考 :2045 `.slice(0, 500)`
 _PREVIOUS_TEXT_LIMIT = 4000             # 参考 :2068 `.slice(-4000)`
 
 _FENCED_CODE_RE = re.compile(r"```[\s\S]*?```")           # 参考 :2049
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+")        # 参考 :2044
 _HORIZONTAL_SPACE_RE = re.compile(r"[\t ]+")              # 参考 :2043
 _ATX_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+)$")  # 参考 :2020
@@ -55,6 +56,20 @@ _MARKDOWN_IMAGE_RE = re.compile(
 # `match.index` 记的是 `<img` 的起点）。
 _HTML_IMG_SRC_RE = re.compile(
     r"<img\b[^>]*?\bsrc=[\"'](?P<target>assets/[0-9a-f]{64})[\"']", re.IGNORECASE)
+
+
+def asset_hash_from_target(target: str) -> str | None:
+    """`assets/<64hex>` → 哈希段；其它形态返回 `None`（计划裁定 R-P3c-1）。
+
+    图片**身份就是文件名哈希**：docx 接线产出的 target 与 `save_docx_assets` 落盘的
+    文件名是同一个 sha256（R-DW-2），所以不需要读盘上字节再哈希——那是**容器**哈希
+    （compress/transcode 后会变），不是图片身份。
+    """
+    text = str(target or "")
+    if not text.startswith("assets/"):
+        return None
+    digest = text[len("assets/"):]
+    return digest if _HEX64_RE.fullmatch(digest) else None
 
 
 def line_image_targets(line: str) -> list[dict[str, Any]]:

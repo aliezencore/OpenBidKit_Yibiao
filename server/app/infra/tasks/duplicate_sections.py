@@ -23,6 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from app.domain.duplicate.content import split_content_sentences
+from app.domain.duplicate.image import (
+    asset_hash_from_target,
+    build_duplicate_images,
+    extract_image_occurrences,
+)
 from app.domain.duplicate.outline import (
     build_outline_comparison,
     build_outline_items,
@@ -32,7 +37,7 @@ from app.domain.duplicate.tender_matcher import (
     build_duplicate_sentences,
     build_tender_source_matcher,
 )
-from app.infra.parsing.asset_store import save_docx_assets
+from app.infra.parsing.asset_store import resolve_asset_path, save_docx_assets
 from app.infra.parsing.router import parse_document
 from app.infra.tasks.duplicate_runner import (
     CONTENT_EXTRACTION,
@@ -589,3 +594,157 @@ def build_content_runner(data_root: Path | str):
         )
 
     return run_content
+
+
+# ------------------------------------------------------------------ image 段
+
+def build_image_runner(data_root: Path | str):
+    """构造 `image` 段的 runner 闭包（对齐 `runImageDuplicateAnalysis`
+    svc.cjs:2632-2721）。
+
+    行为（逐条对齐参考，裁定见计划 R-P3c-1~9）：
+
+    - 初始广播「正在准备图片比对」（参考 :2636 的 `progress: 5` + message）。
+    - 逐 **bid** 文件（:2641，tender 的图不参与）：`_read_content_markdown`（失败 →
+      error 行，文案逐字 R-P3c-8）→ `extract_image_occurrences` →
+      `totalImageCount += len` → 本地按**图片身份**聚合
+      `{count, preview_url, locations:[{image_index, directory, previous_sentence}]}`。
+    - **身份 = target 里的哈希**（R-P3c-1，不读盘上字节再哈希）；`resolve_asset_path`
+      解析不到 → **跳过该图、不算错误**（R-P3c-2，对齐参考 :2662 的
+      `catch { continue }`）——但 `image_count` 仍含它（参考同口径，见计划的
+      「已知空白 2」）。
+    - 成功行 = `{file_id, file_name, status:'success', image_count,
+      unique_image_count}`（:2671-2674）；文件级 catch → error 行
+      `{…, status:'error', image_count:0, unique_image_count:0, error}`（:2676-2678）。
+    - 每文件尾报进度 `half_up(len(results) / n * 85)`（`n == 0` → 85，:2696-2698；
+      `Math.round` = half-up），文案 `图片比对 {i}/{n}`；running 行**不带 stats**
+      （R-P3b-3 冻结的回调签名，中间态偏离已在 spec §15 登记）。
+    - 终态：`build_duplicate_images`（只留跨文件重复，双键降序 + `I%06d`）→
+      `message = '部分文件图片比对失败' / '图片比对完成'`、
+      `failed = 任一文件 error`（**与 content 段恒 False 不同**，R-P3c-5）、
+      `extraction = {status, completed, total}`（:2700-2714）。
+    - stats 只写读取侧消费的键：`totalImageCount`（camelCase，:2712）。
+      `files` / `duplicateImages` 读取侧从表重建（`_load_image_analysis`
+      repositories/duplicate.py:1039/:1063），stats 里写了也是 wire-invisible
+      （与 outline 的 `items` 同一裁法），故省略。
+    - rows：`image_files` / `duplicate_images` / `image_occurrences` 三组
+      （`_persist_rows` 已预接线，P3b 评审 B 的 B-1）。
+    """
+
+    async def run_image(section_ctx: SectionRunContext) -> SectionOutput:
+        bid_files = list(section_ctx.bid_files)
+        content_rows = _content_file_rows(section_ctx)
+        bid_count = len(bid_files)
+        project_id = section_ctx.project_id
+
+        _broadcast(section_ctx, "正在准备图片比对")
+
+        results: list[dict[str, Any]] = []
+        global_images: dict[str, dict[str, Any]] = {}
+        total_image_count = 0
+
+        for file in bid_files:
+            file_id = _file_id_of(file)
+            file_name = _file_name_of(file)
+            try:
+                markdown = _read_content_markdown(content_rows, file)
+                occurrences = extract_image_occurrences(markdown)
+                total_image_count += len(occurrences)
+
+                local: dict[str, dict[str, Any]] = {}
+                for occurrence in occurrences:
+                    digest = asset_hash_from_target(occurrence["target"])
+                    if digest is None:
+                        continue
+                    if resolve_asset_path(
+                            data_root=data_root, project_id=project_id,
+                            target=occurrence["target"]) is None:
+                        continue  # R-P3c-2：缺资产跳过（对齐参考 :2662 的 catch）
+                    current = local.get(digest) or {
+                        "count": 0,
+                        # R-P3c-3：相对端点，绝不把服务器绝对路径透给前端。
+                        "preview_url":
+                            f"/projects/{project_id}/duplicate/assets/{digest}",
+                        "locations": [],
+                    }
+                    current["count"] += 1
+                    current["locations"].append({
+                        "image_index": occurrence["index"],
+                        "directory": occurrence["directory"],
+                        "previous_sentence": occurrence["previous_sentence"],
+                    })
+                    local[digest] = current
+
+                for digest, item in local.items():
+                    global_item = global_images.get(digest) or {
+                        "hash": digest,
+                        "preview_url": item["preview_url"],
+                        "file_ids": [],
+                        "occurrences": {},
+                        "locations": {},
+                    }
+                    if file_id not in global_item["file_ids"]:
+                        global_item["file_ids"].append(file_id)
+                    global_item["occurrences"][file_id] = item["count"]
+                    global_item["locations"][file_id] = item["locations"]
+                    global_images[digest] = global_item
+
+                results.append({
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "success",
+                    "image_count": len(occurrences),
+                    "unique_image_count": len(local),
+                })
+            except Exception as error:  # noqa: BLE001 —— 文件级容错（R-P3c-5）
+                results.append({
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "error",
+                    "image_count": 0,
+                    "unique_image_count": 0,
+                    "error": str(error) or "图片比对失败",
+                })
+
+            # 文件尾进度（参考 :2696-2698）
+            progress = _half_up(len(results) / bid_count * 85) if bid_count else 85
+            _report_progress(section_ctx, progress,
+                             f"图片比对 {len(results)}/{bid_count}")
+
+        duplicates = build_duplicate_images(list(global_images.values()))
+        image_rows = [{
+            "image_id": d["image_id"],
+            "hash": d["hash"],
+            "preview_url": d["preview_url"],
+            "file_ids": d["file_ids"],
+        } for d in duplicates]
+        occurrence_rows: list[dict[str, Any]] = []
+        for d in duplicates:
+            for fid in d["file_ids"]:
+                occurrence_rows.append({
+                    "image_id": d["image_id"],
+                    "file_id": fid,
+                    "occurrence_count": (d.get("occurrences") or {}).get(fid, 0),
+                    "locations": (d.get("locations") or {}).get(fid, []),
+                })
+
+        failed = any(r["status"] == "error" for r in results)
+        message = "部分文件图片比对失败" if failed else "图片比对完成"
+        extraction = {
+            "status": "error" if failed else "success",
+            "completed": len(results),
+            "total": bid_count,
+        }
+        return SectionOutput(
+            stats={"totalImageCount": total_image_count},
+            rows={
+                "image_files": results,
+                "duplicate_images": image_rows,
+                "image_occurrences": occurrence_rows,
+            },
+            failed=failed,
+            message=message,
+            extraction=extraction,
+        )
+
+    return run_image
