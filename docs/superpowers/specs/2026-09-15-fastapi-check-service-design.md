@@ -516,7 +516,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
-| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | **进行中**——P3d-1 元数据指纹**已完成**（2026-09-22，665 测试；计划 `2026-09-22-fastapi-check-service-p3d-metadata.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d-metadata/`）；P3d-2 Excel 导出**已完成**（2026-09-22，697 测试；计划 `2026-09-22-fastapi-check-service-p3d2-export.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d2-export/`）；P3d-3 前端查重页待做 |
+| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | **已完成**（2026-09-22，701 测试；P3d-1 元数据指纹 665 测试，计划 `2026-09-22-fastapi-check-service-p3d-metadata.md`；P3d-2 Excel 导出 697 测试，计划 `2026-09-22-fastapi-check-service-p3d2-export.md`；P3d-3 前端查重页计划 `2026-09-22-fastapi-check-service-p3d3-web-duplicate-page.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d3-web/`） |
 | P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
 
 > **P3a 执行期裁定回填（2026-09-18）**：上表 P3a 描述里「招标 / 投标按 `role` 入表」在执行时被**修正**——参考实现 `replaceFiles` 的第一条语句 `DELETE FROM duplicate_check_files` 无 role 过滤，真实语义是「**tender/bid 两组一次性全量替换**」，且上传需在同一事务内作废四段并重写签名（否则幂等判据会误命中旧结果）。四段当前仍为「零算法」stub；**P3b 起逐段替换真实算法，编排（`DuplicateAnalysisRunner` 的五角色/段级异常隔离/签名守卫）与状态机不动**。
@@ -607,6 +607,35 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > `oracle-duplicate.cjs` 仍为用后即弃不入库）——保证干净环境/CI 可跑对拍；
 > 时间语义期望值绑 GMT+8 本机（裁定⑧），CI 落地时需固定 `TZ=Asia/Shanghai`
 > 或前置重跑 oracle。
+
+> **P3d-3 执行期裁定回填（2026-09-22，前端查重页）**：
+> ① **multipart 全量替换的会话文件集模型**（R-P3d3-1）：`POST /files` 无 append
+> 语义，浏览器只有本会话选中的 `File` 才有字节——页面以「会话文件集」为唯一
+> 可提交面，每次提交两组字段恒出现（空组补 `filename=""` 占位 part，即 N-4
+> 形状）；页面加载发现服务端已有文件时集合**锁定只读**（无字节不可重传），
+> 编辑须先「重置」。这是对参考页「任意时刻可增删」的**有意收窄**，换取
+> 全量替换语义不被误清空。
+> ② **signature 前端不移植**：参考页自算 SHA1 签名守卫导出与自动启动；
+> 服务端 signature 已自持（R-P3d2-1），前端导出按钮判据弱化为「任一段
+> success」，误判由服务端 400 detail 兜底。
+> ③ **进度双通道**：runner 不向 EventBus 发进度事件（SSE 只有任务状态机
+> 事件），段级进度只在库里——运行期 1s 轮询 `GET /state` 是唯一进度源，
+> SSE（`EventSource`）提供终态低延迟信号；另以 1s 直查任务行做 SSE 断流
+> 兜底，防工具条卡死。
+> ④ **自动启动守卫抽纯函数**（`lib/autoStart.ts`）：进入分析步且投标文件
+> 非空、四段非全 success、无活跃任务、本轮未尝试过 → `POST /analysis`；
+> 失败后**不自动重试**（防循环），守卫 ref 在上传/重置/强制重跑时复位；
+> 刷新后经 `GET /projects/{pid}/tasks` 找回 running 任务续订 SSE。
+> ⑤ **静态挂载优先级**（R-P3d3-9）：`StaticFiles(html=True)` 挂 `/` 必须在
+> 全部 API 路由**之后**注册（mount 只承接未命中路径）；dist 不存在则不挂载，
+> 纯 API 服务照常；`Settings.web_dist` 可显式覆盖缺省 `server/web/dist`。
+> ⑥ **测试形态**：Vitest（node 环境）测纯函数 + `react-dom/server`
+> renderToString 冒烟，不引 jsdom/RTL；交互流由真实 uvicorn curl 冒烟
+> （`/` 200 html、assets 200 js、API 优先级）与 `test_static_frontend.py`
+> 4 用例承担。
+> ⑦ **project_id 是自由命名空间**（冒烟实证）：duplicate 系端点对不存在
+> 的 project_id 返回 200 空态（P3a 起契约即如此），前端不依赖「项目必须
+> 预先存在」的错误路径；真正 404 的只有 `GET /projects/{id}` 详情。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
