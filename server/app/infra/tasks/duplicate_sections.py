@@ -33,11 +33,16 @@ from app.domain.duplicate.outline import (
     build_outline_items,
     split_tender_sentences,
 )
+from app.domain.duplicate.state import build_section_stats_patch
 from app.domain.duplicate.tender_matcher import (
     build_duplicate_sentences,
     build_tender_source_matcher,
 )
 from app.infra.parsing.asset_store import resolve_asset_path, save_docx_assets
+from app.infra.parsing.metadata_extract import (
+    MetadataFileInput,
+    extract_metadata_file,
+)
 from app.infra.parsing.router import parse_document
 from app.infra.tasks.duplicate_runner import (
     CONTENT_EXTRACTION,
@@ -748,3 +753,108 @@ def build_image_runner(data_root: Path | str):
         )
 
     return run_image
+
+
+# --------------------------------------------------------- metadata_extraction
+
+def build_metadata_runner(data_root: Path | str):
+    """构造 `metadata_extraction` 角色的 runner 闭包。
+
+    对齐参考 `runMetadataExtraction`（svc.cjs:2365-2403）。**`data_root` 参数
+    仅为与 `build_*` 家族签名一致而保留**：本角色零产物落盘（元数据只进
+    `duplicate_check_metadata_items` 表与 stats），没有文件系统副作用。
+
+    行为（计划 R-P3d-2/3/4/5/9）：
+
+    - 输入 = **只跑 `section_ctx.bid_files`**（R-P3d-4；参考 :2365 的入参就是
+      `bidFiles`，tender 文件不参与元数据提取）。
+    - 逐文件 try/catch（参考 :2372-2385）：`extract_metadata_file` 的 stat 在
+      内部 try **外**，失败上传行（`file_path = "upload-failed:<code>\\x1f<name>"`）
+      会在 stat 处抛 `FileNotFoundError` → error 行。success 行
+      `{file_id, file_name, status:"success", metadata:[items]}`；error 行
+      `{file_id, file_name, status:"error", error: str(error) or "元数据提取失败",
+      metadata: []}` —— 文案 fallback 逐字对齐参考 :2386 的
+      `error.message || '元数据提取失败'`。单文件失败**不连坐**。
+    - rows 只产 `metadata_items` 扁平落库行（R-P3d-3；`_persist_rows` 的分派分支
+      已在 P3b 预接线，duplicate_runner.py:834-836）：每条 = `metadata_items()`
+      产出的 7 键（key/label/value/normalized/date_day/comparable/
+      date_comparable）+ `file_id` + `sort_order`（**文件内** enumerate 序号；
+      读取侧 `ORDER BY file_id ASC, sort_order ASC` 据此还原键序）。参考的
+      对比表 `buildRows`（:1096-1123）产物**不落库**——`_load_metadata_analysis`
+      从表重建 files 后现算（R-P3d-3 的 W1 语义）。
+    - **无 section_progress、无中段广播**（R-P3d-5）：提取角色不写自己的状态行
+      （`section_progress` 恒 None），参考里每文件一次的 `updateAnalysis` 广播
+      是 Electron `webContents` 专用承载点，服务器侧无对应物——只有终态可见。
+    - stats（R-P3d-2 + R-P3d-9）：构造**伪 analysis 形状**
+      `{metadataExtraction: {status, completed, total}, files: results}` 后
+      **就地** `build_section_stats_patch("metadata", …)` 裁剪 —— 对齐参考
+      `createSectionStatsPatch`（store.cjs :179-222）的 metadata 分支：白名单
+      `contentExtraction/metadataExtraction/logs/files`，`files` 再按
+      `_METADATA_FILE_FIELDS`（file_id/file_name/status/error）逐行裁剪。
+      裁后 stats 作为 `_merge_metadata_stats` 的基底（metadata_output.stats
+      原样作基底 + contentExtraction 挂载），所以 metadata 段终态 stats 恰为
+      参考的 `metadataAnalysis.stats` 形状。`extraction`/`message` 字段不设：
+      前者无消费点（`_merge_metadata_stats` 只读 content 产出上的该字段），
+      后者由主编排写终态文案（"元数据分析完成"/"部分文件提取失败"）。
+    """
+
+    async def run_metadata_extraction(section_ctx: SectionRunContext) -> SectionOutput:
+        bid_files = list(section_ctx.bid_files)
+
+        results: list[dict[str, Any]] = []
+        items_rows: list[dict[str, Any]] = []
+        for file in bid_files:
+            file_id = _file_id_of(file)
+            file_name = _file_name_of(file)
+            try:
+                # 同步解析器经 to_thread 包一层（与 content 段同理由：stat /
+                # sha256 / OLE·PDF 解析都是阻塞 I/O，避免卡事件循环）。
+                items = await asyncio.to_thread(
+                    extract_metadata_file,
+                    MetadataFileInput(
+                        file_path=_file_path_of(file),
+                        file_name=file_name,
+                        extension=file.get("extension") if isinstance(file, Mapping) else None,
+                        size=file.get("size") if isinstance(file, Mapping) else None,
+                    ),
+                )
+                results.append({
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "success",
+                    "metadata": items,
+                })
+            except Exception as error:  # noqa: BLE001 —— 逐文件容错（参考 :2384）
+                results.append({
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "status": "error",
+                    "error": str(error) or "元数据提取失败",
+                    "metadata": [],
+                })
+                items = []
+            for sort_order, item in enumerate(items):
+                # 行键序与 `replace_metadata_items` 的契约一致：
+                # file_id / key / label / value / normalized / date_day /
+                # comparable / date_comparable / sort_order。
+                items_rows.append({"file_id": file_id, **item, "sort_order": sort_order})
+
+        status = "error" if any(r["status"] == "error" for r in results) else "success"
+        # R-P3d-9：就地裁剪。伪 analysis 形状对齐参考 :2382 终态 updateAnalysis
+        # 的入参（`{metadataExtraction: {...}, files: results}`；contentExtraction
+        # 由 `_merge_metadata_stats` 挂载，不在这里给）。
+        stats = build_section_stats_patch("metadata", {
+            "metadataExtraction": {
+                "status": status,
+                "completed": len(results),
+                "total": len(bid_files),
+            },
+            "files": results,
+        })
+        return SectionOutput(
+            stats=stats,
+            rows={"metadata_items": items_rows},
+            failed=status == "error",
+        )
+
+    return run_metadata_extraction

@@ -416,3 +416,163 @@ def test_e2e_duplicate_images_reachable_and_previewable(client, tmp_path):
     assert preview.headers["content-type"].startswith("image/"), \
         preview.headers["content-type"]
 
+
+# --------------------------- 用例 9（P3d T6）：metadata_extraction 全链路闭环
+
+# P3d T5 的 items 前 7 键（`extract_metadata_file` 的基础段，全部格式共用；
+# 键序全量对拍由 test_metadata_extract.py 的 oracle 对拍钉定，这里只钉
+# 「跨格式公共前缀」这一读取侧可见的最小契约）。
+_METADATA_BASE_KEYS = (
+    "file_name", "extension", "size", "created_at",
+    "modified_at", "accessed_at", "file_sha256",
+)
+
+
+def test_e2e_metadata_analysis_full_shape(client, tmp_path):
+    """docx+pdf+txt 混合投标 → metadata_extraction 跑真提取 → 全形状可读。
+
+    链路：`run_metadata_extraction`（runner）→ `metadata_items` 落库
+    （`_persist_rows` 预接线分支）→ `build_section_stats_patch("metadata", …)`
+    裁剪后的 stats 作 `_merge_metadata_stats` 基底 → `_load_metadata_analysis`
+    从表重建 files + rows。任何一环断裂（runner 没接线、rows 没落库、stats
+    缺 `metadataExtraction`/`files`、读取侧形状漂移）都会让断言之一变红。
+    """
+    project = client.post("/projects", json={"name": "元数据闭环"}).json()["id"]
+    base = f"/projects/{project}/duplicate"
+
+    pdf_path = Path(__file__).parent / "fixtures" / "pdf-info-fixture.pdf"
+    resp = client.post(f"{base}/files", files=[
+        ("tender", ("招标.docx", _docx_bytes(
+            tmp_path, "招标.docx",
+            "招标文件要求投标人提供完整的技术方案与报价明细。"), DOCX_MIME)),
+        ("bid", ("投标A.docx", _docx_bytes(
+            tmp_path, "投标A.docx",
+            "投标人已按招标文件要求提供完整技术方案与报价明细。",
+            color=(10, 120, 200)), DOCX_MIME)),
+        ("bid", ("投标B.txt", "纯文本内容\n第二行\n".encode("utf-8"), "text/plain")),
+        ("bid", ("投标C.pdf", pdf_path.read_bytes(), "application/pdf")),
+    ])
+    assert resp.status_code == 200, resp.text
+
+    started = client.post(f"{base}/analysis", json={"force": False})
+    assert started.status_code == 200, started.text
+    task = _wait_for_task(client, started.json()["taskId"])
+    assert task["status"] == "success", task
+
+    state = client.get(f"{base}/state").json()
+    # 全失败/部分失败都会让 metadata 段 error——显式断言四段真的 success
+    # （`overallProgress` 对 error 也计 100，评审 B B1 同款教训）。
+    assert {s["status"] for s in state["sections"].values()} == {"success"}, \
+        state["sections"]
+    assert state["sections"]["metadata"]["message"] == "元数据分析完成", \
+        state["sections"]["metadata"]
+
+    analysis = state["metadataAnalysis"]
+    # 1) 子统计（R-P3d-2）：camelCase 键 + 恰好 3 份投标。
+    assert analysis["metadataExtraction"] == {
+        "status": "success", "completed": 3, "total": 3,
+    }, analysis["metadataExtraction"]
+    # contentExtraction 的口径是**全部文件**（content_extraction 跑 tender+bid，
+    # 与 metadata_extraction 只跑 bid 不同）：1 tender + 3 bid = 4。
+    assert analysis["contentExtraction"] == {
+        "status": "success", "completed": 4, "total": 4,
+    }, analysis["contentExtraction"]
+
+    # 2) files（stats.files 裁剪产物 → status_by_file → 逐文件行）：
+    #    三份投标全 success，tender 不参与（bid_files 才跑，R-P3d-4）。
+    files = analysis["files"]
+    assert [f["file_name"] for f in files] == ["投标A.docx", "投标B.txt", "投标C.pdf"], \
+        files
+    assert {f["status"] for f in files} == {"success"}, files
+    assert all(f["error"] is None for f in files), files
+
+    # 3) 逐文件 metadata 键序（从 `duplicate_check_metadata_items` 表按
+    #    `file_id, sort_order` 重建）：公共前缀 7 键序固定；条数下限防
+    #    「表空了读取侧静默给空数组」的假绿（e2e 夹具 docx 实产 24 条、
+    #    T5 的 pdf-info-fixture 产 60 条；全量键序对拍由
+    #    test_metadata_extract.py 的 oracle 对拍钉定）。
+    by_name = {f["file_name"]: f for f in files}
+    assert len(by_name["投标A.docx"]["metadata"]) >= 20, by_name["投标A.docx"]
+    assert len(by_name["投标C.pdf"]["metadata"]) >= 40, by_name["投标C.pdf"]
+    for entry in files:
+        metadata = entry["metadata"]
+        assert [item["key"] for item in metadata[:7]] == list(_METADATA_BASE_KEYS), \
+            (entry["file_name"], [item["key"] for item in metadata])
+    # 分支特征键：pdf 走了 pdf 分支（本夹具固定产出）。
+    pdf_keys = {item["key"] for item in by_name["投标C.pdf"]["metadata"]}
+    assert "pdf_header_version" in pdf_keys, sorted(pdf_keys)
+
+    # 4) rows（对比表，W1 语义现算，不落库）：形状 + 至少覆盖公共键。
+    rows = analysis["rows"]
+    assert rows, analysis
+    first = rows[0]
+    assert set(first) == {"key", "label", "values", "duplicate_file_ids",
+                          "same_day_file_ids"}, first
+    # rows 的 key 序 = 首个出现序（file_id ASC 下的 items 序）。
+    assert rows[0]["key"] == "file_name", rows[0]
+    row_keys = {row["key"] for row in rows}
+    assert {"file_name", "extension", "size", "file_sha256"} <= row_keys, \
+        sorted(row_keys)
+
+    # 5) `metadata` 段 stats 与 analysis 同源（裁剪后基底）。
+    assert state["sections"]["metadata"]["stats"]["metadataExtraction"] == \
+        analysis["metadataExtraction"], state["sections"]["metadata"]
+
+
+# --------------------------- 用例 10（P3d T6，R-P3d-4）：失败上传行不连坐
+
+def test_e2e_metadata_upload_failed_row_becomes_error(client, tmp_path):
+    """解析失败的 bid（upload-failed 行）→ 该文件 error 行，其余文件照常 success。
+
+    失败上传行的 `file_path` 是 `upload-failed:<code>\\x1f<name>` 占位而非真实
+    路径——`extract_metadata_file` 的 stat 在内部 try **外**（R-P3d-4），必须
+    在 runner 的逐文件 catch 里转成 error 行，而不是让整个角色崩溃
+    （`_guarded_call` 会把全角色转成 `_failure_output`，其他文件的元数据全丢）。
+    """
+    project = client.post("/projects", json={"name": "失败行"}).json()["id"]
+    base = f"/projects/{project}/duplicate"
+    resp = client.post(f"{base}/files", files=[
+        ("tender", ("招标.docx", _docx_bytes(
+            tmp_path, "招标.docx",
+            "招标文件要求投标人提供完整的技术方案与报价明细。"), DOCX_MIME)),
+        # .docx 扩展名但不是 zip → 上传侧解析失败 → upload-failed 占位行
+        ("bid", ("坏文件.docx", b"this is not a zip archive", DOCX_MIME)),
+        ("bid", ("投标B.txt", "纯文本内容\n第二行\n".encode("utf-8"), "text/plain")),
+    ])
+    assert resp.status_code == 200, resp.text
+    listing = client.get(f"{base}/files").json()["bid"]
+    failed_rows = [row for row in listing
+                   if row["file_path"].startswith("upload-failed:")]
+    assert len(failed_rows) == 1, listing
+    failed_id = failed_rows[0]["file_id"]
+
+    started = client.post(f"{base}/analysis", json={"force": False})
+    assert started.status_code == 200, started.text
+    task = _wait_for_task(client, started.json()["taskId"])
+    # 段 error 不拖垮任务本身（用例 3 注释同款语义），但 metadata 段必须显式 error。
+    assert task["status"] == "success", task
+
+    state = client.get(f"{base}/state").json()
+    assert state["sections"]["metadata"]["status"] == "error", \
+        state["sections"]["metadata"]
+    assert state["sections"]["metadata"]["message"] == "部分文件提取失败", \
+        state["sections"]["metadata"]
+
+    analysis = state["metadataAnalysis"]
+    assert analysis["metadataExtraction"]["status"] == "error", \
+        analysis["metadataExtraction"]
+    assert analysis["metadataExtraction"]["completed"] == 2, \
+        analysis["metadataExtraction"]
+    assert analysis["metadataExtraction"]["total"] == 2, \
+        analysis["metadataExtraction"]
+
+    by_id = {f["file_id"]: f for f in analysis["files"]}
+    failed = by_id[failed_id]
+    assert failed["status"] == "error", failed
+    assert failed["error"], failed                      # 文案 = str(FileNotFoundError)
+    assert failed["metadata"] == [], failed             # 失败行零条目
+    # 不连坐：txt 文件照常 success 且有元数据。
+    ok_rows = [f for f in analysis["files"] if f["file_id"] != failed_id]
+    assert len(ok_rows) == 1 and ok_rows[0]["status"] == "success", ok_rows
+    assert ok_rows[0]["metadata"], ok_rows
+

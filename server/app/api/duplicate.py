@@ -42,6 +42,7 @@ from app.infra.parsing.service import save_uploaded_document
 from app.infra.repositories.duplicate import DuplicateFileInput
 from app.infra.tasks.duplicate_runner import (
     CONTENT_EXTRACTION,
+    METADATA_EXTRACTION,
     DuplicateAnalysisRunner,
     _stub_sections,
 )
@@ -49,6 +50,7 @@ from app.infra.tasks.duplicate_sections import (
     build_content_extraction,
     build_content_runner,
     build_image_runner,
+    build_metadata_runner,
     build_outline_runner,
     content_dir_for,
 )
@@ -380,12 +382,13 @@ async def start_analysis(project_id: str, body: AnalysisRequest | None = None,
         "bidFiles": bid_files,
         "force": bool(body.force) if body is not None else False,
     }
-    # P3b / P3c：把 stub 的角色替换为真实 runner。content_extraction（P3b T4）、
-    # outline / content 两段（P3b T5）与 image 段（P3c T4）已替换；
-    # metadata_extraction 保持 P3a stub（P3d 承接）。
+    # P3b / P3c / P3d：把 stub 的角色替换为真实 runner。content_extraction（P3b T4）、
+    # outline / content 两段（P3b T5）、image 段（P3c T4）与 metadata_extraction
+    # （P3d T6）已全部替换。
     # 改动最小化——只替换对应键。
     sections = dict(_stub_sections())
     sections[CONTENT_EXTRACTION] = build_content_extraction(state.settings.data_root)
+    sections[METADATA_EXTRACTION] = build_metadata_runner(state.settings.data_root)
     sections["outline"] = build_outline_runner(state.settings.data_root)
     sections["content"] = build_content_runner(state.settings.data_root)
     sections["image"] = build_image_runner(state.settings.data_root)
