@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     progress_write_interval_ms: int = Field(default=200, ge=0)
     cpu_workers: int = Field(default=2, ge=1)
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
+    # 静态前端目录（方案 A「路由 + 静态前端」）；None = 缺省定位 `server/web/dist`。
+    web_dist: Path | None = None
 
     @property
     def db_path(self) -> Path:
