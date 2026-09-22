@@ -1,5 +1,17 @@
 # P3c 查重图片比对 实施计划
 
+> **状态：已完成（2026-09-22）** —— 6 个 Task 全部落地，554 → **588 测试**；
+> 8 条判别力探针全部「探针态红 / 还原后绿」（T1 前句取末句 + 弹栈、T2 跨文件过滤、
+> T3 身份来源 + failed 语义、T4 totalImageCount、T5 路径泄漏）。
+> 提交区间 `f981a4e`（本计划）→ `e65e25e` / `4e7f2ba` / `d9e051a` / `f8079d4` / `3b8a85f` / 本回填。
+> spec §15：P3c 行 → 已完成；G4 标注已裁定；§4.4 的 image 侧承接闭合（metadata 侧待 P3d）。
+> SDD ledger 与 oracle 脚本：`.superpowers/sdd/2026-09-21-p3c-image-compare/`。
+>
+> **执行期新增的两个实测事实**（已回写进测试断言）：
+> ①**探针抓出一条无判别力的测试**——弹栈用例最初用层号单调递增的样本，弹栈分支从未
+> 触发（「探针态仍绿」）；改为层级回落样本并向 oracle 补测后重写。
+> ②**404 的 JSON 会转义反斜杠**——「不泄漏服务器路径」的断言必须同时查原样与转义形态。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把查重四段的第三段搬进新服务：`image` 段跑真实算法——逐 **bid** 文件的 content markdown 抽出图片出现位置（目录栈 + 前句上下文），按**图片身份**跨文件去重，产出 `image_files` / `duplicate_images` / `image_occurrences` 三处落库行 + 段的状态/进度/文案/`files`/`totalImageCount`，使 `/state.imageAnalysis` 可读。**编排、幂等、进度折算、签名作废全部不动**（P3a 已验收）。
@@ -80,16 +92,16 @@
 - `previous_image_sentence(value: str) -> str`（C2，含 `.slice(0, 500)`）
 - `extract_image_occurrences(markdown: str) -> list[dict]`（C1：`{target, index, directory, previous_sentence}`）
 
-- [ ] **Step 1: 写失败的测试**（**预期值一律 Node 直跑参考取真值**：截取 `extractImageOccurrences`/`extractLineImageTargets`/`parseImageContextHeading`/`getPreviousImageSentence` 及其依赖 `cleanMarkdownInlineText`/`cleanMarkdownLine`/`cleanContentSentence`/`cleanOutlineTitle`/`isCatalogTitleLine`/`parseOutlineMarker`/`normalizeContentLineBreaks` 一并 eval）
+- [x] **Step 1: 写失败的测试**（**预期值一律 Node 直跑参考取真值**：截取 `extractImageOccurrences`/`extractLineImageTargets`/`parseImageContextHeading`/`getPreviousImageSentence` 及其依赖 `cleanMarkdownInlineText`/`cleanMarkdownLine`/`cleanContentSentence`/`cleanOutlineTitle`/`isCatalogTitleLine`/`parseOutlineMarker`/`normalizeContentLineBreaks` 一并 eval）
   - `test_line_targets_finds_assets_targets_in_order`
   - `test_line_targets_covers_markdown_and_html_and_table_cell_forms`（`![](assets/<h>)` / `<img src="assets/<h>">` / GFM 单元格里的 `![](assets/<h>)`）
   - `test_heading_stack_builds_directory`（`#`/`##` 与加粗短行 → `A > B`）
   - `test_previous_sentence_takes_the_last_sentence_and_truncates_to_500`
   - `test_occurrences_index_is_1_based_and_counts_across_headings`
   - `test_fenced_code_blocks_are_stripped_before_scanning`
-- [ ] **Step 2: 确认失败**。**Step 3: 实现**（每条正则带参考行号注释）。**Step 4: 全量零回归**（554+新增）。
-- [ ] **Step 5: 变异探针（必做 2 条）**：①`previous_sentence` 取第一句而非最后一句 → 相应用例红；②`directory` 不 pop 同级/更深层级（只 append）→ 目录栈用例红。
-- [ ] **Step 6: 提交**：`feat(server): P3c 图片出现位置纯函数——目录栈/前句上下文/target 抽取`
+- [x] **Step 2: 确认失败**。**Step 3: 实现**（每条正则带参考行号注释）。**Step 4: 全量零回归**（554+新增）。
+- [x] **Step 5: 变异探针（必做 2 条）**：①`previous_sentence` 取第一句而非最后一句 → 相应用例红；②`directory` 不 pop 同级/更深层级（只 append）→ 目录栈用例红。
+- [x] **Step 6: 提交**：`feat(server): P3c 图片出现位置纯函数——目录栈/前句上下文/target 抽取`
 
 ---
 
@@ -100,10 +112,10 @@
 **Interfaces:**
 - `build_duplicate_images(rows: Sequence[Mapping]) -> list[dict]`：过滤 `len(file_ids) > 1` → 按 `(len(file_ids), 出现总次数)` 双键降序 → `id = f"I{index:06d}"`（C6）；输出行键对齐 C11（`image_id`/`hash`/`preview_url`/`file_ids`/`sort_order`）+ `occurrences`/`locations` 由调用方展开。
 
-- [ ] **Step 1: 写失败的测试**（Node oracle 对拍 `buildDuplicateImages` 的**排序稳定性**与 **id 编号从 1 开始**；含「同分时按总次数」与「都不重复 → 空数组」两个边界）
-- [ ] **Step 2-3: 确认失败 → 实现**。**Step 4: 全量零回归**。
-- [ ] **Step 5: 变异探针（必做 1 条）**：去掉 `len(file_ids) > 1` 过滤 → 只用一份文件的图也进结果 → 相应用例红。
-- [ ] **Step 6: 提交**：`feat(server): P3c 跨文件图片去重汇总——双键排序与 I%06d 编号`
+- [x] **Step 1: 写失败的测试**（Node oracle 对拍 `buildDuplicateImages` 的**排序稳定性**与 **id 编号从 1 开始**；含「同分时按总次数」与「都不重复 → 空数组」两个边界）
+- [x] **Step 2-3: 确认失败 → 实现**。**Step 4: 全量零回归**。
+- [x] **Step 5: 变异探针（必做 1 条）**：去掉 `len(file_ids) > 1` 过滤 → 只用一份文件的图也进结果 → 相应用例红。
+- [x] **Step 6: 提交**：`feat(server): P3c 跨文件图片去重汇总——双键排序与 I%06d 编号`
 
 ---
 
@@ -117,10 +129,10 @@
 
 **行为（逐条对齐参考）**：逐 **bid** 文件（R-P3c-6）→ 读 markdown（失败 → error 行，文案逐字 C8/R-P3c-8）→ 抽出现位置 → 逐出现位置取 `resolve_asset_path`（`None` → 跳过，R-P3c-2）→ 本地按哈希聚合 `{count, preview_url, locations}` → 全局聚合（C5）→ 段末 `build_duplicate_images` + 终态（C7）→ `SectionOutput(rows={"image_files": …, "duplicate_images": …, "image_occurrences": …}, stats={...}, extraction=…, failed=…)`。
 
-- [ ] **Step 1: 写失败的测试**：真 docx + 图片（跨两个文件内嵌**同一张图**）→ 断言 ①三组 rows 的形状与计数；②`duplicate_images` 只含跨文件重复项且 `file_ids` 有序；③`image_occurrences` 的 `occurrence_count` = **文件内**次数（R-P3c-4）；④`locations` 含 `image_index`/`directory`/`previous_sentence`；⑤`totalImageCount` 与 `files[].image_count` 一致；⑥一个文件读不到 markdown → 该行 error、段 `failed=True`、其余文件仍 success（R-P3c-5）。
-- [ ] **Step 2-3: 确认失败 → 实现**。**Step 4: 全量零回归**。
-- [ ] **Step 5: 变异探针（必做 2 条）**：①把「哈希取 target 哈希段」改成「对盘上字节哈希」→ 跨文件同图不再合并 → 相应用例红；②把 `failed` 改成恒 `False` → 失败语义用例红。
-- [ ] **Step 6: 提交**：`feat(server): P3c image 段 runner——出现位置/跨文件去重/三组落库行`
+- [x] **Step 1: 写失败的测试**：真 docx + 图片（跨两个文件内嵌**同一张图**）→ 断言 ①三组 rows 的形状与计数；②`duplicate_images` 只含跨文件重复项且 `file_ids` 有序；③`image_occurrences` 的 `occurrence_count` = **文件内**次数（R-P3c-4）；④`locations` 含 `image_index`/`directory`/`previous_sentence`；⑤`totalImageCount` 与 `files[].image_count` 一致；⑥一个文件读不到 markdown → 该行 error、段 `failed=True`、其余文件仍 success（R-P3c-5）。
+- [x] **Step 2-3: 确认失败 → 实现**。**Step 4: 全量零回归**。
+- [x] **Step 5: 变异探针（必做 2 条）**：①把「哈希取 target 哈希段」改成「对盘上字节哈希」→ 跨文件同图不再合并 → 相应用例红；②把 `failed` 改成恒 `False` → 失败语义用例红。
+- [x] **Step 6: 提交**：`feat(server): P3c image 段 runner——出现位置/跨文件去重/三组落库行`
 
 ---
 
@@ -130,10 +142,10 @@
 
 **行为**：把 stub 的 `image` 角色换成真实 runner；段 stats 写 `files`（逐文件摘要）与 `totalImageCount`（spec §15 的「P3c/P3d 段子统计无生产者」登记要求）；`/state.imageAnalysis` 因此不再出现「段 success 而子统计 pending」的自相矛盾。
 
-- [ ] **Step 1: 写失败的测试**：`/state` 的 `imageAnalysis.files` 非空且与 `duplicateImages` 一致；`totalImageCount` == 各文件 `image_count` 之和；`extraction.status` 与段 status 同源。
-- [ ] **Step 2-4: 确认失败 → 实现 → 全量零回归**。
-- [ ] **Step 5: 变异探针（必做 1 条）**：删掉 stats 里的 `totalImageCount` → 相应用例红。
-- [ ] **Step 6: 提交**：`feat(server): P3c image 段接线——runner 注入 + files/totalImageCount 子统计`
+- [x] **Step 1: 写失败的测试**：`/state` 的 `imageAnalysis.files` 非空且与 `duplicateImages` 一致；`totalImageCount` == 各文件 `image_count` 之和；`extraction.status` 与段 status 同源。
+- [x] **Step 2-4: 确认失败 → 实现 → 全量零回归**。
+- [x] **Step 5: 变异探针（必做 1 条）**：删掉 stats 里的 `totalImageCount` → 相应用例红。
+- [x] **Step 6: 提交**：`feat(server): P3c image 段接线——runner 注入 + files/totalImageCount 子统计`
 
 ---
 
@@ -143,10 +155,10 @@
 
 **行为**：`GET /projects/{project_id}/duplicate/assets/{hash}` → `validate_project_id` → `resolve_asset_path` → 命中则按扩展名/嗅探定 `Content-Type` 返回文件内容；未命中 404。**绝不**在响应里暴露服务器路径。
 
-- [ ] **Step 1: 写失败的测试**：命中 200 + `content-type` 正确（png/jpg 各一）；未命中 404；非法 `hash`（非 64hex）404；非法 `project_id`（`..`）**不返回 200 且不触达读盘**（复用 B1 的哨兵手法）；响应体字节与盘上一致。
-- [ ] **Step 2-4: 确认失败 → 实现 → 全量零回归**。
-- [ ] **Step 5: 变异探针（必做 1 条）**：把 `validate_project_id` 去掉 → 遍历用例红。
-- [ ] **Step 6: 提交**：`feat(server): P3c 取图端点——preview_url 落地（相对路径，不泄漏部署路径）`
+- [x] **Step 1: 写失败的测试**：命中 200 + `content-type` 正确（png/jpg 各一）；未命中 404；非法 `hash`（非 64hex）404；非法 `project_id`（`..`）**不返回 200 且不触达读盘**（复用 B1 的哨兵手法）；响应体字节与盘上一致。
+- [x] **Step 2-4: 确认失败 → 实现 → 全量零回归**。
+- [x] **Step 5: 变异探针（必做 1 条）**：把 `validate_project_id` 去掉 → 遍历用例红。
+- [x] **Step 6: 提交**：`feat(server): P3c 取图端点——preview_url 落地（相对路径，不泄漏部署路径）`
 
 ---
 
@@ -157,7 +169,7 @@
 1. **e2e 加闭环断言**：两份投标各内嵌**同一张图** → `/state.imageAnalysis` 的 `duplicateImages` ≥1、`file_ids` 覆盖两个文件、`totalImageCount` 正确、`preview_url` 可 200 取到。
 2. **spec §15 回填**：P3c 行 → 已完成；「接线遗留登记」块里 G4 标注已裁定（R-P3c-7）；§4.4 的 P3c 承接项标记闭合。
 3. 本计划勾选。
-- [ ] **Step 1-2**: 加断言 → 跑绿（若红先查清）。**Step 3**: 回填。**Step 4**: 全量。**Step 5**: 提交。
+- [x] **Step 1-2**: 加断言 → 跑绿（若红先查清）。**Step 3**: 回填。**Step 4**: 全量。**Step 5**: 提交。
 
 ---
 

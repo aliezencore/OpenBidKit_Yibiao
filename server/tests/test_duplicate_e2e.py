@@ -360,3 +360,59 @@ def test_state_exposes_content_files_from_persisted_table(client, tmp_path):
     assert len(rows) == 2, rows
     assert all(row["content_hash"] for row in rows), rows
 
+
+# --------------------------- 用例 8（P3c）：图片比对闭环 + preview_url 可取
+
+def test_e2e_duplicate_images_reachable_and_previewable(client, tmp_path):
+    """两份投标内嵌**同一张图** → image 段产出跨文件重复项，且 `preview_url` 能取到图。
+
+    全链路：docx 带图上传 → content_extraction 抽占位并落资产 → image 段从 markdown
+    抽出现位置、按 target 哈希跨文件合并 → 落库 → `/state.imageAnalysis` 可读 →
+    相对端点按 hash 取图（spec §15 硬约束①：全程不出现服务器路径）。
+    """
+    project = client.post("/projects", json={"name": "图片比对"}).json()["id"]
+    base = f"/projects/{project}/duplicate"
+
+    # 两份投标用**同一份 docx 字节**（内嵌同一张图）→ 图片哈希相同
+    same_docx = _docx_bytes(
+        tmp_path, "投标A.docx",
+        "投标人已按招标文件要求提供完整技术方案与报价明细。")
+    resp = client.post(f"{base}/files", files=[
+        ("tender", ("招标.docx", _docx_bytes(
+            tmp_path, "招标.docx",
+            "招标文件要求投标人提供完整的技术方案与报价明细。"), DOCX_MIME)),
+        ("bid", ("投标A.docx", same_docx, DOCX_MIME)),
+        ("bid", ("投标B.docx", same_docx, DOCX_MIME)),
+    ])
+    assert resp.status_code == 200, resp.text
+
+    started = client.post(f"{base}/analysis", json={"force": False})
+    assert started.status_code == 200, started.text
+    assert _wait_for_task(client, started.json()["taskId"])["status"] == "success"
+
+    state = client.get(f"{base}/state").json()
+    assert {s["status"] for s in state["sections"].values()} == {"success"}, \
+        state["sections"]
+
+    images = state["imageAnalysis"]
+    assert images["totalImageCount"] == 2, images            # 每份投标各 1 张
+    assert [(f["file_id"], f["status"]) for f in images["files"]] == [
+        (f["file_id"], "success") for f in images["files"]]
+
+    bid_ids = [f["file_id"] for f in client.get(f"{base}/files").json()["bid"]]
+    duplicates = images["duplicateImages"]
+    assert len(duplicates) == 1, images
+    duplicate = duplicates[0]
+    assert duplicate["file_ids"] == bid_ids, duplicate
+    assert duplicate["occurrences"] == {fid: 1 for fid in bid_ids}
+    assert duplicate["preview_url"] == (
+        f"/projects/{project}/duplicate/assets/{duplicate['hash']}")
+
+    # `preview_url` 必须真的能取到图（相对端点 + 图片 mime）。
+    # mime 断言只钉「是图片」：落盘扩展名由压缩/转码结果决定（夹具图会被压成 JPEG），
+    # 钉死 `image/png` 会把「容器形态」误当成契约。
+    preview = client.get(duplicate["preview_url"])
+    assert preview.status_code == 200, preview.text
+    assert preview.headers["content-type"].startswith("image/"), \
+        preview.headers["content-type"]
+

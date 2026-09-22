@@ -515,7 +515,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | 计划待写 |
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
-| **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | 计划待写 |
+| **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
 | **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | 计划待写 |
 | P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
 
@@ -574,7 +574,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > | G1 | **✅ 已修（2026-09-21）** 表格单元格内的图片占位丢失 | 修前 `parsing/markdown.py` 的 `extract_tables` 用 `cell.get_text()` 只取文本 → 单元格里的 `<img>` 被丢（0 占位），资产却照常落盘（孤儿）。参考 `convert.mjs:557-560` 把**原始表格 HTML** 回填，并用 `htmlImageSrcPattern`（`svc.cjs:109`）专抓它——那正是该正则存在的理由 | **修法**：`_cell_text` 把单元格内的 `<img>` 就地渲染成**内联 markdown 图片**（`![](assets/<hash>)`）——本实现的表格按 §8.3 渲染 GFM（参考是原始 HTML），故让图片形态与流水线其余部分统一，消费侧只需认一种形态。无图表格输出**逐字节不变**。 |
 > | G2 | **`.doc`（legacy）图片全链路缺失** | `legacy_doc.doc_to_markdown` 调 `docx_to_markdown` **不带** `include_images`；落资产的门控 `format_kind == "docx"` 也排除了 `doc`。参考 `convert.mjs:1243` 的 `convertLegacyWordFile` **是带图的** | 同一缺口在 `.doc` 上重现（且 soffice 产出的临时 docx 目前在 `TemporaryDirectory` 里即删，落盘侧拿不到） |
 > | G3 | **图片不在 `word/media/` 下 → 占位悬空** | 实测：条目移到 `word/images/` + 改 rels → markdown 占位 1、`list_media_files` 0、`resolve_asset_path → None`。参考同构（mammoth + `word/media/` 提取） | 共同边界；`resolve_asset_path` 返回 `None` 已是正确降级（消费侧跳过该行） |
-> | G4 | **`alt`（docx `descr`）含 `]` 时占位解析不出来** | docx `descr='图[附件]'` → `![图[附件]](assets/<hash>)`；参考的 `markdownImagePattern`（`svc.cjs:108`）是 `!\[(?<alt>[^\]]*)\]\(…` → 命中 **0**。参考侧同形 | 共同局限；**P3c 必须裁定**（放宽正则 / 或占位固定空 alt） |
+> | G4 | **✅ 已裁定（P3c R-P3c-7）** `alt` 含 `]` 时占位解析不出来 | docx `descr='图[附件]'` → `![图[附件]](assets/<hash>)`；参考的 `markdownImagePattern`（`svc.cjs:108`）是 `!\[(?<alt>[^\]]*)\]\(…` → 命中 **0**。参考侧同形 | **裁定**：P3c 的消费端正则**只锚定 target 形态**（`(assets/<64hex>)`，兼容 `<>` 包裹与 HTML `<img src>`），不迁就参考的 alt 敏感正则——产出形态由我们自己定义，消费侧与产出一致即可，G4 对本管线不可达 |
 >
 > **P3c 立项时的三条硬约束**（本次实测得出）：①`preview_url` **不得**输出服务器绝对路径
 > （`resolve_asset_path` 返回绝对路径，透出即泄漏部署路径）——应是
@@ -618,6 +618,10 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > `metadataExtraction` 子统计；实现 `image` 角色时**必须**写 `image` 段的 `files`
 > （参考 `:845`）与 `totalImageCount`。**验收清单须逐键对照上表**——否则会复现本轮同类缺陷。
 > （P3b 计划无 Task 8+，故不在 P3b 范围内修复；本块为 P3c/P3d 的必办前置项。）
+> **✅ P3c 侧已闭合（2026-09-22）**：image 段的 `extraction` / `totalImageCount` 由
+> `build_image_runner` 的 stats 产出、`files` 由 `duplicate_check_image_files` 表重建，
+> 编排级用例 `test_state_image_analysis_is_fully_populated_after_orchestrated_run` 钉住；
+> **metadata 侧仍待 P3d 承接**。
 >
 > **补登（评审 B 的 B-1 面）——落库分派表**：上表是「stats 键」这一面，还有对称的
 > **第二面**：`DuplicateAnalysisRunner._persist_rows` 是「runner 产出 → 落库」的
