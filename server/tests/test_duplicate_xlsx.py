@@ -23,7 +23,7 @@ from app.domain.duplicate.export_workbook import (
 from app.infra.exporting.duplicate_xlsx import write_duplicate_xlsx
 
 WORKTREE_ROOT = Path(__file__).resolve().parents[2]
-ORACLE_PATH = WORKTREE_ROOT / ".superpowers" / "sdd" / "2026-09-22-p3d2-export" / "oracle-duplicate.out.json"
+ORACLE_PATH = WORKTREE_ROOT / "server" / "tests" / "fixtures" / "oracle-duplicate-export.json"
 
 
 @pytest.fixture(scope="module")

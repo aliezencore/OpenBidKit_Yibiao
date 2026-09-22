@@ -1,10 +1,11 @@
 """P3d-2 T1 —— 查重导出纯函数层（export_workbook）的 oracle 对拍测试。
 
-断言值唯一来源：`.superpowers/sdd/2026-09-22-p3d2-export/oracle-duplicate.out.json`
+断言值唯一来源：`server/tests/fixtures/oracle-duplicate-export.json`
 （参考实现 `client/electron/services/checkResultExportService.cjs` 的
 ``buildDuplicateWorkbook``（:341-469）+ 辅助函数，本机 Node 直跑真值；
-对拍脚本同目录 `oracle-duplicate.cjs`——stub XLSX 记录六表 AOA/列宽/
-autofilter/cell.z 坐标）。
+生成脚本 `.superpowers/sdd/2026-09-22-p3d2-export/oracle-duplicate.cjs`
+——stub XLSX 记录六表 AOA/列宽/autofilter/cell.z 坐标，用后即弃不入库，
+真值快照随 fixtures 入库保证干净环境可跑）。
 
 八个 workbook case：full（全维度有数据）、signature_mismatch（签名失效）、
 empty（空 state）、error_section（error 段）、success_no_rows（全空 success）、
@@ -45,7 +46,7 @@ from app.domain.duplicate.export_workbook import (
 )
 
 WORKTREE_ROOT = Path(__file__).resolve().parents[2]
-ORACLE_PATH = WORKTREE_ROOT / ".superpowers" / "sdd" / "2026-09-22-p3d2-export" / "oracle-duplicate.out.json"
+ORACLE_PATH = WORKTREE_ROOT / "server" / "tests" / "fixtures" / "oracle-duplicate-export.json"
 
 CASE_TAGS = (
     "full",

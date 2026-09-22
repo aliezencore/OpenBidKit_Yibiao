@@ -266,7 +266,11 @@ def _encode_cell(column: int, row: int) -> str:
 def _autofilter_ref(rows: list[list[Any]], filter_header_row: int) -> str:
     """``createWorksheet`` 的 !autofilter（:69-75）：
     ``encode_range({s:{r:header,c:0}, e:{r:max(header, len-1), c:max(0, header_len-1)}})``。
-    header 行不存在/为空列表 → 长度按 1（JS ``?.length || 1``）。"""
+    header 行不存在/为空列表 → 长度按 1（JS ``?.length || 1``）。
+
+    前置条件：``rows`` 非空且 ``filter_header_row < len(rows)``——本模块恒以
+    ``0`` 调用且表头行恒存在（参考 :70 的 ``?.length`` 越界兜底在此不触达）。
+    """
     header = rows[filter_header_row]
     last_column = max(0, (len(header) if header else 1) - 1)
     last_row = max(filter_header_row, len(rows) - 1)
@@ -317,6 +321,8 @@ def select_current_duplicate_results(state: Any, signature: Any) -> dict:
     tender_files = workspace.get("tenderFiles")
     if not isinstance(tender_files, list) or not tender_files:
         tender_file = workspace.get("tenderFile")
+        # JS filter(Boolean) 保留空 dict（真值）；Python falsy 丢弃——差异仅在
+        # 「缺键文件行」这种不可达形状（_load_files_state 产出完整行 dict 或 None）
         tender_files = [tender_file] if tender_file else []
     bid_files = workspace.get("bidFiles")
     if not isinstance(bid_files, list):

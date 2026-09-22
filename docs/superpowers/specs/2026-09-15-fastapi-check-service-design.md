@@ -597,6 +597,16 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > V8 宽松 legacy parser（RFC 2822 等）不仿真。带时区转**本地时区**、无时区按
 > 本地墙钟（均与 V8 一致，本机 GMT+8 oracle 三形态对拍验证）；解析失败原样过
 > `normalize_cell_text`（NaN 分支）。跨时区机器需重跑 oracle-duplicate.cjs。
+> ⑨ **export 的双读窗口**（评审 A P2-1，与 `GET /state` 的 I-3 同类登记）：
+> `get_meta`（签名）与 `load_analysis`（四段）两次独立读，并发 `POST /files`
+> 落在两读之间会拿到「新签名+旧分析」——失配被 `select_current_duplicate_results`
+> 的 valid 合取式拦下收敛为 400（**不会导出与签名不符的数据**），最坏低概率误 400；
+> 收进同一快照需改 `load_analysis` 签名，超任务边界。
+> ⑩ **oracle 真值快照入库**（评审 B P2-1）：`oracle-duplicate.out.json` 随
+> `server/tests/fixtures/oracle-duplicate-export.json` 跟踪（生成脚本
+> `oracle-duplicate.cjs` 仍为用后即弃不入库）——保证干净环境/CI 可跑对拍；
+> 时间语义期望值绑 GMT+8 本机（裁定⑧），CI 落地时需固定 `TZ=Asia/Shanghai`
+> 或前置重跑 oracle。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 

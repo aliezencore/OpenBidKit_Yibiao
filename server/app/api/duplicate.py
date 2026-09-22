@@ -13,8 +13,11 @@
   `sections` / `overallProgress` / `message`（brief F-3）。
 - `POST /analysis` = 提交分析任务，返回 `{"taskId": ...}`（Ruling P3a-3：任务进度
   由 P1 的 `tasks` 表承载，客户端订 `GET /tasks/{task_id}/events`）。
+- `GET /export`  = `exportDuplicateExcel`（checkResultExportService.cjs :515-530）
+  的 HTTP 下载版（P3d-2）：查重六工作表 xlsx + `Content-Disposition`。
 
-**不实现任何分析算法**（P3b–P3d 的边界）。
+**不实现任何分析算法**（分析算法在 P3b–P3d 的 runner/domain 层；本模块只做簿记、
+状态观察与导出装配）。
 """
 
 from __future__ import annotations
@@ -428,6 +431,16 @@ def export_analysis(project_id: str,
 
     只读端点（纯 DB 读 + 内存序列化，不碰文件系统、不拼路径）——与
     `GET /state` 同类，不走 `validate_project_id`（那是破坏性/路径类操作的纪律）。
+
+    **已登记（评审 A P2-1，与 GET /state 的 I-3 同类）**：`get_meta`（签名）与
+    `load_analysis`（四段）是两次独立读，并发 `POST /files` 落在两读之间时会拿到
+    「新签名+旧分析」/「旧签名+新分析」——失配会被 `select_current_duplicate_results`
+    的 valid 合取式拦下收敛为 400（不会导出与签名不符的数据），最坏是低概率误 400；
+    收进同一快照需改 `load_analysis` 签名，超出本任务边界。
+
+    `select_current_duplicate_results` 在本端点与 `build_duplicate_workbook_plan`
+    内部各执行一次——纯函数无副作用，且与参考形态同构（前端 select 判定 + build
+    内部再 select），**不要**「优化」掉其中一处。
     """
     signature = (state.duplicate.get_meta(project_id) or {}).get("current_signature")
     analysis = state.duplicate.load_analysis(project_id)
