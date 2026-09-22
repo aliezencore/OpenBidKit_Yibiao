@@ -14,8 +14,10 @@
 
 **已登记偏离（spec §15 回填）**：
 
-1. 1~3 位纯数字（如 "600"）V8 legacy 会当日期解析（"600" →
-   `0599-12-31T15:54:17.000Z`），本实现视为非日期（js_date.py 模块注释）；
+1. ~~1~3 位纯数字（如 "600"）视为非日期~~ **已推翻（T5，见 js_date.py）**：
+   oracle 实证 V8 legacy 对 '3'/'42'/'936'/'11.1.0' 等数字串**解析成功**，
+   `js_date.py` 已按 R-P3d-7 扩展覆盖（缺省年 2001、yy 世纪规则、点分段等）；
+   残余偏离（3 位年 LMT 秒差、病态字母串）登记在 js_date.py 模块注释与 spec §15。
 2. `unique_sorted_values` 的排序键用「casefold + 小写优先 + 码点」近似 ICU
    `localeCompare`——拉丁文与参考一致，**汉字按码点序**（ICU 按拼音，
    「甲」先于「乙」；Python 无 ICU，码点序恰好相反）。等值分组行为不受影响
@@ -210,7 +212,7 @@ def normalize_value(value: Any) -> str:
 _NON_DATE_TEXTS = frozenset({
     "没有提及", "原文未提及", "-", "无", "null", "undefined"})
 _STRIP_D_PREFIX_RE = re.compile(r"^d:", re.IGNORECASE)
-_TZ_QUOTE_RE = re.compile(r"([+-]\d{2})'(\d{2})'$")
+_TZ_QUOTE_RE = re.compile(r"([+-]\d{2})'(\d{2})'$", re.ASCII)
 _COMPACT_STRIP_RE = re.compile(
     r"[\s\u3000\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\ufeff]+")
 

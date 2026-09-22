@@ -518,6 +518,12 @@ def test_e2e_metadata_analysis_full_shape(client, tmp_path):
     assert state["sections"]["metadata"]["stats"]["metadataExtraction"] == \
         analysis["metadataExtraction"], state["sections"]["metadata"]
 
+    # 6) R-P3d-5 中段文案（评审 A P1-1）：广播承载 = 任务日志（ctx.log），
+    #    初始 + 每文件尾文案逐字；提取角色不写自己的状态行，只有日志可见。
+    messages = _task_messages(client, started.json()["taskId"])
+    assert "正在提取投标文件元数据" in messages, messages
+    assert "元数据提取 3/3" in messages, messages
+
 
 # --------------------------- 用例 10（P3d T6，R-P3d-4）：失败上传行不连坐
 

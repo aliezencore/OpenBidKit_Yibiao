@@ -548,7 +548,9 @@ class DuplicateAnalysisRunner:
         **P3a 的确切行为**：`stats` 是浅合并——`metadata_extraction` 的 stats 原样作基底
         （P3a 为空 dict），`content_extraction` 的产出挂到 `content_extraction` 键下
         （P3a 为 `{}`）。合并结果**恒为 dict**：`_save_section` 的 stats 语义是
-        字典更新（`dict.update`），塞子统计前必须先有基底。
+        **stats_json 整体替换**（不是 dict.update——评审 B P2-3 订正，仓储
+        `save_section` 直接 `_dump_json(stats)` 覆写），塞子统计前必须先在基底里
+        就地补全全部键，不存在「保留旧键」。
         """
         merged: dict[str, Any] = dict(metadata_output.stats or {})
         content_output = content_output_of(content_files)

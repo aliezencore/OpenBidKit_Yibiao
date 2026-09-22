@@ -782,9 +782,13 @@ def build_metadata_runner(data_root: Path | str):
       读取侧 `ORDER BY file_id ASC, sort_order ASC` 据此还原键序）。参考的
       对比表 `buildRows`（:1096-1123）产物**不落库**——`_load_metadata_analysis`
       从表重建 files 后现算（R-P3d-3 的 W1 语义）。
-    - **无 section_progress、无中段广播**（R-P3d-5）：提取角色不写自己的状态行
-      （`section_progress` 恒 None），参考里每文件一次的 `updateAnalysis` 广播
-      是 Electron `webContents` 专用承载点，服务器侧无对应物——只有终态可见。
+    - **无 section_progress、中段文案走 `_broadcast`**（R-P3d-5，评审 A P1-1 订正）：
+      提取角色不写自己的状态行（`section_progress` 恒 None），但参考 :2371/:2389
+      的每文件 `updateAnalysis` 广播在服务器侧的承载点是 **`ctx.log`（任务日志）**
+      ——`_broadcast` 恰好只走这一条（progress 分支因注入 None 而跳过）：循环前
+      「正在提取投标文件元数据」、每文件尾「元数据提取 {n}/{total}」，文案逐字。
+      Electron 的 webContents 实时推送无可承载对应物，**推送面**的偏离由 spec
+      §15 登记（日志面已对齐）。
     - stats（R-P3d-2 + R-P3d-9）：构造**伪 analysis 形状**
       `{metadataExtraction: {status, completed, total}, files: results}` 后
       **就地** `build_section_stats_patch("metadata", …)` 裁剪 —— 对齐参考
@@ -800,6 +804,9 @@ def build_metadata_runner(data_root: Path | str):
 
     async def run_metadata_extraction(section_ctx: SectionRunContext) -> SectionOutput:
         bid_files = list(section_ctx.bid_files)
+
+        # 参考 :2371 初始广播（逐字文案；服务器承载 = 任务日志，R-P3d-5）。
+        _broadcast(section_ctx, "正在提取投标文件元数据")
 
         results: list[dict[str, Any]] = []
         items_rows: list[dict[str, Any]] = []
@@ -838,6 +845,9 @@ def build_metadata_runner(data_root: Path | str):
                 # file_id / key / label / value / normalized / date_day /
                 # comparable / date_comparable / sort_order。
                 items_rows.append({"file_id": file_id, **item, "sort_order": sort_order})
+            # 参考 :2389 每文件尾广播（逐字文案「元数据提取 {n}/{total}」）。
+            _broadcast(section_ctx,
+                       f"元数据提取 {len(results)}/{len(bid_files)}")
 
         status = "error" if any(r["status"] == "error" for r in results) else "success"
         # R-P3d-9：就地裁剪。伪 analysis 形状对齐参考 :2382 终态 updateAnalysis

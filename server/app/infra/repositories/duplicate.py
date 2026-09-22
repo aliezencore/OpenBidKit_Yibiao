@@ -531,8 +531,14 @@ class DuplicateRepository:
 
     def replace_metadata_items(self, project_id: str, rows: Sequence[dict]) -> None:
         """行键：`file_id`(必)、`key`(必)、`label`、`value`、`normalized`、
-        `date_day`、`comparable`、`date_comparable`、`sort_order`（缺省按入参序号）。
-        `id` 由 `_next_row_id` 分配。"""
+        `date_day`、`comparable`、`date_comparable`、`sort_order`。
+        `id` 由 `_next_row_id` 分配。
+
+        **`sort_order` 视为必填**（评审 B P2-2）：缺省回退是 `enumerate(rows)`
+        的**全批**序号、不是文件内序号，而读取侧按
+        `ORDER BY file_id ASC, sort_order ASC` 还原每文件键序——省略个别行的
+        `sort_order` 会让该文件内键序错乱（且不报错）。当前唯一调用方
+        （`build_metadata_runner`）恒传文件内序号，缺省分支不可达。"""
         with self._db.transaction() as conn:
             conn.execute(
                 "DELETE FROM duplicate_check_metadata_items WHERE project_id = ?",
