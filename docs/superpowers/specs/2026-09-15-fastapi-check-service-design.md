@@ -516,7 +516,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
-| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | **进行中**——P3d-1 元数据指纹**已完成**（2026-09-22，665 测试；计划 `2026-09-22-fastapi-check-service-p3d-metadata.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d-metadata/`）；P3d-2 Excel 导出、P3d-3 前端查重页待做 |
+| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | **进行中**——P3d-1 元数据指纹**已完成**（2026-09-22，665 测试；计划 `2026-09-22-fastapi-check-service-p3d-metadata.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d-metadata/`）；P3d-2 Excel 导出**已完成**（2026-09-22，697 测试；计划 `2026-09-22-fastapi-check-service-p3d2-export.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d2-export/`）；P3d-3 前端查重页待做 |
 | P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
 
 > **P3a 执行期裁定回填（2026-09-18）**：上表 P3a 描述里「招标 / 投标按 `role` 入表」在执行时被**修正**——参考实现 `replaceFiles` 的第一条语句 `DELETE FROM duplicate_check_files` 无 role 过滤，真实语义是「**tender/bid 两组一次性全量替换**」，且上传需在同一事务内作废四段并重写签名（否则幂等判据会误命中旧结果）。四段当前仍为「零算法」stub；**P3b 起逐段替换真实算法，编排（`DuplicateAnalysisRunner` 的五角色/段级异常隔离/签名守卫）与状态机不动**。
@@ -570,6 +570,33 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > astral 字符（emoji）在 `ole_signal:` 键名里按单码点折叠（JS 无 `/u` 旗标按代理对
 > 逐半替换）；FILETIME 年份 >9999 时 JS 产 `+010000-…` 串、Python 返回空
 > （字段消失）。中文标书语料均不可达。
+
+> **P3d-2 执行期裁定回填（2026-09-22，查重 Excel 导出）**：
+> ① **R-P3d2-1 signature 自持**：参考由前端从 state 传 `request.signature`；
+> 服务端无「前端 state」概念，直接读 `duplicate_check_meta.current_signature`
+> 作判据——等价且更强（e2e 用例 11 全程零签名传参仍命中 exportable，行为证明）。
+> ② **normalizeRows 前置**：参考在 xlsx 层 `createWorksheet` 内净化；本实现
+> 前置到 plan 构造（`export_workbook.py`），组装器（`duplicate_xlsx.py`）直写
+> ——净化语义不变（R-P3d2-4），分层对齐 R-P3d-11。
+> ③ **openpyxl 空串折叠**（库层差异，登记）：SheetJS 写共享空串（读回 `''`）；
+> openpyxl 保留 cell 占位但值折叠为 `None`——Excel 显示等价，归入「字节级
+> 差异不在保真范围」的既定空白。
+> ④ **openpyxl properties 丢时区**：`created` 经 xlsx 往返后是 naive（UTC 墙钟），
+> 与 SheetJS `CreatedDate` 语义等价。
+> ⑤ **文本限值按码点**（同 P3d-1 ⑦ 的既有登记）：`length > 32767` /
+> `slice(0, 32750)` JS 按 UTF-16 码元，BMP 内两端一致；astral 字符的截断边界
+> 有差（≤ 2×astral 数），标书文本极罕见，不做 UTF-16 仿真。
+> ⑥ **risk 映射 `dict.get`**：JS 对象索引对 `"toString"` 等原型键会取到函数再被
+> `|| '无'` 吞掉；不可达（risk 恒四枚举值），Python 语义更稳。
+> ⑦ **`Number(x || 0)` 收敛为 0**：非数字串形态（`Number('3')`→3、
+> `Number('abc')`→NaN）在 `load_analysis` 产出的 int/float 值域下不可达；
+> `formatFileTimestamp` 对 Invalid Date 产 `"NaNNaNNaN_…"` 的参考缺陷逐字复刻
+> （exported_at 恒为有效 now()，不可达分支）。
+> ⑧ **时间解析最小编面**：`new Date(value)` 只覆盖实际触达两形态——ISO 串
+> （`fromisoformat`，Python 3.13 支持 Z/空格/毫秒/偏移）与 epoch 毫秒数字；
+> V8 宽松 legacy parser（RFC 2822 等）不仿真。带时区转**本地时区**、无时区按
+> 本地墙钟（均与 V8 一致，本机 GMT+8 oracle 三形态对拍验证）；解析失败原样过
+> `normalize_cell_text`（NaN 分支）。跨时区机器需重跑 oracle-duplicate.cjs。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
