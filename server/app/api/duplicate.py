@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, StrictBool
 
 from app.api.deps import AppState, get_state
@@ -33,7 +35,8 @@ from app.domain.duplicate.progress import latest_analysis_message, overall_progr
 from app.domain.duplicate.signature import stable_file_id
 from app.domain.duplicate.state import ANALYSIS_SECTIONS, SectionState
 from app.domain.shared.errors import ParsingError
-from app.infra.parsing.asset_store import assets_dir_for
+from app.infra.parsing.asset_store import ASSET_TARGET_PREFIX, assets_dir_for, resolve_asset_path
+from app.infra.parsing.image_plan import detect_image_format
 from app.infra.parsing.path_safety import validate_project_id
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.repositories.duplicate import DuplicateFileInput
@@ -273,6 +276,34 @@ def delete_files(project_id: str, state: AppState = Depends(get_state)) -> dict:
     # 与 `assets/`，与 POST /files 保持同一入口（含 `project_id` 净化，见该函数）。
     _remove_project_output_dirs(state.settings.data_root, project_id)
     return {"tender": [], "bid": []}
+
+
+# ------------------------------------------------------------ GET /assets/{hash}
+
+@router.get("/projects/{project_id}/duplicate/assets/{digest}")
+def get_duplicate_asset(project_id: str, digest: str,
+                        state: AppState = Depends(get_state)):
+    """把 markdown 里的 `assets/<hash>` 占位解析成图片文件（P3c 的 `preview_url` 落地面）。
+
+    - `validate_project_id` 在**前**：与 `_remove_project_output_dirs` 同一纪律——
+      路径直接来自 URL，盘上访问必须先过净化守卫；
+    - `resolve_asset_path` 只认 `assets/<64 位小写十六进制>` 且**唯一命中**才返回，
+      外来形态 / 目录穿越 / 缺文件一律 `None` → 404；
+    - **响应里绝不出现服务器路径**（spec §15 硬约束①）：404 的 detail 是固定文案，
+      200 的 body 是文件内容。
+    """
+    validate_project_id(project_id)
+    resolved = resolve_asset_path(
+        data_root=state.settings.data_root, project_id=project_id,
+        target=f"{ASSET_TARGET_PREFIX}{digest}")
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="资产不存在")
+    media_type = mimetypes.guess_type(resolved.name)[0]
+    if media_type is None:
+        # 扩展名不可判（如 `skip` 落盘的 `<hash>.bin`）→ 按内容嗅探（spec §15 硬约束③）
+        media_type = detect_image_format(resolved.read_bytes()).mime or (
+            "application/octet-stream")
+    return FileResponse(resolved, media_type=media_type)
 
 
 # --------------------------------------------------------------------- GET /state
