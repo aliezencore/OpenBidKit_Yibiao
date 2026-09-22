@@ -45,6 +45,7 @@ from app.infra.tasks.duplicate_runner import (
 from app.infra.tasks.duplicate_sections import (
     build_content_extraction,
     build_content_runner,
+    build_image_runner,
     build_outline_runner,
     content_dir_for,
 )
@@ -348,13 +349,15 @@ async def start_analysis(project_id: str, body: AnalysisRequest | None = None,
         "bidFiles": bid_files,
         "force": bool(body.force) if body is not None else False,
     }
-    # P3b：把 stub 的角色替换为真实 runner。content_extraction（Task 4）与
-    # outline / content 两段（Task 5）替换；metadata_extraction 与 image 段保持 P3a stub。
+    # P3b / P3c：把 stub 的角色替换为真实 runner。content_extraction（P3b T4）、
+    # outline / content 两段（P3b T5）与 image 段（P3c T4）已替换；
+    # metadata_extraction 保持 P3a stub（P3d 承接）。
     # 改动最小化——只替换对应键。
     sections = dict(_stub_sections())
     sections[CONTENT_EXTRACTION] = build_content_extraction(state.settings.data_root)
     sections["outline"] = build_outline_runner(state.settings.data_root)
     sections["content"] = build_content_runner(state.settings.data_root)
+    sections["image"] = build_image_runner(state.settings.data_root)
     task_id = await state.engine.submit(
         project_id=project_id, domain=ANALYSIS_DOMAIN, kind=ANALYSIS_KIND,
         payload=payload,

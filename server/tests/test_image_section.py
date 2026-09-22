@@ -15,8 +15,14 @@ import pytest
 from app.infra.db.engine import Database
 from app.infra.db.migrate import apply_schema
 from app.infra.parsing.asset_store import assets_dir_for
-from app.infra.repositories.duplicate import DuplicateRepository
-from app.infra.tasks.duplicate_runner import SectionOutput, SectionRunContext
+from app.infra.repositories.duplicate import DuplicateFileInput, DuplicateRepository
+from app.infra.tasks.duplicate_runner import (
+    CONTENT_EXTRACTION,
+    DuplicateAnalysisRunner,
+    SectionOutput,
+    SectionRunContext,
+    _stub_sections,
+)
 from app.infra.tasks.duplicate_sections import build_image_runner, content_dir_for
 
 H1 = "1" * 64
@@ -170,3 +176,88 @@ def test_no_bid_files_yields_empty_output_and_only_the_initial_broadcast(tmp_roo
     assert output.stats == {"totalImageCount": 0}
     assert output.failed is False
     assert calls == [(5, "正在准备图片比对")]
+
+
+# ------------------------------------------------- Task 4：编排级接线（spec §15 §4.4）
+
+class FakeCtx:
+    """TaskContext 最小替身（同 P3b 测试的 FakeCtx）。"""
+
+    project_id = "p1"
+
+    def __init__(self):
+        self.progress_calls: list[tuple[int, str]] = []
+        self.logs: list[str] = []
+
+    def progress(self, value, message=""):
+        self.progress_calls.append((value, message))
+
+    def log(self, message):
+        self.logs.append(message)
+
+    def raise_if_cancelled(self):
+        return None
+
+
+def test_state_image_analysis_is_fully_populated_after_orchestrated_run(
+        repo, tmp_root):
+    """编排级钉子：`/state.imageAnalysis` 不再出现「段 success 而子统计 pending」。
+
+    spec §15 的「P3c/P3d 段子统计无生产者」登记要求 image 段**必须**产出
+    `extraction` / `totalImageCount`（`files` / `duplicateImages` 由读取侧从表重建）。
+    接入真实 runner 之前这里是自相矛盾形状：段 `status: success` 而
+    `extraction: {status:'pending', completed:0, total:N}`、`totalImageCount: 0`。
+
+    评审 A 的 P1 教训：**直连 runner 测不出编排路径**——所以本用例走完整编排器
+    （content 桩 + 真实 image runner），断言落在 `repo.load_analysis` 的**读取侧形状**
+    上，等价于 `/state`。
+    """
+    _write_asset(tmp_root, H1)
+    markdown = f"# 资格证明\n\n营业执照如下。\n\n![](assets/{H1})\n"
+    content = _write_content(tmp_root, [("b1", "b1.docx", markdown),
+                                        ("b2", "b2.docx", markdown)])
+
+    repo.replace_files("p1", "tender", [DuplicateFileInput(
+        file_id="t", file_name="t.docx", file_path="/t.docx", extension="docx",
+        size=1, modified_at="m")])
+    repo.replace_files("p1", "bid", [
+        DuplicateFileInput(file_id="b1", file_name="b1.docx", file_path="/b1.docx",
+                           extension="docx", size=2, modified_at="m"),
+        DuplicateFileInput(file_id="b2", file_name="b2.docx", file_path="/b2.docx",
+                           extension="docx", size=3, modified_at="m")])
+
+    sections = dict(_stub_sections())
+
+    async def content_runner(section_ctx: SectionRunContext) -> SectionOutput:
+        return content                      # 角色槽位要的是**函数**，不是产出对象
+
+    sections[CONTENT_EXTRACTION] = content_runner
+    sections["image"] = build_image_runner(tmp_root)
+    runner = DuplicateAnalysisRunner(repo=repo, sections=sections)
+    payload = {
+        "tenderFiles": [{"file_id": "t", "file_name": "t.docx",
+                         "file_path": "/t.docx", "size": 1, "modified_at": "m"}],
+        "bidFiles": [{"file_id": "b1", "file_name": "b1.docx",
+                      "file_path": "/b1.docx", "size": 2, "modified_at": "m"},
+                     {"file_id": "b2", "file_name": "b2.docx",
+                      "file_path": "/b2.docx", "size": 3, "modified_at": "m"}],
+        "force": False,
+    }
+    asyncio.run(runner(FakeCtx(), payload, None))
+
+    analysis = repo.load_analysis("p1")["imageAnalysis"]
+    assert analysis["status"] == "success"
+    # §4.4 的两个必办键（接入前 extraction=pending、totalImageCount=0）
+    assert analysis["extraction"] == {"status": "success", "completed": 2, "total": 2}
+    assert analysis["totalImageCount"] == 2
+    # `files` 由读取侧从 duplicate_check_image_files 重建
+    assert [(f["file_id"], f["status"], f["image_count"], f["unique_image_count"])
+            for f in analysis["files"]] == [("b1", "success", 1, 1),
+                                            ("b2", "success", 1, 1)]
+    # `duplicateImages` 由读取侧从两张表重建（含 occurrences / locations）
+    assert [d["id"] for d in analysis["duplicateImages"]] == ["I000001"]
+    duplicate = analysis["duplicateImages"][0]
+    assert duplicate["file_ids"] == ["b1", "b2"]
+    assert duplicate["occurrences"] == {"b1": 1, "b2": 1}
+    assert duplicate["preview_url"] == f"/projects/p1/duplicate/assets/{H1}"
+    assert duplicate["locations"]["b1"][0]["previous_sentence"] == "营业执照如下"
