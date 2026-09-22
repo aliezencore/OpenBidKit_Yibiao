@@ -516,7 +516,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
-| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | 计划待写 |
+| **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | **进行中**——P3d-1 元数据指纹**已完成**（2026-09-22，665 测试；计划 `2026-09-22-fastapi-check-service-p3d-metadata.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d-metadata/`）；P3d-2 Excel 导出、P3d-3 前端查重页待做 |
 | P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | — |
 
 > **P3a 执行期裁定回填（2026-09-18）**：上表 P3a 描述里「招标 / 投标按 `role` 入表」在执行时被**修正**——参考实现 `replaceFiles` 的第一条语句 `DELETE FROM duplicate_check_files` 无 role 过滤，真实语义是「**tender/bid 两组一次性全量替换**」，且上传需在同一事务内作废四段并重写签名（否则幂等判据会误命中旧结果）。四段当前仍为「零算法」stub；**P3b 起逐段替换真实算法，编排（`DuplicateAnalysisRunner` 的五角色/段级异常隔离/签名守卫）与状态机不动**。
@@ -539,6 +539,27 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > `extraction`/`files`/各类计数；本实现的段内进度回调被冻结为 `(percent, message)`
 > （R-P3b-3，为保进度单调），故分析**进行中**的轮询看不到子统计——**终态全部正确**，
 > 差异只在运行中的快照。若要运行中的子进度条，需扩回调签名（接口变更）。
+
+> **P3d 执行期裁定回填（2026-09-22，P3d-1 元数据指纹段）**：
+> ① **P3d-1 计划偏离①被推翻**：原判「V8 对纯数字串 '3'/'42'/'936'/'11.1.0' 解析失败、
+> Python `new Date(文本)` 需偏离」不成立——oracle 实证这些全是 comparable 键且 V8
+> **解析成功**（revision='3'→2001-01、pages='42'→NaN 形 day 语义、code_page='936'→0936 年、
+> app_version='11.1.0'→2000-11-01）。按「oracle 暴露未覆盖格式 → 扩 parser 不许改参考」
+> 扩 `js_date.py`（V8 legacy 数字串解析规律全录于该模块 docstring）。
+> ② **3 位年本地化秒差（不复刻）**：V8/Windows 对远古年份（如 '936'→0936-01-01）走
+> LMT(+08:05:43)，Python `astimezone()` 给现代固定偏移（且 Windows CRT 对远古/1970 边界
+> 抛 `OSError[22]`，已兜底 UTC）→ 归一化值秒级分歧，仅影响 '936'/'920'/'900' 这类病态
+> 属性值，不修。
+> ③ **V8 病态字符串匹配不复刻**：`'wps-uid-77'`→1977、`'42:wps-uid-42'`→2042 这类
+> 「从字母串里抠数字当年份」的 Date 行为按登记不复刻（value 原样保留）。
+> ④ **超 datetime 上限的年直取近似**：'12345' 这类 5 位数字串（words/characters 字段
+> 真实值域）超出 `datetime` MAXYEAR=9999 → `js_date_iso` 走 proleptic Gregorian 算术
+> 直出 ISO 串，本地偏移用「现代固定偏移」近似（V8 按样本年份取当地偏移）——秒级分歧
+> 同 ②，登记不复刻。
+> ⑤ **无 soffice 的 `.doc`/`.wps` 元数据**（R-P3d-6）：`extractLegacyWordMetadata` 的
+> 「OLE 属性集 + 转换后 docx」两段中，转换段依赖 Electron `convert.mjs` 运行时
+> （DOMMatrix 等），服务端不可复刻 → 恒产 `metadata_error`（office_backend_missing 文案
+> 逐字），OLE 段照常产出。soffice 转换的完整元数据与 G2 同源，仍属已知空白。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
@@ -621,7 +642,14 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > **✅ P3c 侧已闭合（2026-09-22）**：image 段的 `extraction` / `totalImageCount` 由
 > `build_image_runner` 的 stats 产出、`files` 由 `duplicate_check_image_files` 表重建，
 > 编排级用例 `test_state_image_analysis_is_fully_populated_after_orchestrated_run` 钉住；
-> **metadata 侧仍待 P3d 承接**。
+> **✅ metadata 侧已闭合（2026-09-22，P3d-1 T6）**：`build_metadata_runner`
+> （`duplicate_sections.py`）逐 bid 文件产出结果行，stats 以伪 analysis 形状
+> `{metadataExtraction, files}` **就地**过 `build_section_stats_patch("metadata", …)`
+> 裁剪后作 `_merge_metadata_stats` 基底；`metadata_items` 落库走 P3b 预接线的
+> `_persist_rows` 分派分支。e2e 用例
+> `test_e2e_metadata_analysis_full_shape` /
+> `test_e2e_metadata_upload_failed_row_becomes_error` 钉住全形状；
+> 判别力探针：变异 runner 去掉 `stats.files` → 两条 e2e 红。
 >
 > **补登（评审 B 的 B-1 面）——落库分派表**：上表是「stats 键」这一面，还有对称的
 > **第二面**：`DuplicateAnalysisRunner._persist_rows` 是「runner 产出 → 落库」的
