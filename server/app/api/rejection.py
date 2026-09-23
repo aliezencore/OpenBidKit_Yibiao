@@ -53,8 +53,8 @@ from app.domain.rejection.normalize import (
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.tasks.rejection_extraction import RejectionExtractionRunner
+from app.infra.tasks.rejection_checks import RejectionCheckRunner
 from app.infra.tasks.rejection_stub import (
-    StubRejectionCheckRunner,
     StubSubjectIdentificationRunner,
 )
 
@@ -646,6 +646,9 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
     payload = {
         "projectId": project_id,
         "enabledChecks": enabled,
+        # 元数据（内容由 runner 按行读盘，payload_json 不放大段正文）
+        "bidDocuments": [{"id": d["document_id"], "fileName": d["file_name"]}
+                         for d in documents],
         "subjectSealCheck": normalize_check_options(options).get("subjectSealCheck", False),
         "signatures": {
             "rejection": rejection_input_signature,
@@ -657,7 +660,7 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
     task_id = await state.engine.submit(
         project_id=project_id, domain=ANALYSIS_DOMAIN, kind=RUN_KIND,
         payload=payload,
-        runner=StubRejectionCheckRunner(state.rejection),
+        runner=RejectionCheckRunner(state.rejection, state.ai, state.settings.data_root),
     )
     return {"taskId": task_id}
 

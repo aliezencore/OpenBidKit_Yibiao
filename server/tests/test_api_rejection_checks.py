@@ -189,6 +189,9 @@ def _inject_fake_ai(client):
     """
     from tests.ai_fakes import ScriptedAI
 
-    client.app.state.yibiao.ai = ScriptedAI(
-        ["# 招标文件中明确提到的\n\n## 无效投标\n- 资质不符"])
+    # 第一段给提取（markdown），其后所有 collect_json_response 给空 findings 的 JSON
+    client.app.state.yibiao.ai = ScriptedAI([
+        "# 招标文件中明确提到的\n\n## 无效投标\n- 资质不符",
+        '{"findings":[]}',
+    ])
     return client

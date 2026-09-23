@@ -28,3 +28,11 @@ class ScriptedAI:
     async def aclose(self) -> None:
         """对齐 AiClient.aclose（lifespan 会调用）。"""
         return None
+
+    async def collect_json_response(
+        self, messages: list[dict[str, Any]], *, use_vision: bool = False
+    ) -> dict[str, Any]:
+        import json as _json
+
+        content = await self.chat(messages, use_vision=use_vision)
+        return _json.loads(content)
