@@ -559,14 +559,15 @@ async def start_extraction(project_id: str, state: AppState = Depends(get_state)
     tender_signature = state.rejection.get_document(project_id, TENDER_DOCUMENT_ID)
     if not tender_content.strip() or tender_signature is None:
         raise HTTPException(status_code=400, detail="缺少招标文件内容，无法解析无效与废标项")
+    tender_row = state.rejection.get_document(project_id, TENDER_DOCUMENT_ID)
     payload = {"projectId": project_id,
-               "tenderContent": tender_content,
+               "tenderPath": str(tender_row["markdown_path"] or "") if tender_row else "",
                "tenderSignature": stable_hash(tender_content.strip())}
     task_id = await state.engine.submit(
         project_id=project_id, domain=ANALYSIS_DOMAIN, kind=EXTRACTION_KIND,
         payload=payload,
         runner=RejectionExtractionRunner(
-            state.rejection, state.ai,
+            state.rejection, state.ai, data_root=data_root,
             config={"context_length_limit": state.settings.ai_context_length_limit}),
     )
     return {"taskId": task_id}

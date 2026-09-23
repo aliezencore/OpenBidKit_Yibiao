@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, Mapping
 
 from app.domain.rejection.extraction_prompt import (
@@ -37,10 +38,12 @@ def extraction_task_prompt() -> str:
 class RejectionExtractionRunner:
     """`rejection-items-extraction` 的真实实现（替换 P4a 的 stub）。"""
 
-    def __init__(self, repo: Any, ai: Any, config: Mapping[str, Any] | None = None) -> None:
+    def __init__(self, repo: Any, ai: Any, config: Mapping[str, Any] | None = None,
+                 data_root: Any = None) -> None:
         self._repo = repo
         self._ai = ai
         self._config = dict(config or {})
+        self._data_root = Path(data_root) if data_root is not None else None
 
     async def _chat(self, messages: list[dict[str, str]]) -> str:
         return await self._ai.chat(messages)
@@ -75,10 +78,25 @@ class RejectionExtractionRunner:
         ))
         # 注：单段路径的 system 提示由 build_messages 承载（参考 :221-227 同构）。
 
+    def _read_tender(self, project_id: str, relative_path: str) -> str:
+        if not (self._data_root and relative_path):
+            return ""
+        target = (self._data_root / "projects" / project_id
+                  / Path(*relative_path.split("/")))
+        try:
+            return target.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
     async def __call__(self, ctx: Any, payload: Mapping[str, Any],
                        previous_state: dict | None) -> None:
         project_id = str(payload.get("projectId") or "")
-        tender_content = str(payload.get("tenderContent") or "")
+        # 有 tenderPath → 按 data_root 读盘（API 契约，payload 不放大段正文）；
+        # 无路径时回退 tenderContent（单元测试/调用方直传的便利出口）。
+        tender_content = await asyncio.to_thread(
+            self._read_tender, project_id, str(payload.get("tenderPath") or ""))
+        if not tender_content:
+            tender_content = str(payload.get("tenderContent") or "")
         section_hint = payload.get("sectionHint")
 
         ctx.progress(5, "开始解析无效与废标项。")

@@ -78,10 +78,10 @@ def test_build_messages_structure():
 
 async def test_single_segment_makes_one_call_with_reference_messages():
     ai = ScriptedAI(["解析结果"])
-    runner = RejectionExtractionRunner(_Repo(), ai, {})
+    runner = RejectionExtractionRunner(_Repo(), ai, {}, data_root=None)
     ctx = _Ctx()
     _run(runner(ctx, {"projectId": "p1", "tenderContent": "短招标文件",
-                                 "tenderSignature": "sig"}, None))
+                      "tenderSignature": "sig"}, None))
     assert ai.chat_count == 1                          # 短文本不分段
     first = ai.calls[0]
     assert [m["role"] for m in first] == ["system", "user", "user"]

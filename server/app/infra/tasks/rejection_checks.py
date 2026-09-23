@@ -48,10 +48,12 @@ TYPO_LABEL = "错别字检查"
 
 
 def compute_progress(completed: int, enabled: int) -> int:
-    """参考 rejectionCheckTask.cjs:1679。"""
+    """参考 rejectionCheckTask.cjs:1679。Math.round 是半数向上（不能用 Python round）。"""
+    import math
+
     if enabled <= 0:
         return PROGRESS_BASE
-    return min(PROGRESS_CAP, round(PROGRESS_BASE + (completed / enabled) * PROGRESS_SPAN))
+    return min(PROGRESS_CAP, math.floor(PROGRESS_BASE + (completed / enabled) * PROGRESS_SPAN + 0.5))
 
 
 class RejectionCheckRunner:
@@ -90,18 +92,30 @@ class RejectionCheckRunner:
                 **({"stats": {"visionStatus": "pending" if payload.get("subjectSealCheck")
                               else "disabled"}} if kind == "subject" else {})})
             findings: list[dict[str, Any]] = []
-            if kind == "rejection":
-                findings = await self._run_rejection(project_id, bid_documents, ctx)
-            elif kind == "typo":
-                ctx.log(f"{TYPO_LABEL}：正在识别错别字候选。")
-                findings = await self._run_typo(project_id, bid_documents, ctx)
-            elif kind == "logic":
-                findings = await self._run_logic(project_id, bid_documents, ctx)
-            elif kind == "subject":
-                findings = await self._run_subject_body(project_id, bid_documents, ctx)
-            else:
-                # 占位（废标项三轮/rolling 在 P4b-2 后续；主体正文属 P4b-3；印章属 P4c）
-                ctx.log(f"{label}（占位）")
+            try:
+                if kind == "rejection":
+                    findings = await self._run_rejection(project_id, bid_documents, ctx)
+                elif kind == "typo":
+                    ctx.log(f"{TYPO_LABEL}：正在识别错别字候选。")
+                    findings = await self._run_typo(project_id, bid_documents, ctx)
+                elif kind == "logic":
+                    findings = await self._run_logic(project_id, bid_documents, ctx)
+                elif kind == "subject":
+                    findings = await self._run_subject_body(project_id, bid_documents, ctx)
+                else:
+                    # 占位（rolling 变体在 P4b 后续；印章视觉属 P4c）
+                    ctx.log(f"{label}（占位）")
+            except Exception as error:
+                # 参考 runOne 的 try/catch（:1714-1726）：**单检查失败只作废自己**，
+                # 其余检查照常成功——评审 B 的 P1（原先异常沿 gather 上抛，整个任务失败）。
+                async with lock:
+                    completed += 1
+                    progress = compute_progress(completed, len(checks))
+                    self._repo.save_result(project_id, kind, {
+                        "status": "error", "findings": [], "error": str(error)})
+                ctx.progress(progress, f"{label}失败")
+                ctx.log(f"{label}失败：{error}")
+                return
             async with lock:
                 completed += 1
                 progress = compute_progress(completed, len(checks))
