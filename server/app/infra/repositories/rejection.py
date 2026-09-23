@@ -18,6 +18,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from app.domain.rejection.assets import visual_assets_values, visual_assets_view
 from app.domain.rejection.findings import (
     FINDING_TABLES,
     RESULT_TYPES,
@@ -30,6 +31,7 @@ from app.domain.rejection.normalize import (
     normalize_status,
     strip_triple_quote_wrapper,
 )
+from app.domain.rejection.profile import subject_profile_values, subject_profile_view
 from app.infra.db.engine import Database
 
 _META_COLUMNS = frozenset({
@@ -358,3 +360,93 @@ class RejectionRepository:
             "DELETE FROM rejection_check_results WHERE project_id = ?", (project_id,))
         for result_type in RESULT_TYPES:
             self.clear_findings(project_id, result_type)
+
+    # ------------------------------------------ 投标主体档案 / 视觉资产（T2b-2）
+
+    def load_subject_profile(self, project_id: str) -> dict:
+        row = self._db.query_one(
+            "SELECT * FROM rejection_check_subject_profile WHERE project_id = ?",
+            (project_id,))
+        return subject_profile_view(dict(row) if row else None)
+
+    def save_subject_profile(self, project_id: str,
+                             profile: Mapping[str, Any]) -> dict:
+        """写档案（对齐 `saveSubjectProfile` :1263-1297）。
+
+        **未携带 `identificationTarget` 键时保留旧值**——参考 :1264-1268 的注释写明
+        目的是「避免任务 checkpoint 把它冲掉」；显式传 `None` 才清空
+        （`reset_subject_profile` 就是这么干的）。该字段存在 `candidates_json` 里。
+        """
+        target = (profile.get("identificationTarget")
+                  if "identificationTarget" in profile
+                  else self.load_subject_profile(project_id).get("identificationTarget"))
+        values = subject_profile_values(profile, target, _now())
+        columns = list(values)
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ", ".join(f"{column} = excluded.{column}" for column in columns)
+        self._db.execute(
+            f"INSERT INTO rejection_check_subject_profile (project_id, {', '.join(columns)})"
+            f" VALUES (?, {placeholders})"
+            f" ON CONFLICT(project_id) DO UPDATE SET {updates}",
+            (project_id, *values.values()),
+        )
+        return self.load_subject_profile(project_id)
+
+    def reset_subject_profile(self, project_id: str, reason: str | None = None) -> dict:
+        """对齐 `resetSubjectProfile` :1298-1310：清到 idle 并显式清掉识别范围。"""
+        return self.save_subject_profile(project_id, {
+            "status": "idle",
+            "officialName": "",
+            "aliases": [],
+            "candidates": [],
+            "identificationTarget": None,
+            "error": reason,
+        })
+
+    def delete_subject_finding(self, project_id: str, finding_id: str) -> bool:
+        """对齐 `deleteSubjectFinding` :1406-1409（返回是否真的删到了行）。"""
+        cursor = self._db.execute(
+            "DELETE FROM rejection_check_subject_findings"
+            " WHERE project_id = ? AND finding_id = ?", (project_id, str(finding_id or "")))
+        return cursor.rowcount > 0
+
+    def list_visual_assets(self, project_id: str,
+                           bid_document_id: str | None = None) -> list[dict]:
+        if bid_document_id:
+            rows = self._db.query(
+                "SELECT * FROM rejection_check_visual_assets WHERE project_id = ?"
+                " AND bid_document_id = ? ORDER BY sort_order ASC",
+                (project_id, str(bid_document_id)))
+        else:
+            rows = self._db.query(
+                "SELECT * FROM rejection_check_visual_assets WHERE project_id = ?"
+                " ORDER BY bid_document_id ASC, sort_order ASC", (project_id,))
+        return visual_assets_view([dict(row) for row in rows])
+
+    def save_visual_assets(self, project_id: str, bid_document_id: str,
+                           assets: Sequence[Mapping[str, Any]] | None = None) -> int:
+        """**按投标文件整批替换**（对齐 `saveVisualAssets` :1368-1405 的先删后插）。"""
+        document_id = str(bid_document_id or "")
+        self.clear_visual_assets(project_id, document_id)
+        rows = visual_assets_values(document_id, assets, _now())
+        if not rows:
+            return 0
+        columns = list(rows[0])
+        placeholders = ", ".join("?" for _ in columns)
+        self._db.executemany(
+            "INSERT INTO rejection_check_visual_assets (project_id,"
+            f" {', '.join(columns)}) VALUES (?, {placeholders})",
+            [(project_id, *[row[column] for column in columns]) for row in rows],
+        )
+        return len(rows)
+
+    def clear_visual_assets(self, project_id: str,
+                            bid_document_id: str | None = None) -> None:
+        if bid_document_id:
+            self._db.execute(
+                "DELETE FROM rejection_check_visual_assets"
+                " WHERE project_id = ? AND bid_document_id = ?",
+                (project_id, str(bid_document_id)))
+            return
+        self._db.execute(
+            "DELETE FROM rejection_check_visual_assets WHERE project_id = ?", (project_id,))
