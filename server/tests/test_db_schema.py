@@ -313,3 +313,228 @@ def test_apply_schema_is_idempotent_with_duplicate_tables(tmp_path):
     assert _duplicate_object_count(db) == before
 
     db.close()
+
+
+# --------------------------------------------------------------- 废标项检查（P4a）
+
+REJECTION_TABLES = (
+    "rejection_check_meta",
+    "rejection_check_documents",
+    "rejection_check_extraction",
+    "rejection_check_results",
+    "rejection_check_risk_findings",
+    "rejection_check_typo_findings",
+    "rejection_check_logic_findings",
+    "rejection_check_subject_profile",
+    "rejection_check_visual_assets",
+    "rejection_check_subject_findings",
+)
+
+REJECTION_INDEXES = (
+    "idx_rejection_check_documents_role_order",
+    "idx_rejection_check_risk_order",
+    "idx_rejection_check_risk_severity",
+    "idx_rejection_check_typo_order",
+    "idx_rejection_check_logic_order",
+    "idx_rejection_check_visual_assets_document",
+    "idx_rejection_check_visual_assets_hash",
+    "idx_rejection_check_subject_findings_order",
+    "idx_rejection_check_subject_findings_level",
+)
+
+
+def _rejection_object_count(db):
+    return db.query_one(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE name LIKE 'rejection_check_%'"
+    )["c"]
+
+
+def _seed_two_projects(db):
+    db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p1','a','t')")
+    db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p2','b','t')")
+
+
+def test_rejection_tables_exist(tmp_path):
+    db = make_db(tmp_path)
+    apply_schema(db)
+    names = {row["name"] for row in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    missing = [t for t in REJECTION_TABLES if t not in names]
+    assert missing == [], f"缺表：{missing}"
+
+    db.close()
+
+
+def test_rejection_check_tasks_is_not_created(tmp_path):
+    """任务统一收归 tasks 表（spec §5.1），不得再建 domain 私有任务表。
+
+    参考实现有此表（sqliteDatabase.cjs:618），但 spec §5.1 明确「任务表不再保留
+    原形态」——本用例把「不建」钉住，防有人按参考 DDL 顺手补回来。
+    """
+    db = make_db(tmp_path)
+    apply_schema(db)
+    names = {row["name"] for row in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "rejection_check_tasks" not in names
+
+    db.close()
+
+
+def test_rejection_check_meta_is_project_scoped(tmp_path):
+    """单例表改 project_id 主键：两个项目各一行，且默认值来自参考 DDL。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    _seed_two_projects(db)
+    for pid in ("p1", "p2"):
+        db.execute(
+            "INSERT INTO rejection_check_meta(project_id, created_at, updated_at) "
+            "VALUES (?, 'now', 'now')", (pid,))
+    rows = db.query("SELECT * FROM rejection_check_meta ORDER BY project_id")
+    assert len(rows) == 2
+    assert rows[0]["step"] == "documents"
+    assert rows[0]["active_document_tab"] == "tender"
+    assert rows[0]["active_result_tab"] == "analysis"
+    assert rows[0]["active_check_result_tab"] == "rejection"
+    assert rows[0]["custom_check_items"] == ""
+
+    db.close()
+
+
+def test_rejection_singletons_are_project_scoped(tmp_path):
+    """`extraction` 与 `subject_profile` 也是单例表 → project_id 主键。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    _seed_two_projects(db)
+    for pid in ("p1", "p2"):
+        db.execute("INSERT INTO rejection_check_extraction(project_id) VALUES (?)", (pid,))
+        db.execute(
+            "INSERT INTO rejection_check_subject_profile(project_id, updated_at) "
+            "VALUES (?, 'now')", (pid,))
+    assert db.query_one(
+        "SELECT COUNT(*) AS c FROM rejection_check_extraction")["c"] == 2
+    assert db.query_one(
+        "SELECT COUNT(*) AS c FROM rejection_check_subject_profile")["c"] == 2
+    row = db.query_one(
+        "SELECT status, official_name FROM rejection_check_subject_profile"
+        " WHERE project_id = 'p1'")
+    assert (row["status"], row["official_name"]) == ("idle", "")
+
+    db.close()
+
+
+def test_rejection_documents_are_project_scoped(tmp_path):
+    """documents 主键是 (project_id, document_id)：两个项目可用同一个 document_id。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    _seed_two_projects(db)
+    for pid in ("p1", "p2"):
+        db.execute(
+            "INSERT INTO rejection_check_documents"
+            "(project_id, document_id, role, source, file_name, markdown_path,"
+            " content_hash, imported_at, updated_at)"
+            " VALUES (?, 'doc-1', 'bid', 'upload', '投标.docx', '/m/doc-1.md', 'h', 't', 't')",
+            (pid,))
+    assert db.query_one(
+        "SELECT COUNT(*) AS c FROM rejection_check_documents")["c"] == 2
+
+    db.close()
+
+
+def test_rejection_results_stats_json_column_exists(tmp_path):
+    """`stats_json` 在参考里由 addColumnIfMissing 后补（:773），新库直接建列。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    _seed_two_projects(db)
+    for pid in ("p1", "p2"):
+        db.execute(
+            "INSERT INTO rejection_check_results"
+            "(project_id, result_type, status, stats_json, updated_at)"
+            " VALUES (?, 'rejection', 'success', '{\"total\":1}', 't')", (pid,))
+    rows = db.query("SELECT project_id, stats_json FROM rejection_check_results")
+    assert len(rows) == 2
+    assert rows[0]["stats_json"] == '{"total":1}'
+
+    db.close()
+
+
+def test_rejection_findings_are_project_scoped(tmp_path):
+    """四张 findings 表的主键都是 (project_id, finding_id)：同 id 可跨项目共存。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    _seed_two_projects(db)
+    for pid in ("p1", "p2"):
+        db.execute(
+            "INSERT INTO rejection_check_risk_findings"
+            "(project_id, finding_id, type, severity, title, summary, requirement,"
+            " bid_evidence, risk_reason, suggestion, created_at, updated_at)"
+            " VALUES (?, 'f-1', 'rejection', 'high', 't', 's', 'r', 'e', 'w', 'g', 't', 't')",
+            (pid,))
+        db.execute(
+            "INSERT INTO rejection_check_typo_findings"
+            "(project_id, finding_id, wrong_text, correct_text, original_excerpt,"
+            " reason, created_at, updated_at)"
+            " VALUES (?, 'f-1', '错', '对', '摘', '因', 't', 't')", (pid,))
+        db.execute(
+            "INSERT INTO rejection_check_logic_findings"
+            "(project_id, finding_id, title, original_text, location_hint,"
+            " fallacy_reason, suggestion, created_at, updated_at)"
+            " VALUES (?, 'f-1', 't', 'o', 'l', 'f', 's', 't', 't')", (pid,))
+        db.execute(
+            "INSERT INTO rejection_check_subject_findings"
+            "(project_id, finding_id, level, source, expected_subject, detected_subject,"
+            " location_kind, title, summary, location_hint, original_text, role_reason,"
+            " mismatch_reason, suggestion, created_at, updated_at)"
+            " VALUES (?, 'f-1', 'error', 'body', '甲', '乙', 'paragraph', 't', 's',"
+            " 'l', 'o', 'rr', 'mm', 'sg', 't', 't')", (pid,))
+    for table in ("risk", "typo", "logic", "subject"):
+        assert db.query_one(
+            f"SELECT COUNT(*) AS c FROM rejection_check_{table}_findings")["c"] == 2
+    assert db.query_one(
+        "SELECT confidence FROM rejection_check_subject_findings"
+        " WHERE project_id = 'p1'")["confidence"] == 0
+
+    db.close()
+
+
+def test_rejection_visual_assets_are_project_scoped(tmp_path):
+    db = make_db(tmp_path)
+    apply_schema(db)
+    _seed_two_projects(db)
+    for pid in ("p1", "p2"):
+        db.execute(
+            "INSERT INTO rejection_check_visual_assets"
+            "(project_id, asset_id, bid_document_id, media_name, content_hash,"
+            " relative_path, mime_type, created_at)"
+            " VALUES (?, 'a-1', 'doc-1', 'image1.png', 'h', 'assets/h', 'image/png', 't')",
+            (pid,))
+    row = db.query_one(
+        "SELECT placement, asset_kind, width, height FROM rejection_check_visual_assets"
+        " WHERE project_id = 'p1'")
+    assert (row["placement"], row["asset_kind"], row["width"], row["height"]) == (
+        "unknown", "unknown", 0, 0)
+
+    db.close()
+
+
+def test_rejection_tables_and_indexes_all_exist(tmp_path):
+    """10 张表 + REJECTION_INDEXES 列出的索引必须全部落在 sqlite_master。"""
+    db = make_db(tmp_path)
+    apply_schema(db)
+    names = {row["name"] for row in db.query("SELECT name FROM sqlite_master")}
+    missing_indexes = [i for i in REJECTION_INDEXES if i not in names]
+    assert missing_indexes == [], f"缺索引：{missing_indexes}"
+
+    db.close()
+
+
+def test_apply_schema_is_idempotent_with_rejection_tables(tmp_path):
+    db = make_db(tmp_path)
+    apply_schema(db)
+    before = _rejection_object_count(db)
+    assert before > 0
+
+    apply_schema(db)
+
+    assert _rejection_object_count(db) == before
+
+    db.close()
