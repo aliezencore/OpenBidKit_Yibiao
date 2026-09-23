@@ -186,10 +186,13 @@ async def upload_documents(
         if added_bid_ids:
             # 参考 :1076-1080：新增投标文档 → 作废四项检查结果 + 重置主体档案（无 reason）
             # + 把页签切到第一份新文档。**不重置 extraction**（它吃招标内容）。
-            state.rejection.clear_check_results(project_id)
-            state.rejection.reset_subject_profile(project_id)
-            state.rejection.update_meta(project_id,
-                                        {"active_document_tab": added_bid_ids[0]})
+            # 参考把它们包在 `db.transaction`（:1071-1080）；本实现同样包一层
+            # （评审 B 的 P1：多步写不原子会留下「行已存、结果未作废」的半成品）。
+            with state.db.transaction():
+                state.rejection.clear_check_results(project_id)
+                state.rejection.reset_subject_profile(project_id)
+                state.rejection.update_meta(project_id,
+                                            {"active_document_tab": added_bid_ids[0]})
     else:
         # 招标：读现有**源文档**（排除主文档）→ 合并新增 → 整体重写
         source_rows = [row for row in existing
@@ -212,7 +215,6 @@ async def upload_documents(
                 "parserLabel": item["parser_label"], "content": item["markdown"],
             })
         if added:
-            state.rejection.clear_documents(project_id, role="tender")
             all_sources = [*sources, *added]
             # 主文档（id 常量 'tender'）：多份时文件名是「N 份招标文件」、label 置空
             main_markdown = combine_tender_markdown(all_sources)
@@ -222,22 +224,31 @@ async def upload_documents(
             main_label = (None if len(all_sources) > 1
                           else all_sources[0].get("parserLabel"))
             main_path = document_markdown_path("tender", main_document_id)
+            # 文件先落盘：文件系统不可回滚——DB 失败时盘上可能留孤儿副本（与参考同局限，登记）
             _write_markdown(data_root, project_id, main_path, main_markdown)
-            state.rejection.save_document(project_id, _document_values(
-                project_id=project_id, document_id=main_document_id, role="tender",
-                file_name=main_name, markdown=main_markdown, parser_label=main_label,
-                sort_order=0, imported_at=imported_at, relative_path=main_path))
-            for index, source in enumerate(all_sources):
-                relative_path = document_markdown_path("tender", source["id"])
-                _write_markdown(data_root, project_id, relative_path, source["content"])
+            for source in all_sources:
+                _write_markdown(data_root, project_id,
+                                document_markdown_path("tender", source["id"]),
+                                source["content"])
+            # 「清行 → 重插主文档与源文档 → 作废解析与结果」必须**原子**：参考把它整段包在
+            # `db.transaction`（:1073-1080）；不包则中途失败会留下「行已删、文档没插回」的空项目
+            # （评审 B 的 P1）。
+            with state.db.transaction():
+                state.rejection.clear_documents(project_id, role="tender")
                 state.rejection.save_document(project_id, _document_values(
-                    project_id=project_id, document_id=source["id"], role="tender",
-                    file_name=source["fileName"], markdown=source["content"],
-                    parser_label=source.get("parserLabel"), sort_order=index + 1,
-                    imported_at=imported_at, relative_path=relative_path))
-            # 招标内容变了 → 解析结果与四项检查都作废（对齐 clearDocumentRows 的 tender 分支）
-            state.rejection.save_extraction(project_id, None)
-            state.rejection.clear_check_results(project_id)
+                    project_id=project_id, document_id=main_document_id, role="tender",
+                    file_name=main_name, markdown=main_markdown, parser_label=main_label,
+                    sort_order=0, imported_at=imported_at, relative_path=main_path))
+                for index, source in enumerate(all_sources):
+                    state.rejection.save_document(project_id, _document_values(
+                        project_id=project_id, document_id=source["id"], role="tender",
+                        file_name=source["fileName"], markdown=source["content"],
+                        parser_label=source.get("parserLabel"), sort_order=index + 1,
+                        imported_at=imported_at,
+                        relative_path=document_markdown_path("tender", source["id"])))
+                # 招标内容变了 → 解析结果与四项检查都作废（对齐 clearDocumentRows 的 tender 分支）
+                state.rejection.save_extraction(project_id, None)
+                state.rejection.clear_check_results(project_id)
 
     return _project_documents(state, project_id)
 
@@ -247,16 +258,17 @@ def list_documents(project_id: str, state: AppState = Depends(get_state)) -> dic
     return _project_documents(state, project_id)
 
 
-@router.delete("/projects/{project_id}/rejection/documents")
-def delete_documents(project_id: str, role: str, documentId: str | None = None,
-                     state: AppState = Depends(get_state)) -> dict:
-    """删文档（`role=tender` 删全部招标并作废解析；`role=bid` 可只删一份）。"""
-    removed = state.rejection.clear_document_rows(project_id, role, documentId)
-    document_role = normalize_document_role(role)
+def _apply_removal_side_effects(state: AppState, project_id: str, document_role: str,
+                                document_id: str | None) -> None:
+    """删文档后的连带副作用（参考 :1208-1231 / :1210），调用方负责包事务。
+
+    - **投标**：清该文档（或全部）视觉资产 + **重置主体档案**（带 reason）+ 页签切到下一份
+      投标（没有则 `'tender'`）；
+    - **招标**：只把页签切回 `'tender'`——**不**重置主体档案（它依赖投标签名）。
+    """
     if document_role == "bid":
-        # 参考 :1223-1231：删投标 → 清该文档（或全部）视觉资产 + 重置主体档案（带 reason）
-        if documentId:
-            state.rejection.clear_visual_assets(project_id, str(documentId))
+        if document_id:
+            state.rejection.clear_visual_assets(project_id, str(document_id))
         else:
             state.rejection.clear_visual_assets(project_id)
         state.rejection.reset_subject_profile(project_id, "投标文件已更新，请重新确认投标主体")
@@ -264,8 +276,19 @@ def delete_documents(project_id: str, role: str, documentId: str | None = None,
         state.rejection.update_meta(project_id, {
             "active_document_tab": remaining[0]["document_id"] if remaining else "tender"})
     else:
-        # 参考 :1210：删招标 → 页签回 'tender'（**不**重置主体档案：它依赖投标签名）
         state.rejection.update_meta(project_id, {"active_document_tab": "tender"})
+
+
+@router.delete("/projects/{project_id}/rejection/documents")
+def delete_documents(project_id: str, role: str, documentId: str | None = None,
+                     state: AppState = Depends(get_state)) -> dict:
+    """删文档（`role=tender` 删全部招标并作废解析；`role=bid` 可只删一份）。"""
+    document_role = normalize_document_role(role)
+    # 参考 :1204-1213 把「删行 + 切页签 + 清视觉资产 + 重置档案」整段包在 `db.transaction`；
+    # 不包则中途失败会留下「行删了、结果/档案没清」的半成品（评审 B 的 P1）。
+    with state.db.transaction():
+        removed = state.rejection.clear_document_rows(project_id, role, documentId)
+        _apply_removal_side_effects(state, project_id, document_role, documentId)
     data_root = Path(state.settings.data_root)
     for row in removed:
         target = _markdown_target(data_root, project_id, str(row.get("markdown_path") or ""))
