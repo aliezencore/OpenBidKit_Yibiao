@@ -11,12 +11,24 @@ import asyncio
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from app.domain.rejection.normalize import normalize_subject_name
 from app.infra.tasks.rejection_stub import INITIAL_RESULT_MESSAGES
 from app.domain.rejection.rejection_check import (
     build_rejection_check_analysis_messages,
     build_rejection_check_final_messages,
     build_rejection_check_inspection_messages,
     normalize_rejection_check_findings,
+)
+from app.domain.rejection.subject_body import (
+    ROLLING_SEGMENT_CHARS,
+    FINAL_CANDIDATE_BATCH_SIZE,
+    apply_subject_body_patch,
+    build_subject_body_final_messages,
+    build_subject_body_segment_messages,
+    create_empty_subject_body_state,
+    create_subject_body_final_candidates,
+    create_subject_body_state_summary,
+    normalize_subject_body_findings,
 )
 from app.domain.rejection.logic_check import (
     build_logic_check_messages,
@@ -44,12 +56,15 @@ def compute_progress(completed: int, enabled: int) -> int:
 
 class RejectionCheckRunner:
     def __init__(self, repo: RejectionRepository, ai: Any, data_root: Path | str,
-                 invalid_items: str = "", custom_items: str = "") -> None:
+                 invalid_items: str = "", custom_items: str = "",
+                 official_name: str = "", aliases: list[str] | None = None) -> None:
         self._repo = repo
         self._ai = ai
         self._data_root = Path(data_root)
         self._invalid_items = invalid_items
         self._custom_items = custom_items
+        self._official_name = official_name
+        self._aliases = list(aliases or [])
 
     async def __call__(self, ctx: Any, payload: Mapping[str, Any],
                        previous_state: dict | None) -> None:
@@ -82,6 +97,8 @@ class RejectionCheckRunner:
                 findings = await self._run_typo(project_id, bid_documents, ctx)
             elif kind == "logic":
                 findings = await self._run_logic(project_id, bid_documents, ctx)
+            elif kind == "subject":
+                findings = await self._run_subject_body(project_id, bid_documents, ctx)
             else:
                 # 占位（废标项三轮/rolling 在 P4b-2 后续；主体正文属 P4b-3；印章属 P4c）
                 ctx.log(f"{label}（占位）")
@@ -146,6 +163,69 @@ class RejectionCheckRunner:
         if findings:
             self._repo.save_findings(project_id, "logic", findings)
         return findings
+
+    # --------------------------------------------- 主体正文（滚动状态机，P4b-3）
+
+    async def _run_subject_body(self, project_id: str,
+                                bid_documents: list[dict[str, Any]],
+                                ctx: Any) -> list[dict[str, Any]]:
+        """逐文档分块滚动审阅 → 定稿分批 → 归一化与跨批去重（参考 :351-412）。
+
+        印章分支（runSubjectSealCheck）属 P4c；本实现只做正文（source='text'）。
+        """
+        state = create_empty_subject_body_state()
+        for document in bid_documents:
+            text = document["content"]
+            total = max(1, -(-len(text) // ROLLING_SEGMENT_CHARS))
+            for index in range(total):
+                segment = {"documentId": document["id"],
+                           "documentLabel": document.get("fileName") or document["id"],
+                           "segmentIndex": index + 1, "totalSegments": total,
+                           "text": text[index * ROLLING_SEGMENT_CHARS:
+                                        (index + 1) * ROLLING_SEGMENT_CHARS]}
+                ctx.log(f"{document['fileName']}：正在审阅第 {index + 1}/{total} 段。")
+                patch = await self._ai.collect_json_response(
+                    build_subject_body_segment_messages(
+                        bid_documents=bid_documents, segment=segment,
+                        state_summary=create_subject_body_state_summary(state),
+                        official_name=self._official_name, aliases=self._aliases))
+                state = apply_subject_body_patch(state, patch)
+
+        candidates = create_subject_body_final_candidates(state)
+        if not candidates:
+            return []
+
+        ctx.log("正在定稿投标主体一致性问题。")
+        findings: list[dict[str, Any]] = []
+        batches = [candidates[i:i + FINAL_CANDIDATE_BATCH_SIZE]
+                   for i in range(0, len(candidates), FINAL_CANDIDATE_BATCH_SIZE)]
+        for batch_index, batch in enumerate(batches):
+            ctx.log(f"正在定稿第 {batch_index + 1}/{len(batches)} 批。")
+            patch = await self._ai.collect_json_response(
+                build_subject_body_final_messages(
+                    official_name=self._official_name, aliases=self._aliases,
+                    candidates=batch,
+                    state_summary=create_subject_body_state_summary(state)))
+            findings.extend(normalize_subject_body_findings(
+                patch, bid_documents=bid_documents,
+                official_name=self._official_name, aliases=self._aliases))
+        seen: set[str] = set()
+        deduped = []
+        import re as _re
+
+        for finding in findings:
+            key = "\u0000".join([finding["bidDocumentId"], finding["locationKind"],
+                                 _re.sub(r"\s+", "",
+                                         normalize_subject_name(finding["detectedSubject"])),
+                                 _re.sub(r"\s+", "", finding["originalText"])])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(finding)
+        self._repo.clear_findings(project_id, "subject")
+        if deduped:
+            self._repo.save_findings(project_id, "subject", deduped)
+        return deduped
 
     # ------------------------------------------------------------------ 读盘
 
