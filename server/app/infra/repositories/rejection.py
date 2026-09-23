@@ -16,8 +16,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from app.domain.rejection.findings import (
+    FINDING_TABLES,
+    RESULT_TYPES,
+    findings_values,
+    findings_view,
+)
 from app.domain.rejection.normalize import (
     DEFAULT_CHECK_OPTIONS,
     SECTION_STATUSES,
@@ -218,3 +224,137 @@ class RejectionRepository:
             if row[column]:
                 result[key] = row[column]
         return result
+
+    # ------------------------------------------------- results / findings（T2b-1）
+
+    def save_result(self, project_id: str, result_type: str,
+                    result: Mapping[str, Any] | None) -> None:
+        """写一个检查结果（对齐 `saveResult` :590-636）。
+
+        `None` = 清空该结果（删 findings + 删结果行）。
+
+        其余字段是 **patch 语义**（参考的 `hasOwn` 逐字段判定）：**提供了**该键就写
+        （falsy → NULL），**没提供**就保留旧值。这正是「更新进度不该把
+        inputSignature 抹掉」的机制，与 `saveSubjectProfile` 的
+        `identificationTarget` 是同一族语义。
+        """
+        if result_type not in RESULT_TYPES:
+            raise ValueError(f"未知的 result_type：{result_type}")
+        if result is None:
+            self.clear_findings(project_id, result_type)
+            self._db.execute(
+                "DELETE FROM rejection_check_results"
+                " WHERE project_id = ? AND result_type = ?", (project_id, result_type))
+            return
+
+        existing = self.get_result_row(project_id, result_type)
+        timestamp = _now()
+
+        def patched(key: str, column: str, *, normalize=None):
+            if key in result:
+                value = result.get(key)
+                if normalize is not None:
+                    return normalize(value)
+                return str(value) if value else None
+            return existing[column] if existing else None
+
+        status = (normalize_status(result.get("status"), SECTION_STATUSES, "idle")
+                  if "status" in result
+                  else (existing["status"] if existing else None) or "idle")
+        stats_json = (None if result.get("stats") is None
+                      else json.dumps(result.get("stats"), ensure_ascii=False)) \
+            if "stats" in result else (existing["stats_json"] if existing else None)
+        updated_at = result.get("updatedAt") or timestamp
+        self._db.execute(
+            "INSERT INTO rejection_check_results"
+            " (project_id, result_type, status, input_signature, active_finding_id,"
+            "  progress_message, error, stats_json, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(project_id, result_type) DO UPDATE SET"
+            "  status = excluded.status,"
+            "  input_signature = excluded.input_signature,"
+            "  active_finding_id = excluded.active_finding_id,"
+            "  progress_message = excluded.progress_message,"
+            "  error = excluded.error,"
+            "  stats_json = excluded.stats_json,"
+            "  updated_at = excluded.updated_at",
+            (project_id, result_type, status,
+             patched("inputSignature", "input_signature"),
+             patched("activeFindingId", "active_finding_id"),
+             patched("progressMessage", "progress_message"),
+             patched("error", "error"),
+             stats_json, updated_at),
+        )
+        if "findings" in result:
+            self.clear_findings(project_id, result_type)
+            self.save_findings(project_id, result_type, result.get("findings") or [])
+
+    def get_result_row(self, project_id: str, result_type: str) -> dict | None:
+        row = self._db.query_one(
+            "SELECT * FROM rejection_check_results WHERE project_id = ? AND result_type = ?",
+            (project_id, result_type))
+        return dict(row) if row else None
+
+    def clear_findings(self, project_id: str, result_type: str) -> None:
+        table = FINDING_TABLES[result_type]
+        self._db.execute(
+            f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
+
+    def save_findings(self, project_id: str, result_type: str,
+                      findings: Sequence[Mapping[str, Any]]) -> int:
+        """整批插入（调用方先 `clear_findings`）。行归一在 domain 层。"""
+        rows = findings_values(result_type, findings, _now())
+        if not rows:
+            return 0
+        table = FINDING_TABLES[result_type]
+        columns = list(rows[0])
+        placeholders = ", ".join("?" for _ in columns)
+        self._db.executemany(
+            f"INSERT INTO {table} (project_id, {', '.join(columns)})"
+            f" VALUES (?, {placeholders})",
+            [(project_id, *[row[column] for column in columns]) for row in rows],
+        )
+        return len(rows)
+
+    def load_findings(self, project_id: str, result_type: str) -> list[dict]:
+        table = FINDING_TABLES[result_type]
+        rows = self._db.query(
+            f"SELECT * FROM {table} WHERE project_id = ? ORDER BY sort_order ASC",
+            (project_id,))
+        first_bid = self.get_document(project_id, "bid")
+        fallback = str(first_bid["document_id"]) if first_bid else ""
+        return findings_view(result_type, [dict(row) for row in rows], fallback)
+
+    def load_result(self, project_id: str, result_type: str) -> dict:
+        """参考形状（`loadResult` :746-765）：缺行 → `{status:'idle', findings:[]}`。
+
+        可选键只在**有值**时出现（参考用 `|| undefined`），故 Python 侧省略键。
+        """
+        base: dict[str, Any] = {
+            "status": "idle",
+            "findings": self.load_findings(project_id, result_type),
+        }
+        row = self.get_result_row(project_id, result_type)
+        if row is None:
+            return base
+        base["status"] = normalize_status(row["status"], SECTION_STATUSES, "idle")
+        for key, column in (("inputSignature", "input_signature"),
+                            ("activeFindingId", "active_finding_id"),
+                            ("progressMessage", "progress_message"),
+                            ("error", "error"),
+                            ("updatedAt", "updated_at")):
+            if row[column]:
+                base[key] = row[column]
+        if row["stats_json"]:
+            try:
+                base["stats"] = json.loads(row["stats_json"])
+            except (TypeError, ValueError):
+                pass  # 参考 safeJsonParse 的 fallback=undefined
+        return base
+
+    def clear_check_results(self, project_id: str) -> None:
+        """清四个结果（对齐 `clearCheckResults` :822-829 的库内部分）。"""
+        self._db.execute(
+            "DELETE FROM rejection_check_results WHERE project_id = ?", (project_id,))
+        for result_type in RESULT_TYPES:
+            self.clear_findings(project_id, result_type)
