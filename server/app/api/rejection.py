@@ -21,20 +21,31 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from app.api.deps import AppState, get_state
 from app.domain.rejection.documents import documents_view, document_markdown_path
 from app.domain.rejection.normalize import (
+    DEFAULT_CHECK_OPTIONS,
     TENDER_DOCUMENT_ID,
     combine_tender_markdown,
     create_bid_document_id,
+    create_bid_signature,
     create_tender_source_document_id,
+    normalize_check_options,
+    normalize_check_result_tab,
     normalize_document_role,
+    normalize_document_tab,
+    normalize_result_tab,
+    normalize_status,
+    normalize_step,
     stable_hash,
 )
 from app.domain.shared.errors import ParsingError
@@ -251,3 +262,196 @@ def _now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+# ------------------------------------------------------------- 状态与 UI 态（T4）
+
+def _documents_payload(data_root: Path, project_id: str,
+                       state: AppState) -> dict[str, Any]:
+    """状态里的文档部分：主文档 / 招标源文档 / 投标文档（都是完整视图，含 markdown? 否）。
+
+    `documentFromRow`（参考 :367-380）带 `content`；本实现的状态响应**不带正文**
+    （与列表端点一致，登记为有意省略）。`tenderDocument` 是主文档或第一份招标。
+    """
+    rows = state.rejection.list_documents(project_id)
+    tender_rows = [row for row in rows if row["role"] == "tender"]
+    bid_rows = [row for row in rows if row["role"] == "bid"]
+    main_row = next((row for row in tender_rows
+                     if row["document_id"] == TENDER_DOCUMENT_ID),
+                    tender_rows[0] if tender_rows else None)
+    return {
+        "tenderDocument": documents_view([main_row])[0] if main_row else None,
+        "tenderDocuments": documents_view(
+            [row for row in tender_rows if row["document_id"] != TENDER_DOCUMENT_ID]),
+        "bidDocuments": documents_view(bid_rows),
+    }
+
+
+def _valid_active_document_tab(meta_tab: str, payload: dict) -> str:
+    """参考 :876-886：tab 必须是 'tender'、某个源招标文档 id 或某个投标文档 id；
+    否则回落到「有主文档 → 'tender'，否则第一份投标文档 id，否则 'tender'」。"""
+    candidate = normalize_document_tab(meta_tab)
+    allowed = {"tender"}
+    allowed.update(row["id"] for row in payload["tenderDocuments"])
+    allowed.update(row["id"] for row in payload["bidDocuments"])
+    if candidate in allowed:
+        return candidate
+    if payload["tenderDocument"]:
+        return "tender"
+    return payload["bidDocuments"][0]["id"] if payload["bidDocuments"] else "tender"
+
+
+def _build_state(data_root: Path, project_id: str, state: AppState) -> dict[str, Any]:
+    repo = state.rejection
+    meta = repo.ensure_meta(project_id)
+    documents = _documents_payload(data_root, project_id, state)
+    tabs = {
+        "activeDocumentTab": _valid_active_document_tab(meta["active_document_tab"], documents),
+        "step": normalize_step(meta["step"]),
+        "activeResultTab": normalize_result_tab(meta["active_result_tab"]),
+        "activeCheckResultTab": normalize_check_result_tab(meta["active_check_result_tab"]),
+    }
+    check_options = DEFAULT_CHECK_OPTIONS
+    if meta.get("check_options_json"):
+        try:
+            check_options = normalize_check_options(json.loads(meta["check_options_json"]))
+        except (TypeError, ValueError):
+            check_options = DEFAULT_CHECK_OPTIONS
+    return {
+        **documents,
+        **tabs,
+        "invalidBidAndRejectionItems": repo.load_extraction(project_id),
+        "customCheckItems": meta["custom_check_items"] or "",
+        "checkOptions": check_options,
+        "rejectionCheckResult": repo.load_result(project_id, "rejection"),
+        "typoCheckResult": repo.load_result(project_id, "typo"),
+        "logicCheckResult": repo.load_result(project_id, "logic"),
+        "subjectCheckResult": repo.load_result(project_id, "subject"),
+        "subjectProfile": repo.load_subject_profile(project_id),
+        "tasks": _tasks_payload(project_id, state),
+    }
+
+
+@router.get("/projects/{project_id}/rejection/state")
+def get_state_endpoint(project_id: str, state: AppState = Depends(get_state)) -> dict:
+    """废标项检查的完整状态（对齐 `loadRejectionCheck` :863-901）。
+
+    函数名刻意叫 `..._endpoint`：**不能叫 `get_state`**——那会遮蔽从 `deps` 导入的
+    依赖，后面所有 `Depends(get_state)` 都会解析到这个端点函数本身
+    （`duplicate.py` 的 `get_state_endpoint` 同因）。
+    """
+    return _build_state(Path(state.settings.data_root), project_id, state)
+
+
+class UiStatePatch(BaseModel):
+    """UI 态补丁：**只写显式传入的字段**（对齐 `saveUiState` :1411-1418 的 `hasOwn` 过滤）。"""
+
+    step: str | None = None
+    activeDocumentTab: str | None = None
+    activeResultTab: str | None = None
+    activeCheckResultTab: str | None = None
+    customCheckItems: str | None = None
+    checkOptions: dict[str, Any] | None = None
+
+
+@router.put("/projects/{project_id}/rejection/ui")
+def save_ui_state(project_id: str, body: UiStatePatch,
+                  state: AppState = Depends(get_state)) -> dict:
+    """保存 UI 态（步进/页签/自定义检查项/检查开关），返回新状态。"""
+    fields: dict[str, Any] = {}
+    if body.step is not None:
+        fields["step"] = normalize_step(body.step)
+    if body.activeDocumentTab is not None:
+        fields["active_document_tab"] = normalize_document_tab(body.activeDocumentTab)
+    if body.activeResultTab is not None:
+        fields["active_result_tab"] = normalize_result_tab(body.activeResultTab)
+    if body.activeCheckResultTab is not None:
+        fields["active_check_result_tab"] = normalize_check_result_tab(
+            body.activeCheckResultTab)
+    if body.customCheckItems is not None:
+        fields["custom_check_items"] = str(body.customCheckItems)
+    if body.checkOptions is not None:
+        fields["check_options_json"] = json.dumps(
+            normalize_check_options(body.checkOptions), ensure_ascii=False)
+    state.rejection.update_meta(project_id, fields)
+    return _build_state(Path(state.settings.data_root), project_id, state)
+
+
+class ConfirmSubjectRequest(BaseModel):
+    officialName: str = ""
+    aliases: list[str] | None = None
+    identificationTarget: dict[str, Any] | None = None
+
+
+@router.post("/projects/{project_id}/rejection/subject/confirm")
+def confirm_subject(project_id: str, body: ConfirmSubjectRequest,
+                    state: AppState = Depends(get_state)) -> dict:
+    """确认投标主体（对齐 `confirmSubject` :1320-1344）。
+
+    三件事：写档案（status=confirmed + **当前投标签名** + confirmedAt）→
+    **作废主体检查结果**（改了正式名称或简称，旧结果不再有效，spec §11.4）。
+    `identificationTarget` 走「未携带 = 保留旧值」（用 `model_fields_set` 判是否携带）。
+    """
+    name = (body.officialName or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写正式投标主体名称")
+    aliases = [item.strip() for item in (body.aliases or []) if str(item or "").strip()]
+    repo = state.rejection
+    data_root = Path(state.settings.data_root)
+    previous = repo.load_subject_profile(project_id)
+    patch: dict[str, Any] = {
+        "status": "confirmed",
+        "officialName": name,
+        "aliases": aliases,
+        "candidates": previous.get("candidates") or [],
+        "preselectIndex": previous.get("preselectIndex"),
+        "bidSignature": _current_bid_signature(data_root, project_id, state),
+        "confirmedAt": _now(),
+    }
+    if "identificationTarget" in body.model_fields_set:
+        patch["identificationTarget"] = body.identificationTarget
+    profile = repo.save_subject_profile(project_id, patch)
+    # 主体结果整段作废（参考 :1341-1343）
+    repo.save_result(project_id, "subject", {
+        "status": "idle", "findings": [], "inputSignature": None,
+        "activeFindingId": None, "progressMessage": None, "error": None,
+        "stats": None, "updatedAt": _now()})
+    return {"success": True, "message": "投标主体已确认", "profile": profile}
+
+
+def _current_bid_signature(data_root: Path, project_id: str, state: AppState) -> str:
+    """`getCurrentBidSignature`（:1308-1312）：按 sort_order, imported_at 取投标文档，
+    逐份算文档签名再连接。需要正文，故在此读盘。"""
+    rows = state.rejection.list_documents(project_id, role="bid")
+    documents = [{"id": row["document_id"], "role": "bid", "source": row["source"],
+                  "fileName": row["file_name"],
+                  "content": _row_markdown(data_root, project_id, row)}
+                 for row in rows]
+    return create_bid_signature(documents)
+
+
+def _tasks_payload(project_id: str, state: AppState) -> dict[str, Any]:
+    """三类任务的当前态（对齐参考的 `loadTasks` :543-551 → `taskFromRow` :166-179）。
+
+    任务统一存在 `tasks` 表（spec §5.1），按 kind 过滤本项目的最新一条。
+    """
+    rows = state.tasks.list_for_project(project_id)
+    payload: dict[str, Any] = {}
+    for kind, field in (("rejection-items-extraction", "extractionTask"),
+                        ("rejection-check-run", "checkTask"),
+                        ("bid-subject-identification", "subjectIdentificationTask")):
+        row = next((item for item in rows if item["kind"] == kind), None)
+        if row is None:
+            continue
+        payload[field] = {
+            "task_id": row["task_id"],
+            "type": kind,
+            "status": normalize_status(row["status"], ("running", "success", "error"),
+                                       "running"),
+            "progress": int(row["progress"] or 0),
+            "started_at": row["started_at"],
+            "updated_at": row["finished_at"] or row["started_at"],
+        }
+        if row.get("error"):
+            payload[field]["error"] = row["error"]
+    return payload

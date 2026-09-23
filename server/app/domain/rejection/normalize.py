@@ -27,6 +27,7 @@ SECTION_STATUSES = ("idle", "running", "success", "error")
 DOCUMENT_SIGNATURE_SEPARATOR = "\n---yibiao-rejection-signature---\n"
 BID_DOCUMENT_SEPARATOR = "\n---yibiao-rejection-bid-document---\n"
 CHECK_INPUT_SEPARATOR = "\n---yibiao-rejection-check-input---\n"
+BID_SIGNATURE_SEPARATOR = "\n---yibiao-rejection-bid-signature---\n"  # 参考 :1311
 
 
 def stable_hash(content: Any) -> str:
@@ -142,7 +143,20 @@ def create_rejection_check_input_signature(
 
 def create_bid_document_id(file_name: Any, markdown: Any) -> str:
     """参考 :216-219：`bid-<sha256 前 16>`。"""
-    return f"bid-{stable_hash(f'{file_name or ''}\n{markdown or ''}')[:16]}"
+    digest = stable_hash(f"{file_name or ''}\n{markdown or ''}")[:16]
+    return f"bid-{digest}"
+
+
+def create_bid_signature(documents: Sequence[Mapping[str, Any]] | None) -> str:
+    """投标文件集合签名（参考 `getCurrentBidSignature` :1308-1312）：
+
+    逐份 `create_document_signature` → 去空 → 用 `BID_SIGNATURE_SEPARATOR` 连接。
+    主体确认时写进档案（`bid_signature`），主体检查的幂等判据依赖它。
+    """
+    signatures = [signature for signature in
+                  (create_document_signature(document) for document in (documents or []))
+                  if signature]
+    return BID_SIGNATURE_SEPARATOR.join(signatures)
 
 
 def create_tender_source_document_id(file_name: Any, markdown: Any, index: int) -> str:
