@@ -25,7 +25,7 @@ import json
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -38,18 +38,25 @@ from app.domain.rejection.normalize import (
     combine_tender_markdown,
     create_bid_document_id,
     create_bid_signature,
+    create_rejection_check_input_signature,
     create_tender_source_document_id,
     normalize_check_options,
     normalize_check_result_tab,
     normalize_document_role,
     normalize_document_tab,
     normalize_result_tab,
+    create_subject_check_input_signature,
     normalize_status,
     normalize_step,
     stable_hash,
 )
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.service import save_uploaded_document
+from app.infra.tasks.rejection_stub import (
+    StubExtractionRunner,
+    StubRejectionCheckRunner,
+    StubSubjectIdentificationRunner,
+)
 
 router = APIRouter()
 _logger = logging.getLogger(__name__)
@@ -455,3 +462,151 @@ def _tasks_payload(project_id: str, state: AppState) -> dict[str, Any]:
         if row.get("error"):
             payload[field]["error"] = row["error"]
     return payload
+
+
+# --------------------------------------------------- 任务提交（T5，占位算法）
+
+ANALYSIS_DOMAIN = "rejection"
+EXTRACTION_KIND = "rejection-items-extraction"
+IDENTIFY_KIND = "bid-subject-identification"
+RUN_KIND = "rejection-check-run"
+
+
+class RunChecksRequest(BaseModel):
+    """执行检查的可选项（对齐参考 `runRejectionCheckTask` 的 `options`）。"""
+
+    checkOptions: dict[str, Any] | None = None
+
+
+def _enabled_checks(options: Mapping[str, Any]) -> list[str]:
+    """参考 :1624-1628 的启用集合与**顺序**。"""
+    normalized = normalize_check_options(options)
+    return [kind for kind in ("rejection", "typo", "logic", "subject")
+            if normalized.get(f"{kind}Check")]
+
+
+def _main_tender_markdown(data_root: Path, project_id: str, state: AppState) -> str:
+    row = state.rejection.get_document(project_id, TENDER_DOCUMENT_ID)
+    return _row_markdown(data_root, project_id, row) if row else ""
+
+
+def _bid_documents_with_content(data_root: Path, project_id: str,
+                                state: AppState) -> list[dict[str, Any]]:
+    """参考 :1615-1617：只保留「有 id 且正文非空」的投标文档。"""
+    documents = []
+    for row in state.rejection.list_documents(project_id, role="bid"):
+        content = _row_markdown(data_root, project_id, row)
+        if row["document_id"] and content.strip():
+            documents.append({"document_id": row["document_id"], "role": "bid",
+                              "source": row["source"], "file_name": row["file_name"],
+                              "content": content})
+    return documents
+
+
+@router.post("/projects/{project_id}/rejection/extract")
+async def start_extraction(project_id: str, state: AppState = Depends(get_state)) -> dict:
+    """步骤 2：解析无效与废标项（占位实现）。前置：招标内容非空（参考 :1521 逐字）。"""
+    data_root = Path(state.settings.data_root)
+    tender_content = _main_tender_markdown(data_root, project_id, state)
+    tender_signature = state.rejection.get_document(project_id, TENDER_DOCUMENT_ID)
+    if not tender_content.strip() or tender_signature is None:
+        raise HTTPException(status_code=400, detail="缺少招标文件内容，无法解析无效与废标项")
+    payload = {"projectId": project_id,
+               "tenderSignature": stable_hash(tender_content.strip())}
+    task_id = await state.engine.submit(
+        project_id=project_id, domain=ANALYSIS_DOMAIN, kind=EXTRACTION_KIND,
+        payload=payload,
+        runner=StubExtractionRunner(state.rejection),
+    )
+    return {"taskId": task_id}
+
+
+@router.post("/projects/{project_id}/rejection/subject/identify")
+async def start_subject_identification(project_id: str,
+                                       state: AppState = Depends(get_state)) -> dict:
+    """步骤 3：识别投标主体候选（占位实现）。前置：有投标内容（参考 :647 逐字）。"""
+    data_root = Path(state.settings.data_root)
+    documents = _bid_documents_with_content(data_root, project_id, state)
+    if not documents:
+        raise HTTPException(status_code=400, detail="缺少投标文件内容，无法识别投标主体")
+    task_id = await state.engine.submit(
+        project_id=project_id, domain=ANALYSIS_DOMAIN, kind=IDENTIFY_KIND,
+        payload={"projectId": project_id, "bidDocumentIds": [d["document_id"] for d in documents]},
+        runner=StubSubjectIdentificationRunner(state.rejection),
+    )
+    return {"taskId": task_id}
+
+
+@router.post("/projects/{project_id}/rejection/run")
+async def start_rejection_check(project_id: str, body: RunChecksRequest | None = None,
+                                state: AppState = Depends(get_state)) -> dict:
+    """步骤 5：执行检查（占位实现）。
+
+    四条前置**按参考顺序**逐字校验（参考 :1619-1666）：
+
+    1. 投标文档（有内容）与投标签名齐备 → 「缺少投标文件内容，无法开始检查」
+    2. 至少启用一种检查 → 「请至少启用一种检查」
+    3. 启用废标项检查时必须有解析内容 → 「请先完成无效与废标项解析」
+    4. 启用主体检查时必须已确认主体 → 「请先确认投标主体后再开始主体一致性检查」
+
+    **有意偏离（登记）**：参考在任务内抛错（失败落 `task.error`），本实现在端点前置校验
+    并返回 400 + 同一句话——语义相同（都阻止任务启动并给出同一文案），错误通道不同。
+    """
+    data_root = Path(state.settings.data_root)
+    repo = state.rejection
+    meta = repo.ensure_meta(project_id)
+
+    documents = _bid_documents_with_content(data_root, project_id, state)
+    bid_signature = create_bid_signature([
+        {"id": d["document_id"], "role": "bid", "source": d["source"],
+         "fileName": d["file_name"], "content": d["content"]} for d in documents])
+    if not documents or not bid_signature:
+        raise HTTPException(status_code=400, detail="缺少投标文件内容，无法开始检查")
+
+    options = (body.checkOptions if body and body.checkOptions is not None
+               else json.loads(meta["check_options_json"] or "{}"))
+    enabled = _enabled_checks(options)
+    if not enabled:
+        raise HTTPException(status_code=400, detail="请至少启用一种检查")
+
+    extraction = repo.load_extraction(project_id)
+    custom_items = meta["custom_check_items"] or ""
+    rejection_input_signature = create_rejection_check_input_signature(
+        [{"document_id": d["document_id"], "role": "bid", "source": d["source"],
+          "file_name": d["file_name"], "content": d["content"]} for d in documents],
+        extraction.get("content") or "", custom_items)
+    if "rejection" in enabled and (not (extraction.get("content") or "").strip()
+                                   or not rejection_input_signature):
+        raise HTTPException(status_code=400, detail="请先完成无效与废标项解析")
+
+    profile = repo.load_subject_profile(project_id)
+    # 参考 :1653-1662：**仅在档案已 confirmed** 时才算得出签名（未确认 → 空串 → 前置报错）
+    subject_input_signature = (
+        create_subject_check_input_signature(
+            bid_signature=bid_signature,
+            official_name=profile.get("officialName"),
+            aliases=profile.get("aliases"),
+            subject_seal_check=normalize_check_options(options).get("subjectSealCheck", False))
+        if profile.get("status") == "confirmed" else "")
+    if "subject" in enabled and (not profile.get("officialName") or not subject_input_signature):
+        raise HTTPException(status_code=400,
+                            detail="请先确认投标主体后再开始主体一致性检查")
+
+    payload = {
+        "projectId": project_id,
+        "enabledChecks": enabled,
+        "subjectSealCheck": normalize_check_options(options).get("subjectSealCheck", False),
+        "signatures": {
+            "rejection": rejection_input_signature,
+            "typo": bid_signature,
+            "logic": bid_signature,
+            "subject": subject_input_signature,
+        },
+    }
+    task_id = await state.engine.submit(
+        project_id=project_id, domain=ANALYSIS_DOMAIN, kind=RUN_KIND,
+        payload=payload,
+        runner=StubRejectionCheckRunner(state.rejection),
+    )
+    return {"taskId": task_id}
+

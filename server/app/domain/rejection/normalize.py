@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Mapping, Sequence
 
 # 参考 :16-33 `initialState`
@@ -176,3 +177,41 @@ def combine_tender_markdown(documents: Sequence[Mapping[str, Any]] | None) -> st
         if text:
             parts.append(text)
     return "\n\n".join(parts)
+
+
+# ------------------------------------------------- 主体检查输入签名（P4a T5）
+
+# 参考 subjectNameUtils.cjs:6 / :93
+SUBJECT_CHECK_PROTOCOL_VERSION = 1
+SUBJECT_SIGNATURE_SEPARATOR = "\n---yibiao-subject-signature---\n"
+_SUBJECT_NAME_MAP = {"（": "(", "）": ")", "【": "[", "】": "]", "，": ",", "：": ":"}
+
+
+def normalize_subject_name(value: Any) -> str:
+    """参考 :11-22：**去掉所有空白** + 全角括号/方括号/逗号/冒号转半角 + trim + 小写。"""
+    text = str(value or "")
+    for full, half in _SUBJECT_NAME_MAP.items():
+        text = text.replace(full, half)
+    return re.sub(r"\s+", "", text).strip().lower()
+
+
+def create_subject_check_input_signature(
+    *,
+    bid_signature: Any,
+    official_name: Any,
+    aliases: Sequence[Any] | None,
+    subject_seal_check: bool,
+    protocol_version: int = SUBJECT_CHECK_PROTOCOL_VERSION,
+) -> str:
+    """参考 :74-94：别名先 trim/去空/**排序**再归一，最后按 `|` 连接。"""
+    sorted_aliases = "|".join(
+        normalize_subject_name(item)
+        for item in sorted(str(alias or "").strip()
+                           for alias in (aliases or []) if str(alias or "").strip()))
+    return SUBJECT_SIGNATURE_SEPARATOR.join([
+        f"yibiao-subject-check-v{protocol_version}",
+        str(bid_signature or ""),
+        normalize_subject_name(official_name),
+        sorted_aliases,
+        "seal-on" if subject_seal_check else "seal-off",
+    ])
