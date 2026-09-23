@@ -643,6 +643,7 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
         raise HTTPException(status_code=400,
                             detail="请先确认投标主体后再开始主体一致性检查")
 
+    extraction = repo.load_extraction(project_id)
     payload = {
         "projectId": project_id,
         "enabledChecks": enabled,
@@ -660,7 +661,10 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
     task_id = await state.engine.submit(
         project_id=project_id, domain=ANALYSIS_DOMAIN, kind=RUN_KIND,
         payload=payload,
-        runner=RejectionCheckRunner(state.rejection, state.ai, state.settings.data_root),
+        runner=RejectionCheckRunner(
+            state.rejection, state.ai, state.settings.data_root,
+            invalid_items=extraction.get("content") or "",
+            custom_items=meta["custom_check_items"] or ""),
     )
     return {"taskId": task_id}
 

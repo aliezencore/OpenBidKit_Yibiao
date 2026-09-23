@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from app.infra.tasks.rejection_stub import INITIAL_RESULT_MESSAGES
+from app.domain.rejection.rejection_check import (
+    build_rejection_check_analysis_messages,
+    build_rejection_check_final_messages,
+    build_rejection_check_inspection_messages,
+    normalize_rejection_check_findings,
+)
 from app.domain.rejection.logic_check import (
     build_logic_check_messages,
     normalize_logic_check_findings,
@@ -37,10 +43,13 @@ def compute_progress(completed: int, enabled: int) -> int:
 
 
 class RejectionCheckRunner:
-    def __init__(self, repo: RejectionRepository, ai: Any, data_root: Path | str) -> None:
+    def __init__(self, repo: RejectionRepository, ai: Any, data_root: Path | str,
+                 invalid_items: str = "", custom_items: str = "") -> None:
         self._repo = repo
         self._ai = ai
         self._data_root = Path(data_root)
+        self._invalid_items = invalid_items
+        self._custom_items = custom_items
 
     async def __call__(self, ctx: Any, payload: Mapping[str, Any],
                        previous_state: dict | None) -> None:
@@ -66,7 +75,9 @@ class RejectionCheckRunner:
                 **({"stats": {"visionStatus": "pending" if payload.get("subjectSealCheck")
                               else "disabled"}} if kind == "subject" else {})})
             findings: list[dict[str, Any]] = []
-            if kind == "typo":
+            if kind == "rejection":
+                findings = await self._run_rejection(project_id, bid_documents, ctx)
+            elif kind == "typo":
                 ctx.log(f"{TYPO_LABEL}：正在识别错别字候选。")
                 findings = await self._run_typo(project_id, bid_documents, ctx)
             elif kind == "logic":
@@ -97,6 +108,31 @@ class RejectionCheckRunner:
         self._repo.clear_findings(project_id, "typo")
         if findings:
             self._repo.save_findings(project_id, "typo", findings)
+        return findings
+
+    # ------------------------------------------------- 废标项（三轮，P4b-2）
+
+    async def _run_rejection(self, project_id: str, bid_documents: list[dict[str, Any]],
+                             ctx: Any) -> list[dict[str, Any]]:
+        input_params = {
+            "bidDocuments": bid_documents,
+            "invalidBidAndRejectionItems": self._invalid_items or "",
+            "customCheckItems": self._custom_items or "",
+        }
+        # 直连三轮（rolling 变体未搬，登记：超长投标包行为与参考不同）
+        ctx.log("废标项检查：第一轮：正在分析检查范围。")
+        analysis = await self._ai.chat(
+            build_rejection_check_analysis_messages(input_params))
+        ctx.log("废标项检查：第二轮：正在逐项检查投标文件。")
+        draft_findings = await self._ai.chat(
+            build_rejection_check_inspection_messages(input_params, analysis))
+        ctx.log("废标项检查：第三轮：正在补充、去重并生成结果。")
+        payload_result = await self._ai.collect_json_response(
+            build_rejection_check_final_messages(input_params, analysis, draft_findings))
+        findings = normalize_rejection_check_findings(payload_result, bid_documents)
+        self._repo.clear_findings(project_id, "rejection")
+        if findings:
+            self._repo.save_findings(project_id, "rejection", findings)
         return findings
 
     # ------------------------------------------------------------------ 逻辑谬误
