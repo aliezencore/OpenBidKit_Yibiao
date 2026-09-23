@@ -270,7 +270,7 @@ def test_content_extraction_failed_file_does_not_poison_batch(
     """
     import app.infra.tasks.duplicate_sections as mod
 
-    def boom_on(path, *, provider="local", include_images=False):
+    def boom_on(path, *, provider="local", mineru_token="", include_images=False):
         if "bad" in str(path):
             raise RuntimeError("模拟解析失败")
         from app.infra.parsing.router import ParsedDocument
@@ -303,7 +303,7 @@ def test_upload_clears_duplicate_content_directory(client, project, tmp_path, mo
     import app.infra.tasks.duplicate_sections as mod
 
     # 让 content_extraction 用真实解析（txt 路径 include_images=True 可跑通）
-    def real_parse(path, *, provider="local", include_images=False):
+    def real_parse(path, *, provider="local", mineru_token="", include_images=False):
         from app.infra.parsing.router import parse_document as real
         return real(Path(path), provider=provider, include_images=include_images)
 
@@ -465,3 +465,69 @@ def _wait_for_task(state, task_id, timeout=10.0):
             return task
         time.sleep(0.02)
     return state.tasks.get(task_id)
+
+
+# ------------------------------------------- P2c：分析期解析器必须跟随配置 provider
+
+def test_content_extraction_follows_configured_provider(tmp_path, monkeypatch):
+    """**P2c 评审 B 的 P1 回归**：content 段的重解析跟随 provider，不是硬编码 local。
+
+    上传期走 MinerU、分析期硬编码 local 的后果：`.pptx`/图片这类只有 MinerU 能读的
+    文件会「上传成功、分析整段失败」；`.pdf`/`.docx` 则会因两次用了不同解析器而
+    正文漂移。这里把远端工厂换成假件，断言 content 目录里的正文**来自远端**。
+    """
+    calls: list[str] = []
+
+    class FakeParser:
+        def parse_file(self, path):
+            calls.append(Path(path).name)
+            return "# 远端解析结果\n\n正文\n"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    monkeypatch.setattr("app.infra.parsing.router.build_mineru_parser",
+                        lambda provider, *, token="": FakeParser())
+
+    from tests.parsing_fixtures import build_docx
+
+    docx = build_docx(tmp_path / "bid.docx", blocks=[("p", "本地会读到的正文")])
+    file = {
+        "file_id": docx.stem,
+        "file_name": "bid.docx",
+        "file_path": str(docx),
+        "extension": "docx",
+        "size": docx.stat().st_size,
+        "modified_at": "2026-01-01T00:00:00.000Z",
+    }
+    runner = build_content_extraction(tmp_path, provider="mineru-agent-api",
+                                      mineru_token="tok")
+    output = asyncio.run(runner(SectionRunContext(
+        project_id="p1", section=CONTENT_EXTRACTION, files=[file])))
+
+    assert output.failed is False
+    written = (content_dir_for(tmp_path, "p1") / f"{docx.stem}.md").read_text(
+        encoding="utf-8")
+    assert "远端解析结果" in written
+    assert "本地会读到的正文" not in written
+    assert calls == ["bid.docx"]
+
+
+def test_content_extraction_local_provider_does_not_touch_remote(tmp_path, monkeypatch):
+    """默认 provider=local：远端工厂**不被调用**（默认行为与 P2c 之前一致）。"""
+    def explode(provider, *, token=""):  # pragma: no cover
+        raise AssertionError("local provider 不应构造远端客户端")
+
+    monkeypatch.setattr("app.infra.parsing.router.build_mineru_parser", explode)
+
+    file = _mk_file(tmp_path, "bid.txt", "本地正文。")
+    runner = build_content_extraction(tmp_path)
+    output = asyncio.run(runner(SectionRunContext(
+        project_id="p1", section=CONTENT_EXTRACTION, files=[file])))
+    assert output.failed is False
+    written = (content_dir_for(tmp_path, "p1") / f"{file['file_id']}.md").read_text(
+        encoding="utf-8")
+    assert "本地正文。" in written

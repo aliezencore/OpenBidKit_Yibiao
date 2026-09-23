@@ -403,7 +403,12 @@ async def start_analysis(project_id: str, body: AnalysisRequest | None = None,
     # （P3d T6）已全部替换。
     # 改动最小化——只替换对应键。
     sections = dict(_stub_sections())
-    sections[CONTENT_EXTRACTION] = build_content_extraction(state.settings.data_root)
+    # P2c：content 段的重解析必须跟随**上传时同一个 provider**，否则 MinerU 专属
+    # 格式（pptx/图片）会「上传成功、分析整段失败」（评审 B 的 P1）。
+    sections[CONTENT_EXTRACTION] = build_content_extraction(
+        state.settings.data_root,
+        provider=state.settings.file_parser_provider,
+        mineru_token=state.settings.mineru_token)
     sections[METADATA_EXTRACTION] = build_metadata_runner(state.settings.data_root)
     sections["outline"] = build_outline_runner(state.settings.data_root)
     sections["content"] = build_content_runner(state.settings.data_root)
@@ -506,6 +511,12 @@ async def _ingest_upload(upload: UploadFile, *, project_id: str, role: str,
             source_path=tmp_path, role=role, provider=provider,
             mineru_token=mineru_token)
     except ParsingError as error:
+        # P2c 评审 B 的 P2：失败行只暴露**错误码**（P3a 契约），文案编码在
+        # `file_path` 的 `upload-failed:<code>` 里、不经 HTTP 暴露。MinerU 的
+        # 「请先在设置中填写 MinerU Token」这类**可操作**提示因此会丢；至少落日志，
+        # 让运维/开发者有出口（前端展示失败行属 P4 缺口，见 spec 裁定⑥）。
+        _logger.warning("文件解析失败：role=%s name=%s code=%s message=%s",
+                        role, file_name, error.code, error)
         return _parse_failed_file(project_id=project_id, role=role,
                                   file_name=file_name, payload=payload,
                                   extension=extension, error=error)

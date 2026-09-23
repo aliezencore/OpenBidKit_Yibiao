@@ -512,7 +512,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端跑通 `collect_json_response` 的成功与修复路径；「domain 不 import 框架」护栏生效 | 纯本地 | — | **已完成**（22 提交 / 123 测试） |
 | P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown；`save_uploaded_document()` 落盘正文与原件副本并返回**含 `content_hash` 的 `SavedDocument`**；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **已完成**（85 提交 / 290 测试，与 P2b 合并计数） |
 | P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | **已完成** |
-| P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | **已完成**（2026-09-23，740 测试；计划 `2026-09-23-fastapi-check-service-p2c-mineru.md`，ledger 见 `.superpowers/sdd/2026-09-23-p2c-mineru/`） |
+| P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | **已完成**（2026-09-23，742 测试；计划 `2026-09-23-fastapi-check-service-p2c-mineru.md`，ledger 见 `.superpowers/sdd/2026-09-23-p2c-mineru/`） |
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
@@ -683,6 +683,24 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > zip 用内存构造。**真值全部来自 oracle**（从 `fileService.cjs` 抠出
 > `makeDataId`/`stripMarkdownImages` 直跑）——注意两处反直觉：连续非法字符折叠为
 > **单个** `_`（`投标文件.pdf` → `_.pdf`）、空行折叠是 `\n{3,}`→`\n\n`。
+> ⑧ **分析期解析器必须跟随同一 provider**（评审 B 的 P1，已修）：content 段的
+> 重解析（`R-P3b-1`，不复用上传 markdown）原为硬编码 `provider="local"` → 上传期
+> 走 MinerU 的文件会在分析期「上传成功、整段失败」（`.pptx`/图片本地识别直接抛
+> `unsupported-extension`），`.pdf`/`.docx` 则会因两次解析器不同而正文漂移。
+> `build_content_extraction` 现接收 `provider`/`mineru_token`，由 `POST /analysis`
+> 从 `Settings` 透传；回归用例
+> `test_content_extraction_follows_configured_provider`（假远端件证明分析期真走远端）
+> 与 `test_content_extraction_local_provider_does_not_touch_remote`（默认不变）。
+> ⑨ **`.wps`/`.xls` 两边都不支持**（登记）：参考的 `localSupportedExtensions` 含
+> `.wps`/`.xls`，P2a 的本地支持面只有 6 类（docx/doc/txt/md/pdf/xlsx）——故这两个
+> 扩展名在任何 provider 下都报 `parser-unsupported`（参考会回退本地的 LibreOffice/
+> SheetJS 路径）。这与前端 `accept` 列表（未广告 .wps/.xls）一致，登记为已知缺口。
+> 另登记：远端专属格式的 `format_kind` 兜底为扩展名去点（`pptx`/`png`/`html`），
+> 非标准 kind，DB 与前端只当字符串存显。
+> ⑩ **失败文案的出口**（评审 B 的 P2，已修）：失败行的 HTTP `error` 只给错误码
+> （P3a 契约），MinerU 的可操作提示（如「请先在设置中填写 MinerU Token」）原本
+> 三处皆无出口；现于 `_ingest_upload` 的失败分支落 `_logger.warning`（含 role/
+> 文件名/错误码/文案）。前端展示失败行仍属 P4 缺口。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 

@@ -78,20 +78,29 @@ def _store_docx_assets(data_root: Path | str, project_id: str, docx_path: Path) 
     save_docx_assets(data_root=data_root, project_id=project_id, docx_path=docx_path)
 
 
-def build_content_extraction(data_root: Path | str):
+def build_content_extraction(data_root: Path | str, *, provider: str = "local",
+                             mineru_token: str = ""):
     """构造 `content_extraction` 角色的 runner 闭包。
 
-    闭包捕获 `data_root`（来自 `settings.data_root`），按 `project_id` 在每次
+    闭包捕获 `data_root`（来自 `settings.data_root`）与**解析器选择**
+    （`settings.file_parser_provider` / `mineru_token`），按 `project_id` 在每次
     运行时拼出 content 目录。返回签名即 `SectionRunner`
     （`Callable[[SectionRunContext], Awaitable[SectionOutput]]`）。
+
+    **为什么 provider 必须透传（P2c 评审 B 的 P1）**：上传期按配置走 MinerU 解析，
+    分析期这里若硬编码 `local`，则 `.pptx`/`.png` 这类**只有 MinerU 能读**的文件会
+    「上传成功、分析整段失败」（local 分支的 `detect_file_format` 直接抛
+    `unsupported-extension`）；`.pdf`/`.docx` 虽两边都能读，但正文会与上传时用了
+    不同解析器而漂移。故分析期的重解析必须跟随同一 provider。
 
     行为（对齐 `runContentExtraction` :2302-2354 + R-P3b-1 / R-P3b-4）：
 
     - 输入 = `SectionRunContext.files`（tender + bid 全量，参考 `:2315` 的
       `allFiles`）。逐文件：
-      - `parse_document(Path(file_path), provider="local", include_images=True)`
+      - `parse_document(Path(file_path), provider=<配置>, include_images=True)`
         **经 `asyncio.to_thread`**（参考是 await 的异步解析；同步解析器用
-        to_thread 包一层避免阻塞事件循环，真并发用例依赖它）。
+        to_thread 包一层避免阻塞事件循环，真并发用例依赖它；远端轮询最长
+        600s，更不能在事件循环里跑）。
       - `markdown = parsed.markdown.strip()`（参考 `:2321` `.trim()`）。
       - 写 `data_root/projects/{pid}/duplicate_content/{file_id}.md`
         （utf-8；目录不存在则建）。
@@ -124,7 +133,8 @@ def build_content_extraction(data_root: Path | str):
                 # 注意 parse_document 的 provider/include_images 是 keyword-only。
                 parsed = await asyncio.to_thread(
                     parse_document, Path(file_path),
-                    provider="local", include_images=True)
+                    provider=provider, mineru_token=mineru_token,
+                    include_images=True)
                 markdown = parsed.markdown.strip()
                 content_path = content_dir / f"{file_id}.md"
                 content_path.write_text(markdown, encoding="utf-8", newline="\n")
