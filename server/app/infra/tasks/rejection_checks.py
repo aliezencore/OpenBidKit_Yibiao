@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from app.infra.tasks.rejection_stub import INITIAL_RESULT_MESSAGES
+from app.domain.rejection.logic_check import (
+    build_logic_check_messages,
+    normalize_logic_check_findings,
+)
 from app.domain.rejection.typo_check import (
     build_typo_check_messages,
     normalize_typo_check_findings,
@@ -65,8 +69,10 @@ class RejectionCheckRunner:
             if kind == "typo":
                 ctx.log(f"{TYPO_LABEL}：正在识别错别字候选。")
                 findings = await self._run_typo(project_id, bid_documents, ctx)
+            elif kind == "logic":
+                findings = await self._run_logic(project_id, bid_documents, ctx)
             else:
-                # 占位（P4b-2 后续 / P4b-3 / P4c 逐项替换；编排不动）
+                # 占位（废标项三轮/rolling 在 P4b-2 后续；主体正文属 P4b-3；印章属 P4c）
                 ctx.log(f"{label}（占位）")
             async with lock:
                 completed += 1
@@ -91,6 +97,18 @@ class RejectionCheckRunner:
         self._repo.clear_findings(project_id, "typo")
         if findings:
             self._repo.save_findings(project_id, "typo", findings)
+        return findings
+
+    # ------------------------------------------------------------------ 逻辑谬误
+
+    async def _run_logic(self, project_id: str, bid_documents: list[dict[str, Any]],
+                         ctx: Any) -> list[dict[str, Any]]:
+        payload_result = await self._ai.collect_json_response(
+            build_logic_check_messages(bid_documents))
+        findings = normalize_logic_check_findings(payload_result, bid_documents)
+        self._repo.clear_findings(project_id, "logic")
+        if findings:
+            self._repo.save_findings(project_id, "logic", findings)
         return findings
 
     # ------------------------------------------------------------------ 读盘
