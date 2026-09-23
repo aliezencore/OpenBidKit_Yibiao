@@ -34,7 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await app.state.yibiao.aclose()
 
-    app = FastAPI(title="Yibiao Check Service", lifespan=lifespan)
+    app = FastAPI(title="标书检查工具箱", lifespan=lifespan)
     app.include_router(health.router)
     app.include_router(projects.router)
     app.include_router(tasks.router)

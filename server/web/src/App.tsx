@@ -80,7 +80,7 @@ function AppShell() {
   return (
     <div className="app-shell">
       <header className="app-topbar">
-        <strong className="app-brand">易标投标工具箱</strong>
+        <strong className="app-brand">标书检查工具箱</strong>
         <nav className="app-nav" aria-label="功能导航">
           <span className="app-nav-item is-active">标书查重</span>
           <span className="app-nav-item is-disabled" title="即将推出">废标项检查</span>
