@@ -3,7 +3,7 @@
 //   页面加载发现服务端已有文件时集合锁定（只读），重置后解锁。
 // - 上传 = 两组全量替换（POST /files 恒带两组字段），成功后刷新服务端状态。
 // - 步进：upload ↔ analysis；恢复服务端 step / activeAnalysisTab。
-// - 自动启动（R-P3d3-2，守卫见 lib/autoStart）+ SSE 终态信号 + 1s 轮询
+// - 自动启动（R-P3d3-2，守卫见 shared/autoStart）+ SSE 终态信号 + 1s 轮询
 //   进度（R-P3d3-3，runner 不向 bus 发进度事件，轮询是唯一进度源）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -23,8 +23,8 @@ import type {
   TaskStatus,
   WorkspaceFile,
 } from '../api/types';
-import { shouldAutoStart } from '../lib/autoStart';
-import { terminalStatusOf } from '../lib/taskStatus';
+import { shouldAutoStart } from '../shared/autoStart';
+import { terminalStatusOf } from '../shared/taskStatus';
 import { useToast } from '../ui';
 import AnalysisStep from './AnalysisStep';
 import UploadStep, { fileKey } from './UploadStep';

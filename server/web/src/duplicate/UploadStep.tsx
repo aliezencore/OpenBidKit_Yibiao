@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 import type { WorkspaceFile } from '../api/types';
-import { formatDate, formatFileSize } from '../lib/format';
+import { formatDate, formatFileSize } from '../shared/format';
 
 const ACCEPT = '.doc,.docx,.pdf,.xlsx,.txt,.md';
 

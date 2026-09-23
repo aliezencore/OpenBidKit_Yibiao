@@ -17,7 +17,7 @@ import {
   formatImageLocationSentence,
   progressText,
   statusLabel,
-} from '../lib/format';
+} from '../shared/format';
 import { ProgressBar, useToast } from '../ui';
 
 export const analysisTabs: Array<{ id: DuplicateSectionKey; label: string }> = [
