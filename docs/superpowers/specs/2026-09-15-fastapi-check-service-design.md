@@ -512,7 +512,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | P1 | 平台底座 | `uvicorn` 起得来；`/health` 可用；schema 可幂等迁移；任务引擎能提交 / 取消 / 推进度 / SSE；AI 客户端跑通 `collect_json_response` 的成功与修复路径；「domain 不 import 框架」护栏生效 | 纯本地 | — | **已完成**（22 提交 / 123 测试） |
 | P2a | 本地文档解析 | docx / doc / xlsx / txt / md 与 PDF 产出 markdown；`save_uploaded_document()` 落盘正文与原件副本并返回**含 `content_hash` 的 `SavedDocument`**；`resolve_parser` 三段语义对齐 `resolveFileParser`；结构等价验收（spec §8.5） | 纯本地 | P1 | **已完成**（85 提交 / 290 测试，与 P2b 合并计数） |
 | P2b | 本地图片管线 | 从 docx 解压提取图片资产（含关系表、出现位置、段落级 `section_title`/`nearby_text`）；`resolveImagePlan` 四分决策；Pillow 压缩 / 透传 / 转码；`content_hash` 去重与兄弟共享 | **纯本地** | P1 | **已完成** |
-| P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | 计划待写 |
+| P2c | 在线解析 | MinerU `agent` / `accurate` 两个客户端 + 路由接入（失败回退本地） | 需网络 | P1、P2a | **已完成**（2026-09-23，740 测试；计划 `2026-09-23-fastapi-check-service-p2c-mineru.md`，ledger 见 `.superpowers/sdd/2026-09-23-p2c-mineru/`） |
 | **P3a** | **查重域底座** | 15 张 `duplicate_check_*` 表落库（spec §5.2 裁定 R31）；文件簿记（`save-files` 语义：招标 / 投标按 `role` 入表）；四段状态机（`metadata`/`outline`/`content`/`image`）与 `signature` 幂等骨架；`overallProgress` 等权平均；REST + SSE 可观察四段推进。**四段都跑「零算法」占位实现**，目的是把「上传 → 触发 → 四段走完 → 状态/进度正确 → 幂等 → 换签名作废」这条闭环先钉死 | 纯本地 | P1、P2a | **已完成**（2026-09-18，16 提交 / 456 测试） |
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
@@ -648,6 +648,41 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > ⑩ **dev 代理下 SSE 的缓冲风险**（评审 B P3，运行态登记）：Vite dev
 > proxy 转发 `text/event-stream` 可能被中间层缓冲，终态信号延迟——生产
 > 形态（同进程静态挂载）无此问题，且 1s 轮询兜底保证进度与终态最终一致。
+
+> **P2c 执行期裁定回填（2026-09-23，MinerU 在线解析）**：
+> ① **推翻 P2a 的路由收窄**（R-P2c-2）：P2a 让「请求 MinerU 一律回退本地」
+> （`router.py` 原注释自陈是阶段行为，`test_parsing_router` 两条用例钉住它）。
+> P2c 恢复参考 `resolveFileParser`（fileService.cjs:70-83）语义：请求 provider
+> 的**扩展名**支持表命中 → 就用它；未命中但本地能读 → 回退本地并置
+> `fallback_to_local`；两边都不支持 → `parser-unsupported`。两条 P2a 用例已按
+> 新语义改写（docx/pdf 现在路由到 MinerU），新增 `.txt` 回退、`.html` 仅 accurate
+> 支持、两边都不支持三类用例。
+> ② **判定用扩展名而非 kind**：MinerU 支持的格式（`.pptx`/`.png`/`.html`…）
+> `detect_file_format` 根本不认（只认 6 类），先识别会在路由之前抛
+> `unsupported-extension`（自相矛盾）。故远端分支容错取格式信息，kind 兜底为
+> 扩展名去点、mime 置空——只用于结果记录。local 路径仍走 `detect_file_format`
+> （P2a 校验不变）。
+> ③ **失败不回退本地**：只有「provider 不支持该扩展名」才回退；运行期失败
+> （HTTP 非 2xx / `code != 0` / `state=failed` / 轮询超时）直接抛 `MineruError`，
+> 文案逐字对齐参考（含 HTTP 状态与响应 JSON）。它被 router 的归一化包成
+> `parse-failed` + 「文件解析失败：…」——与参考 `formatImportError`（:133-140）
+> 的包装形态一致。
+> ④ **图片一律剥除**：参考在 `preserveImages=true` 时下载并重写 MinerU 结果的
+> 图片到资产库；新管线的图片来自 docx 资产提取（P2b），P2c 不做远端图片导入，
+> 按 `stripMarkdownImages` 语义剥除（md 图片语法 → `<img>` 标签 → `\n{3,}` 折叠）。
+> **登记缺口**：需要远端图片时单开。
+> ⑤ **解析走线程**（R-P2c-7）：`_ingest_upload` 的解析改 `asyncio.to_thread`——
+> MinerU 轮询最长 600s，直接在事件循环里跑会冻住整个服务（上传/SSE/状态查询全无响应）。
+> ⑥ **失败行只暴露错误码**（登记为 P4 缺口）：`POST /files` 的失败行 HTTP `error`
+> 字段是**错误码**（`parse-failed`/`parser-unsupported`/`unsupported-extension`），
+> 文案编码在 `file_path` 的 `upload-failed:<code>` 里、不经 API 暴露；前端目前也不
+> 渲染失败行。故「MinerU token 未填」这类**可操作**的提示用户看不到——P4 做前端
+> 文件列表时一并解。
+> ⑦ **测试形态**：客户端单测用 `httpx.MockTransport` + 注入 `sleeper`/`now`
+> （虚拟时钟快进，不联网不睡眠），断言请求体/头/URL/轮询次数与顺序、失败与超时分支；
+> zip 用内存构造。**真值全部来自 oracle**（从 `fileService.cjs` 抠出
+> `makeDataId`/`stripMarkdownImages` 直跑）——注意两处反直觉：连续非法字符折叠为
+> **单个** `_`（`投标文件.pdf` → `_.pdf`）、空行折叠是 `\n{3,}`→`\n\n`。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
