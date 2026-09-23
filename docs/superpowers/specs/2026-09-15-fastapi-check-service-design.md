@@ -517,7 +517,7 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 | **P3b** | 查重正文与目录比对 | `runContentExtraction` 接入 P2a 管线；切句口径（`splitContentBlockSentences` / `isInformativeContentSentence` / 600 字截断）；正文去重与招标要求匹配（exact/strict/field/skeleton/near 五级 + `containment/dice/lengthRatio` 三阈值）；目录抽取三来源（catalog/heading/semantic）与分组、`riskFromScore` 风险分级、pairwise 打分权重 | 纯本地 | P3a、P2a | **已完成**（2026-09-21，22 提交 / 519 测试；双评审 PASS WITH NOTES） |
 | **P3c** | 查重图片比对 | `extractImageOccurrences`（目录栈 + 前句上下文）；图片 target 解析（新管线为资产相对路径，替代 `yibiao-asset://`）；按图片字节 hash 跨文件去重与 `occurrence_count`/`locations_json` | 纯本地 | P3a、P2b | **已完成**（2026-09-22，7 提交 / 588 测试；计划 `2026-09-21-fastapi-check-service-p3c-image-compare.md`） |
 | **P3d** | 查重元数据指纹 / 导出 / 前端 | `extractMetadata`（docx rsid、OLE/CFB 属性集、PDF Info+XMP+结构、WPS 信号）；6 工作表 Excel 导出（spec §9.3）；Vite+React 查重页（两步、四段进度、结果区） | 纯本地 | P3a–P3c | **已完成**（2026-09-22，701 测试；P3d-1 元数据指纹 665 测试，计划 `2026-09-22-fastapi-check-service-p3d-metadata.md`；P3d-2 Excel 导出 697 测试，计划 `2026-09-22-fastapi-check-service-p3d2-export.md`；P3d-3 前端查重页计划 `2026-09-22-fastapi-check-service-p3d3-web-duplicate-page.md`，ledger 见 `.superpowers/sdd/2026-09-22-p3d3-web/`） |
-| P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | **进行中**——拆分为 P4a 底座 / P4b 提取与四项检查 / P4c 印章视觉 / P4d 前端三步页+导出 / P4e 迁移导入（计划 `2026-09-23-fastapi-check-service-p4-rejection-check.md`，ledger 见 `.superpowers/sdd/2026-09-23-p4-rejection-check/`）。**P4a 底座已完成**（2026-09-23，837 测试；10 表 schema + 仓储 + 文档导入/状态/主体确认/检查编排四组 API，四项检查为零算法 stub） |
+| P4 | 废标项检查领域 + 检查闭环 | 跑四项检查 → 结果页签 → 导 Excel；含印章视觉检查与 `yibiao.sqlite` 迁移导入 | 本地 + 模型 API | P1、P2a、P2b、P3（复用 API 与前端骨架） | **进行中**——拆分为 P4a 底座 / P4b 提取与四项检查 / P4c 印章视觉 / P4d 前端三步页+导出 / P4e 迁移导入（计划 `2026-09-23-fastapi-check-service-p4-rejection-check.md`，ledger 见 `.superpowers/sdd/2026-09-23-p4-rejection-check/`）。**P4a 底座已完成**（2026-09-23，837 测试；10 表 schema + 仓储 + 文档导入/状态/主体确认/检查编排四组 API，四项检查为零算法 stub）。**P4b-1/2/3 基本完成**（2026-09-23，875 测试；提取链含分段/合并/无结果重跑、错别字含原文位置校验、逻辑谬误、废标项三轮、主体正文滚动状态机——均接真 AI 链；**rolling 变体与印章视觉未搬**，主体检查印章分支留 P4c） |
 
 > **P3a 执行期裁定回填（2026-09-18）**：上表 P3a 描述里「招标 / 投标按 `role` 入表」在执行时被**修正**——参考实现 `replaceFiles` 的第一条语句 `DELETE FROM duplicate_check_files` 无 role 过滤，真实语义是「**tender/bid 两组一次性全量替换**」，且上传需在同一事务内作废四段并重写签名（否则幂等判据会误命中旧结果）。四段当前仍为「零算法」stub；**P3b 起逐段替换真实算法，编排（`DuplicateAnalysisRunner` 的五角色/段级异常隔离/签名守卫）与状态机不动**。
 
@@ -701,6 +701,25 @@ MinerU 在线解析沿用现有两条 API（agent / accurate），用 `httpx` �
 > （P3a 契约），MinerU 的可操作提示（如「请先在设置中填写 MinerU Token」）原本
 > 三处皆无出口；现于 `_ingest_upload` 的失败分支落 `_logger.warning`（含 role/
 > 文件名/错误码/文案）。前端展示失败行仍属 P4 缺口。
+
+> **P4b 执行期裁定回填（2026-09-23，提取与四项检查真实现）**：
+> ① **提取链七层**：`buildTaskPrompt`（markdown 任务追加「整体无结果规则」，常量
+> `MARKDOWN_MISSING_RESULT='未提取到'`）→ `buildTenderContextMessages`（system=
+> `stableSystemPrompt` + user 全文）→ 分段 `splitUserTextByContextLimit`（userTextSplitter.cjs 全文，
+> 围栏感知/边界五档打分/硬切钳制）→ 多段并发 → `mergeSegmentedAiResults`（**合并本身也是一次
+> AI 调用**，七条合并要求逐字）→ markdown 整项无结果**完整重跑一次**。
+> ② **移植偏离（分段器）**：JS 按 UTF-16 码元计长、Python 按码点——BMP（含全部中文）一致，
+> 非 BMP 段界可差 1；代理对保护恒空操作；`Math.round` 用 `floor(x+0.5)`（银行家舍入陷阱）。
+> ③ **normalize 的关键差异**：错别字有**原文位置校验**（wrongText 找不到整条丢弃、去重键含
+> position、摘录 radius=8 避开 HTML 标签）；逻辑谬误**无位置校验**（缺原文填提示语）；
+> 废标项必填四项（bidDocumentId/title/bidEvidence/riskReason）；主体正文 spec §8.4 四道过滤 +
+> §10.1 level 门槛（bidder + 双置信 ≥0.85 → confirmed-mismatch）。
+> ④ **`getBidDocumentIdFromItem` 单文档回退**：只有一个文档时缺 bidDocumentId 的条目回退到它。
+> ⑤ **severity 中文关键词映射**：含「高」→ high、含「低」→ low；type 含「无效」→ invalidBid。
+> ⑥ **AiClient.chat 无 response_format/logTitle**（登记）：markdown 任务无缺口；JSON 任务靠
+> `collect_json_response` 的两轮修复兜底（P1 已迁）。
+> ⑦ **偏离（登记）**：废标项 rolling 变体未搬（超长投标包行为与参考不同）；文档列表与状态
+> 响应不含 markdown 正文；检查前置在端点校验（400 + 逐字文案）。
 
 **P3 为何再拆四个**：参考实现是 2870 行服务 + 987 行 store + 1158 行前端，且四段算法彼此独立（正文切句 / 目录解析 / 图片 hash / 二进制元数据解析互不调用），共用一个编排与状态机。P3a 是那个「共用编排与状态机」，零算法即可端到端验收——先钉死它，后面三段各自纯算法、各自可单独对照参考实现，可执行性最好。
 
