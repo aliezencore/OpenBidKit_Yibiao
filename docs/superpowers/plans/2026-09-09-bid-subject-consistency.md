@@ -4525,7 +4525,7 @@ git log --oneline -16
 - **Step 4 构建**：`npm run build` 退出码 0，仅有既有 chunk 体积警告。
 - **既有无关失败**：`electron/services/knowledgeBaseStore.search.test.cjs` 有 4 个用例失败；`git diff f0931fd..HEAD` 证明该测试与其源文件本次零改动，属既有问题，与本功能无关。
 - **Step 5 手动验收：未执行**。需要人工在 GUI 中逐项确认 spec §15.2 的 10 个场景；且执行本任务时本机 5173 端口已有 dev 会话在运行，其 Electron 主进程启动早于 Task 11/12 的 Main 侧改动，必须先重启 dev 才能验收。
-- **Step 6 记录**：`git status` 干净（仅 `docs/`、`.workbuddy/`、`.inscode/`、`.claude/` 等未跟踪目录）；提交链见上表。
+- **Step 6 记录**：`git status` 干净（仅 `docs/`、`.workbuddy/`、`.claude/` 等未跟踪目录）；提交链见上表。
 
 ## 执行偏差与计划修正
 

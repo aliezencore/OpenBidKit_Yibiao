@@ -60,7 +60,7 @@ oracle：参考实现本身（抠 `buildDuplicateWorkbook` + 传递依赖 eval�
 - **T3 API 接线**：替换 501 → 真实现（400 语义 + xlsx 响应）；e2e：上传+分析 →
   导出 → openpyxl 读回六表断言；空项目/无签名 → 400。
 - **T4 收尾**：全量回归 + spec §15 回填（P3d 行状态更新）+ ledger + memory +
-  提交（InsCode，不推送）+ 双评审。
+  提交（仓库 git 身份，不推送）+ 双评审。
 
 ## 已知空白（登记）
 

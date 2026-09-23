@@ -17,7 +17,7 @@
 - 工作区 `.worktrees/fastapi-check-service`，分支 `fastapi-check-service`（**平铺名，不得含 `/`**）。
 - **不得改动 `client/` 下任何文件**。
 - 在 P2a 之上增量开发；**不得破坏既有 189 个测试**。
-- 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`；**不推送**；按显式路径 `git add`。
+- 提交用仓库自身 git 身份配置；**不推送**；按显式路径 `git add`。
 - `app/domain/**` 禁止 import `fastapi` / `starlette` / `sqlalchemy` / `httpx` / `pydantic` / `sqlite3`（护栏测试强制）。Pillow 只能出现在 `app/infra/parsing/`。
 - **新增依赖仅 `Pillow`。**
 - 验收标准是**结构等价**（spec §8.5 的精神）：资产数量、出现位置、章节上下文、跳过的码要对得上；**不要求**与 Electron 侧的压缩字节逐字节一致。
@@ -262,7 +262,7 @@ Expected: PASS（5 passed）
 
 ```bash
 git add server/pyproject.toml server/app/infra/parsing/docx_assets.py server/tests/parsing_fixtures.py server/tests/test_parsing_docx_assets.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): docx 媒体清单与图片夹具（P2b Task 1）"
+git commit -m "feat(server): docx 媒体清单与图片夹具（P2b Task 1）"
 ```
 
 ---
@@ -410,7 +410,7 @@ Expected: PASS（T2 新增 7 个 → 累计 14 passed）
 
 ```bash
 git add server/app/infra/parsing/docx_assets.py server/tests/test_parsing_docx_assets.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 关系表解析与可见文本提取（P2b Task 2）"
+git commit -m "feat(server): 关系表解析与可见文本提取（P2b Task 2）"
 ```
 
 ---
@@ -677,7 +677,7 @@ Expected: PASS（T3 新增 13 个 → 累计 26 passed）
 
 ```bash
 git add server/app/infra/parsing/docx_assets.py server/tests/test_parsing_docx_assets.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 段落索引与章节上下文提取（P2b Task 3）"
+git commit -m "feat(server): 段落索引与章节上下文提取（P2b Task 3）"
 ```
 
 ---
@@ -998,7 +998,7 @@ Expected: PASS（T4 新增 7 个 → 累计 33 passed）
 
 ```bash
 git add server/app/infra/parsing/docx_assets.py server/tests/test_parsing_docx_assets.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): Drawing/VML 出现位置与资产分类（P2b Task 4）"
+git commit -m "feat(server): Drawing/VML 出现位置与资产分类（P2b Task 4）"
 ```
 
 ---
@@ -1141,7 +1141,7 @@ Expected: 全绿（P2a 的 189 + P2b 新增）
 
 ```bash
 git add server/app/infra/parsing/docx_assets.py server/tests/test_parsing_docx_assets.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): docx 视觉资产提取入口（P2b Task 5）"
+git commit -m "feat(server): docx 视觉资产提取入口（P2b Task 5）"
 ```
 
 ---
@@ -1391,7 +1391,7 @@ Expected: PASS（本文件全部用例；参数化展开后 **34** 项。原稿�
 
 ```bash
 git add server/app/infra/parsing/image_plan.py server/tests/test_image_plan.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 图像格式决策的四分策略与等比缩放（P2b Task 6）"
+git commit -m "feat(server): 图像格式决策的四分策略与等比缩放（P2b Task 6）"
 ```
 
 ---
@@ -1648,7 +1648,7 @@ Expected: PASS（8 passed）
 
 ```bash
 git add server/app/infra/parsing/image_codec.py server/tests/test_image_codec.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): Pillow 压缩/透传/转码，单张失败降级不连坐（P2b Task 7）"
+git commit -m "feat(server): Pillow 压缩/透传/转码，单张失败降级不连坐（P2b Task 7）"
 ```
 
 ---
@@ -1878,7 +1878,7 @@ Expected: 全绿（以实际收集数为准）
 
 ```bash
 git add server/app/infra/parsing/asset_store.py server/app/infra/parsing/service.py server/tests/test_asset_store.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 资产按 content_hash 去重落盘，复用同一道 project_id 守卫（P2b Task 8）"
+git commit -m "feat(server): 资产按 content_hash 去重落盘，复用同一道 project_id 守卫（P2b Task 8）"
 ```
 
 ---

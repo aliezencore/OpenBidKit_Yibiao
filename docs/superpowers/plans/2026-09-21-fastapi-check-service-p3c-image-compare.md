@@ -28,7 +28,7 @@
 
 - 工作区 `.worktrees/fastapi-check-service`，分支 `fastapi-check-service`（**平铺名，不得含 `/`**）。
 - **不得改动 `client/` 下任何文件**。**不得破坏既有 554 个测试**。
-- 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`；**不推送**；按显式路径 `git add`。
+- 提交用仓库自身 git 身份配置；**不推送**；按显式路径 `git add`。
 - `app/domain/**` 禁止 import 框架（护栏测试强制）；I/O 只能在 `app/infra/**`。
 - **逐字文案**：`'正在准备图片比对'` / `'图片比对 {i}/{n}'` / `'图片比对完成'` / `'部分文件图片比对失败'` / 错误回退 `'图片比对失败'`。
 - **进度公式 half-up**：`round((results.length / n) * 85)`，`n == 0` 时取 `85`；终态 `progress = 100`。JS `Math.round` = half-up（用既有的 `_half_up`）。

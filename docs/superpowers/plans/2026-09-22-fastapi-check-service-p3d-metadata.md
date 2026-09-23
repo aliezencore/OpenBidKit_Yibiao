@@ -47,7 +47,7 @@ oracle = 参考实现 `client/electron/services/duplicateCheckService.cjs`（下
   file_id/file_name/status/error)}`。服务器无广播层、持久化即唯一 wire → runner 产出的
   stats 直接按此形状裁剪（R-P3d-9）。
 - W9 测试/环境约束沿用 MEMORY：pytest 以 stdout「N passed」为准；探针铁律（唯一上下文
-  锚点 / 结构保持单行变异 / ast.parse + grep 查残留）；提交身份 InsCode、不推送。
+  锚点 / 结构保持单行变异 / ast.parse + grep 查残留）；提交用仓库自身 git 身份、不推送。
 
 ## 裁定（R-P3d-x）
 

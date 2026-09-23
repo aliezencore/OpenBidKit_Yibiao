@@ -104,7 +104,7 @@
   `web_dist` 挂载 + `tests/test_static_frontend.py`（缺省不炸/存在可服务/
   API 优先）。
 - **T7 收尾**：全量 pytest + vitest + build 冒烟；spec §15 P3d 行回填
-  P3d-3 完成与执行期裁定；ledger + memory + 提交（InsCode，不推送）+
+  P3d-3 完成与执行期裁定；ledger + memory + 提交（仓库 git 身份，不推送）+
   双评审（A=参考页面行为对齐 R7；B=契约消费：multipart 形状/键形/SSE/下载）。
 
 ## 已知空白（登记）

@@ -34,7 +34,7 @@
 - `npm run build` 若被本机 safe-delete 守卫拦截，对命令临时加 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000`，**不要改仓库配置**；既有 chunk 体积警告不算失败。
 - **既有失败测试** `electron/services/knowledgeBaseStore.search.test.cjs` 与本改动无关，**不要修**。
 - 直接在 `main` 上按任务提交，**不建分支、不推送**。提交身份固定：
-  `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "..."`。
+  `git commit -m "..."`。
 
 ## File Structure
 
@@ -362,7 +362,7 @@ Expected: PASS（9 个用例全绿，无告警）
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/utils/imageFormat.cjs client/electron/utils/imageFormat.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 新增图片格式识别与压缩/透传/转码决策纯函数"
+git commit -m "feat: 新增图片格式识别与压缩/透传/转码决策纯函数"
 ```
 
 ---
@@ -652,7 +652,7 @@ cd C:/workspace/OpenBidKit_Yibiao/client && rm -f .tmp-transcoder-check.cjs
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/offscreenImageTranscoder.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 新增离屏 Chromium 图片转码模块（懒创建+复用+空闲销毁）"
+git commit -m "feat: 新增离屏 Chromium 图片转码模块（懒创建+复用+空闲销毁）"
 ```
 
 ---
@@ -1029,7 +1029,7 @@ Expected: `caught=图片读取或压缩失败（scan.emf）：…`、`prepare_er
 cd C:/workspace/OpenBidKit_Yibiao/client && rm -f .tmp-prepare-log-check.cjs
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/utils/aiLog.cjs client/electron/utils/aiLog.test.cjs client/electron/services/aiService.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 补上图片准备阶段的失败日志并保留 JSON 解析的真实错误"
+git commit -m "feat: 补上图片准备阶段的失败日志并保留 JSON 解析的真实错误"
 ```
 
 ---
@@ -1351,7 +1351,7 @@ Expected: 5 行 `OK`、`seal.tiff OK -> code=UNSUPPORTED_IMAGE_FORMAT`、5 行 `
 cd C:/workspace/OpenBidKit_Yibiao/client && rm -f .tmp-dispatch-check.cjs
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/aiService.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 图片按格式三分派（PNG/JPEG 压缩、GIF 透传、BMP/WebP 离屏转码）"
+git commit -m "feat: 图片按格式三分派（PNG/JPEG 压缩、GIF 透传、BMP/WebP 离屏转码）"
 ```
 
 ---
@@ -1860,7 +1860,7 @@ Expected: PASS（既有 6 个用例 + 新增 7 个用例全绿）
 cd client && node --check electron/services/subjectVisionProvider.cjs
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/subjectVisionProvider.cjs client/electron/services/subjectVisionProvider.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 印章视觉检查支持预检跳过、批次降级隔离与去重进度上报"
+git commit -m "feat: 印章视觉检查支持预检跳过、批次降级隔离与去重进度上报"
 ```
 
 ---
@@ -2239,7 +2239,7 @@ Expected: PASS（既有 19 个用例 + 新增 4 个用例全绿）
 cd client && node --check electron/services/subjectCheckTask.cjs && node --check electron/services/rejectionCheckTask.cjs
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/subjectCheckTask.cjs client/electron/services/rejectionCheckTask.cjs client/electron/services/subjectCheckTask.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 印章检查上报去重进度、状态判定与未能识别清单"
+git commit -m "feat: 印章检查上报去重进度、状态判定与未能识别清单"
 ```
 
 ---
@@ -2501,7 +2501,7 @@ Expected: PASS（既有 4 个 + 新增 5 个用例全绿）
 cd client && node --check electron/services/docxVisualAssetExtractor.cjs
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/docxVisualAssetExtractor.cjs client/electron/services/docxVisualAssetExtractor.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "fix: 视觉资产改为按段落提取章节与附近文本"
+git commit -m "fix: 视觉资产改为按段落提取章节与附近文本"
 ```
 
 ---
@@ -2635,7 +2635,7 @@ Expected: PASS（既有 4 个 + 新增 2 个用例全绿）
 cd client && node --check electron/services/checkResultExportService.cjs
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/checkResultExportService.cjs client/electron/services/checkResultExportService.subject.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 导出 Excel 时列出未能识别的图片及其章节位置"
+git commit -m "feat: 导出 Excel 时列出未能识别的图片及其章节位置"
 ```
 
 ---

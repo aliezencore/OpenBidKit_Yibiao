@@ -17,7 +17,7 @@
 - **不得改动 `client/` 下任何文件**（spec §2.2）。
 - 分支名必须**平铺**，不得含 `/`（本机 git 写嵌套引用会删除父目录下的兄弟分支）。
 - 测试命令（Windows，在 `server/` 下执行）：`.venv/Scripts/python.exe -m pytest -q`
-- 提交身份固定：`git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`
+- 提交用仓库自身 git 身份配置（无需额外旗标）
 - **不推送**。
 - `app/domain/**` 内**禁止**出现 `fastapi` / `starlette` / `sqlalchemy` / `httpx` / `pydantic` 的 import（Task 5 的护栏测试会强制这一点）。
 - SQLite 连接必须开启 `journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`。
@@ -164,7 +164,7 @@ Expected: PASS（1 passed）
 
 ```bash
 git add server/pyproject.toml server/app/__init__.py server/app/main.py server/tests/test_health.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): FastAPI 骨架与 /health"
+git commit -m "feat(server): FastAPI 骨架与 /health"
 ```
 
 ---
@@ -290,7 +290,7 @@ Expected: PASS（3 passed）
 
 ```bash
 git add server/app/config.py server/tests/test_config.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 配置层，模型配置走环境变量嵌套"
+git commit -m "feat(server): 配置层，模型配置走环境变量嵌套"
 ```
 
 ---
@@ -612,7 +612,7 @@ Expected: PASS（8 passed）
 
 ```bash
 git add server/app/infra server/tests/test_db_schema.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): SQLite 引擎、核心 schema 与幂等迁移"
+git commit -m "feat(server): SQLite 引擎、核心 schema 与幂等迁移"
 ```
 
 ---
@@ -905,7 +905,7 @@ Expected: PASS（6 passed）
 
 ```bash
 git add server/app/infra/repositories server/tests/test_repositories.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): projects/tasks/task_logs 仓储"
+git commit -m "feat(server): projects/tasks/task_logs 仓储"
 ```
 
 ---
@@ -1090,7 +1090,7 @@ Expected: PASS（4 passed）
 
 ```bash
 git add server/app/domain server/tests/test_domain_boundary.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 领域层 Protocol 与不碰框架的护栏测试"
+git commit -m "feat(server): 领域层 Protocol 与不碰框架的护栏测试"
 ```
 
 ---
@@ -1558,7 +1558,7 @@ Expected: PASS（9 passed）
 
 ```bash
 git add server/app/infra/tasks server/tests/test_task_engine.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 任务引擎，含进度节流与协作式取消"
+git commit -m "feat(server): 任务引擎，含进度节流与协作式取消"
 ```
 
 ---
@@ -1827,7 +1827,7 @@ Expected: PASS（16 passed）
 
 ```bash
 git add server/app/infra/tasks server/tests/test_events.py server/tests/test_task_engine.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 任务并发闸门、事件总线与 SSE 流"
+git commit -m "feat(server): 任务并发闸门、事件总线与 SSE 流"
 ```
 
 ---
@@ -1958,7 +1958,7 @@ Expected: PASS（4 passed）
 
 ```bash
 git add server/app/infra/tasks/cpu.py server/tests/test_cpu_executor.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): CPU 线程池执行器，隔离重活不堵事件循环"
+git commit -m "feat(server): CPU 线程池执行器，隔离重活不堵事件循环"
 ```
 
 ---
@@ -2370,7 +2370,7 @@ Expected: PASS（16 passed）
 
 ```bash
 git add server/app/infra/ai server/tests/test_ai_client.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): AI 客户端、JSON 收集与修复、常开失败日志"
+git commit -m "feat(server): AI 客户端、JSON 收集与修复、常开失败日志"
 ```
 
 ---
@@ -2749,7 +2749,7 @@ kill %1
 
 ```bash
 git add server/app/api server/app/main.py server/tests
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): HTTP API、SSE 端点与应用装配"
+git commit -m "feat(server): HTTP API、SSE 端点与应用装配"
 ```
 
 ---

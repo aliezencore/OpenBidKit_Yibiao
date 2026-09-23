@@ -36,7 +36,7 @@
 - 工作区 `.worktrees/fastapi-check-service`，分支 `fastapi-check-service`（**平铺名，不得含 `/`**）。
 - **不得改动 `client/` 下任何文件**。
 - **不得破坏既有 519 个测试**；尤其 P2a 的解析全部 golden（`include_images=False` 路径）**必须逐字节不变**。
-- 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`；**不推送**；按显式路径 `git add`。
+- 提交用仓库自身 git 身份配置；**不推送**；按显式路径 `git add`。
 - `app/domain/**` 禁止 import 框架（护栏测试强制）；Pillow 只能出现在 `app/infra/parsing/`。
 - **不新增依赖。**
 - 验收是**结构等价**（§8.5）：图片**占位数量与位置**一致；**不要求** target 字符串与参考的 `yibiao-asset://` 相同（§15 的 P3c 行已明示新管线改用资产相对路径）。

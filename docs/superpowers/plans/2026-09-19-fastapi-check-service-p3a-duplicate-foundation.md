@@ -19,7 +19,7 @@
 - 工作区 `.worktrees/fastapi-check-service`，分支 `fastapi-check-service`（**平铺名，不得含 `/`**）。
 - **不得改动 `client/` 下任何文件**。参考实现只读。
 - 在 P1 + P2a 之上增量开发；**不得破坏既有 290 个测试**。
-- 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`；**不推送**；按显式路径 `git add`。
+- 提交用仓库自身 git 身份配置；**不推送**；按显式路径 `git add`。
 - `app/domain/**` 禁止 import `fastapi` / `starlette` / `sqlalchemy` / `httpx` / `pydantic` / `sqlite3`（护栏测试强制）。解析 / 图片库只能出现在 `app/infra/parsing/`。
 - **本计划不新增任何依赖。**
 - 验收标准是**行为对齐**（spec §8.5 的精神），不是逐字节一致。字面量（阈值 / 文案 / 表名列名）必须与参考实现逐字相同的地方，任务里会显式标注「逐字」。
@@ -474,7 +474,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_db_schema.py -q
 
 ```bash
 git add server/app/infra/db/schema.py server/tests/test_db_schema.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): P3a 查重域 13 张表落 schema（project_id 作用域，spec §5.2 裁定 R31）"
+git commit -m "feat(server): P3a 查重域 13 张表落 schema（project_id 作用域，spec §5.2 裁定 R31）"
 ```
 
 ---
@@ -650,7 +650,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_repositories_duplicat
 
 ```bash
 git add server/app/infra/repositories/duplicate.py server/tests/test_repositories_duplicate.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): P3a 查重仓储——15 张表读写 + 未携带保留语义 + load_analysis 形状对齐"
+git commit -m "feat(server): P3a 查重仓储——15 张表读写 + 未携带保留语义 + load_analysis 形状对齐"
 ```
 
 ---
@@ -967,7 +967,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_signature.p
 
 ```bash
 git add server/app/domain/duplicate/ server/tests/test_duplicate_signature.py server/tests/test_duplicate_progress.py server/tests/test_duplicate_state.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): P3a 查重纯 domain——签名/稳定 file_id/四段进度/状态补丁（逐字对齐参考实现）"
+git commit -m "feat(server): P3a 查重纯 domain——签名/稳定 file_id/四段进度/状态补丁（逐字对齐参考实现）"
 ```
 
 ---
@@ -1244,7 +1244,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_duplicate_runner.py -
 
 ```bash
 git add server/app/infra/tasks/duplicate_runner.py server/tests/test_duplicate_runner.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): P3a 四段编排骨架——并行时序/幂等/签名作废（stub 驱动，算法留 P3b-d）"
+git commit -m "feat(server): P3a 四段编排骨架——并行时序/幂等/签名作废（stub 驱动，算法留 P3b-d）"
 ```
 
 ---
@@ -1414,7 +1414,7 @@ cd server && .venv/Scripts/python.exe -m pytest tests/test_api_duplicate_files.p
 
 ```bash
 git add server/app/api/duplicate.py server/app/main.py server/tests/test_api_duplicate_files.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): P3a 查重文件簿记 API——上传/列表/清空/状态/触发分析"
+git commit -m "feat(server): P3a 查重文件簿记 API——上传/列表/清空/状态/触发分析"
 ```
 
 ---
@@ -1560,7 +1560,7 @@ cd server && .venv/Scripts/python.exe -m pytest -q
 
 ```bash
 git add -A server/app server/tests
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): P3a 端到端闭环验收（上传→分析→四段 success→幂等→换文件作废）"
+git commit -m "feat(server): P3a 端到端闭环验收（上传→分析→四段 success→幂等→换文件作废）"
 ```
 
 ---
@@ -1587,7 +1587,7 @@ cd server && .venv/Scripts/python.exe -m pytest -q
 
 ```bash
 git add docs/
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "docs(server): P3a 完成回填 spec §15 与本计划勾选"
+git commit -m "docs(server): P3a 完成回填 spec §15 与本计划勾选"
 ```
 
 ---

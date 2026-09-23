@@ -17,7 +17,7 @@
 - 工作区 `.worktrees/fastapi-check-service`，分支 `fastapi-check-service`（**平铺名，不得含 `/`**）。
 - **不得改动 `client/` 下任何文件**。
 - 在 P1 之上增量开发；**不得破坏既有 123 个测试**。
-- 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit`；**不推送**；按显式路径 `git add`。
+- 提交用仓库自身 git 身份配置；**不推送**；按显式路径 `git add`。
 - `app/domain/**` 禁止 import `fastapi` / `starlette` / `sqlalchemy` / `httpx` / `pydantic` / `sqlite3`（护栏测试强制；解析库全部放在 `app/infra/parsing/`）。
 - **验收标准是结构等价（spec §8.5）**：标题层级、表格数量与行列、段落数量 ±10%、无 XML 碎片、无 base64 泄漏。**不要求与 Electron 输出逐字节一致**。
 - 主流程**不得网络请求**；MinerU 属 P2c。
@@ -274,7 +274,7 @@ Expected: PASS（7 passed）
 
 ```bash
 git add server/pyproject.toml server/app/domain/shared/errors.py server/app/infra/parsing server/tests/test_parsing_format.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 文件格式识别与解析错误类型（P2a Task 1）"
+git commit -m "feat(server): 文件格式识别与解析错误类型（P2a Task 1）"
 ```
 
 ---
@@ -388,7 +388,7 @@ Expected: PASS（5 passed）。若 GBK 用例仍不稳，**继续加长 `GBK_SAM
 
 ```bash
 git add server/app/infra/parsing/encoding.py server/tests/test_parsing_encoding.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 编码探测直读 txt/md（P2a Task 2）"
+git commit -m "feat(server): 编码探测直读 txt/md（P2a Task 2）"
 ```
 
 ---
@@ -531,7 +531,7 @@ Expected: PASS（4 passed）
 
 ```bash
 git add server/app/infra/parsing/spreadsheet.py server/tests/test_parsing_spreadsheet.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): xlsx 转 markdown 表格（P2a Task 3）"
+git commit -m "feat(server): xlsx 转 markdown 表格（P2a Task 3）"
 ```
 
 ---
@@ -840,7 +840,7 @@ Expected: PASS（10 passed）。若 mammoth 对 `add_heading` 产出的标题映
 
 ```bash
 git add server/app/infra/parsing/docx_html.py server/app/infra/parsing/markdown.py server/app/infra/parsing/docx.py server/tests/parsing_fixtures.py server/tests/test_parsing_docx.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): docx 转 markdown（mammoth+markdownify+表格占位）（P2a Task 4）"
+git commit -m "feat(server): docx 转 markdown（mammoth+markdownify+表格占位）（P2a Task 4）"
 ```
 
 ---
@@ -967,7 +967,7 @@ Expected: PASS（2 passed——本机无 LibreOffice，`find_soffice()` 返回 N
 
 ```bash
 git add server/app/infra/parsing/legacy_doc.py server/tests/test_parsing_legacy_doc.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): .doc 经 LibreOffice 转 docx（P2a Task 5）"
+git commit -m "feat(server): .doc 经 LibreOffice 转 docx（P2a Task 5）"
 ```
 
 ---
@@ -1127,7 +1127,7 @@ Expected: PASS（5 passed）。若 `insert_text` 造出的样本让 `find_tables
 
 ```bash
 git add server/pyproject.toml server/app/infra/parsing/pdf.py server/tests/test_parsing_pdf.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): PDF 转 markdown（PyMuPDF）（P2a Task 6）"
+git commit -m "feat(server): PDF 转 markdown（PyMuPDF）（P2a Task 6）"
 ```
 
 ---
@@ -1350,7 +1350,7 @@ Expected: PASS（7 passed）
 
 ```bash
 git add server/app/infra/parsing/router.py server/tests/test_parsing_router.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 解析路由与统一入口 parse_document（P2a Task 7）"
+git commit -m "feat(server): 解析路由与统一入口 parse_document（P2a Task 7）"
 ```
 
 ---
@@ -1636,7 +1636,7 @@ Expected: PASS（8 passed）
 
 ```bash
 git add server/app/infra/parsing/service.py server/tests/test_parsing_service.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat(server): 解析落盘服务，写入正文与原件并返回值对象（P2a Task 8）"
+git commit -m "feat(server): 解析落盘服务，写入正文与原件并返回值对象（P2a Task 8）"
 ```
 
 ---
@@ -1851,7 +1851,7 @@ Expected: 全绿（177 + 6 = 183）
 
 ```bash
 git add server/tests/test_parsing_structure.py
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "test(server): 六类格式的结构等价验收（P2a Task 9）"
+git commit -m "test(server): 六类格式的结构等价验收（P2a Task 9）"
 ```
 
 ---

@@ -19,7 +19,7 @@
 - 用户可见文案用中文；提示走 `shared/ui/ToastProvider`，不要用 `alert`。
 - 改动 `.cjs` 后先 `node --check <file>`；改 Renderer 后 `cd client; npm run build`。
 - `npm run build` 中既有 chunk 体积警告不算失败。
-- 本仓库直接在 `main` 上按任务提交，不建 worktree；提交身份用 `-c user.name="InsCode" -c user.email="noreply@inscode.net"`，且**不推送**。
+- 本仓库直接在 `main` 上按任务提交，不建 worktree；提交用仓库自身的 git 身份配置（不额外注入工具身份），且**不推送**。
 - 涉及 `better-sqlite3`（Electron ABI 原生模块）的测试**不能用普通 `node --test`**，必须用 ABI 匹配的 Electron 以 Node 模式运行：`cd client && ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe --test <file>`。纯 JS 的测试仍用普通 `node --test`。
 
 ---
@@ -225,7 +225,7 @@ Expected: PASS（含原有 15 个用例与新增 4 个）
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/subjectCheckTask.cjs client/electron/services/subjectCheckTask.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 主体识别支持收窄扫描范围"
+git commit -m "feat: 主体识别支持收窄扫描范围"
 ```
 
 ---
@@ -510,7 +510,7 @@ Expected: PASS（5 个用例全绿）
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/services/rejectionCheckStore.cjs client/electron/services/rejectionCheckStore.subject.test.cjs
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "fix: 主体档案补丁落库并持久化识别范围"
+git commit -m "fix: 主体档案补丁落库并持久化识别范围"
 ```
 
 ---
@@ -582,7 +582,7 @@ Expected: `SYNTAX` 无错误；build 通过（允许既有 chunk 体积警告）
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/electron/ipc/rejectionCheckIpc.cjs client/electron/preload.cjs client/src/shared/types/ipc.ts
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 主体识别 IPC 与 preload 支持识别范围"
+git commit -m "feat: 主体识别 IPC 与 preload 支持识别范围"
 ```
 
 ---
@@ -950,7 +950,7 @@ Expected: 通过（允许既有 chunk 体积警告）
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/src/features/rejection-check/types.ts client/src/features/rejection-check/components/SubjectConfirmDialog.tsx client/src/features/rejection-check/pages/RejectionCheckPage.tsx client/src/styles/feature-rejection-check.css
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 主体确认弹窗新增可选识别区"
+git commit -m "feat: 主体确认弹窗新增可选识别区"
 ```
 
 ---
@@ -1123,7 +1123,7 @@ Expected: 无输出（旧文案与旧 prop 已全部清除）
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add client/src/features/rejection-check/pages/RejectionCheckPage.tsx
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "feat: 主体确认改为手工优先并支持指定识别范围"
+git commit -m "feat: 主体确认改为手工优先并支持指定识别范围"
 ```
 
 ---
@@ -1188,7 +1188,7 @@ Expected: 冒烟成功；build 通过
 ```bash
 cd C:/workspace/OpenBidKit_Yibiao
 git add docs/superpowers/plans/2026-09-10-subject-confirm-optimization.md
-git -c user.name="InsCode" -c user.email="noreply@inscode.net" commit -m "docs: 补充主体确认优化手动验收清单"
+git commit -m "docs: 补充主体确认优化手动验收清单"
 ```
 
 ## 手动验收清单

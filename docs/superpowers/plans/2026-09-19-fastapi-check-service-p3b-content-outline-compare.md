@@ -27,7 +27,7 @@
 - **不得改动 `client/` 下任何文件。**
 - 当前基线 **456 passed**（P3a 终态）。每任务完成后全量数字 = 456 + 累计新增，零回归；pytest 退出码被 shim 改写，只读 stdout 的 `N passed`。
 - `app/domain/**` 禁止 import fastapi/starlette/sqlalchemy/httpx/pydantic/sqlite3（护栏测试强制）。
-- 提交身份 `git -c user.name="InsCode" -c user.email="noreply@inscode.net"`；**不推送**；按显式路径 `git add`。
+- 提交用仓库自身 git 身份配置；**不推送**；按显式路径 `git add`。
 - 验收标准是**行为对齐**：阈值、文案、公式、排序键必须与参考实现**逐字**一致（下文标「逐字」处）；结构等价处（文件路径形状等）允许偏离但必须登记。
 - 全量测试命令：`cd server && CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000 .venv/Scripts/python.exe -m pytest -q`。Bash 先 `export PATH="/c/Program Files/Git/usr/bin:$PATH"`。一次性脚本写 worktree 内跑完即删。
 - **变异探针纪律**：每任务探针变异后必须 `git -C <worktree 绝对路径> diff --exit-code` 确认还原（防 cwd 漂移假 EXIT=0）；对新增/修改的每个模块级符号做 `grep -c "^def <name>"`（或 `^class`）唯一性自检（本仓两次重复定义事故的硬要求）。
