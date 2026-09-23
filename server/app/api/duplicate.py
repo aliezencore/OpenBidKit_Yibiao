@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import tempfile
@@ -181,6 +182,9 @@ async def upload_files(
     bid = _strip_empty_uploads(bid)
 
     data_root = Path(state.settings.data_root)
+    # P2c：provider 与 token 走配置（默认 local = 既有行为不变）。
+    parser_provider = state.settings.file_parser_provider
+    mineru_token = state.settings.mineru_token
     tender_inputs: list[DuplicateFileInput] = []
     bid_inputs: list[DuplicateFileInput] = []
     # 本次请求**已落盘**的产物（`markdown_path` / `source_path`）。异常路径靠它
@@ -190,12 +194,16 @@ async def upload_files(
         for upload in tender or []:
             item = await _ingest_upload(upload, project_id=project_id,
                                         role=_GROUP_TENDER, data_root=data_root,
+                                        provider=parser_provider,
+                                        mineru_token=mineru_token,
                                         saved_paths=saved_paths)
             if item is not None:
                 tender_inputs.append(item)
         for upload in bid or []:
             item = await _ingest_upload(upload, project_id=project_id,
                                         role=_GROUP_BID, data_root=data_root,
+                                        provider=parser_provider,
+                                        mineru_token=mineru_token,
                                         saved_paths=saved_paths)
             if item is not None:
                 bid_inputs.append(item)
@@ -464,7 +472,8 @@ def export_analysis(project_id: str,
 
 
 async def _ingest_upload(upload: UploadFile, *, project_id: str, role: str,
-                         data_root: Path,
+                         data_root: Path, provider: str = "local",
+                         mineru_token: str = "",
                          saved_paths: list[str] | None = None) -> DuplicateFileInput | None:
     """把一次上传落盘成一个 `DuplicateFileInput`。
 
@@ -489,9 +498,13 @@ async def _ingest_upload(upload: UploadFile, *, project_id: str, role: str,
     tmp_path = Path(tmp_dir) / file_name
     try:
         tmp_path.write_bytes(payload)
-        saved = save_uploaded_document(
+        # R-P2c-7：解析走线程。本地解析也能受益，**远端（MinerU）轮询最长 10 分钟**
+        # ——直接在事件循环里跑会把整个服务冻住（上传、SSE、状态查询全部无响应）。
+        saved = await asyncio.to_thread(
+            save_uploaded_document,
             data_root=data_root, project_id=project_id,
-            source_path=tmp_path, role=role, provider="local")
+            source_path=tmp_path, role=role, provider=provider,
+            mineru_token=mineru_token)
     except ParsingError as error:
         return _parse_failed_file(project_id=project_id, role=role,
                                   file_name=file_name, payload=payload,

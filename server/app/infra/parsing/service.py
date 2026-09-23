@@ -40,6 +40,7 @@ def save_uploaded_document(
     role: str,
     source: str = "upload",
     provider: str = "local",
+    mineru_token: str = "",
 ) -> SavedDocument:
     """解析 → 落盘 markdown → 复制原件 → 返回值对象。**不写数据库**（裁定 R24）。
 
@@ -52,7 +53,8 @@ def save_uploaded_document(
     source_path = Path(source_path)
 
     # 1) 解析（失败即抛，此时尚未写任何文件）
-    parsed = parse_document(source_path, provider=provider)
+    parsed = parse_document(source_path, provider=provider,
+                            mineru_token=mineru_token)
 
     # 2) 生成 id 与目标路径
     document_id = uuid.uuid4().hex[:12]

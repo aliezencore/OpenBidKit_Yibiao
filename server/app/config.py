@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,6 +37,11 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
     # 静态前端目录（方案 A「路由 + 静态前端」）；None = 缺省定位 `server/web/dist`。
     web_dist: Path | None = None
+    # P2c：解析器选择（对齐参考 `config.components.file_parser.provider`）与 MinerU token。
+    # 默认 `local` = 既有行为不变；选 MinerU 后仍会在「该 provider 不支持该扩展名」时
+    # 回退本地（`resolve_parser`）。Literal 让拼错的 provider 在启动期就失败。
+    file_parser_provider: Literal["local", "mineru-agent-api", "mineru-accurate-api"] = "local"
+    mineru_token: str = ""
 
     @property
     def db_path(self) -> Path:

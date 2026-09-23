@@ -1,6 +1,8 @@
 import pytest
 
 from app.infra.parsing.format import detect_file_format
+from app.infra.parsing.mineru import PARSER_LABELS
+from app.infra.parsing.mineru_common import MineruError
 from app.infra.parsing.router import ParsedDocument, parse_document, resolve_parser
 from tests.parsing_fixtures import build_docx
 
@@ -11,35 +13,131 @@ def test_local_provider_supports_docx(tmp_path):
     assert (decision.provider, decision.supported, decision.fallback_to_local) == ("local", True, False)
 
 
-def test_mineru_falls_back_to_local_for_docx(tmp_path):
+def test_mineru_agent_supports_docx_no_fallback(tmp_path):
+    """P2c 恢复参考语义：`.docx` 在 agent 的支持表里 → **就用远端**，不回退。
+
+    （P2a 曾阶段性收窄为「MinerU 一律回退本地」，见计划
+    `2026-09-23-...-p2c-mineru.md` 的 R-P2c-2。）
+    """
     p = build_docx(tmp_path / "a.docx", blocks=[("p", "正文")])
     decision = resolve_parser(p, provider="mineru-agent-api")
-    assert decision.provider == "local"
-    assert decision.fallback_to_local is True
+    assert (decision.provider, decision.supported, decision.fallback_to_local) == (
+        "mineru-agent-api", True, False)
 
 
-def test_mineru_falls_back_to_local_for_pdf(tmp_path):
-    """裁定 P2a 终审 F2：mineru + pdf 不再「声明支持又拒绝」，而是回退本地并成功解析。
-
-    原代码里 `mineru_supports` 让 resolve_parser 给 pdf+mineru 返回 supported=True，
-    而 parse_document 的 else 分支却又抛 not-implemented——自相矛盾。移除特例后，
-    mineru 一律回退本地（本地支持 pdf），决议与执行一致。
-    """
-    import fitz
-
+def test_mineru_agent_supports_pdf_no_fallback(tmp_path):
+    """`.pdf` 同属 MinerU 支持表（fileService.cjs:17-19），路由到远端。"""
     p = tmp_path / "a.pdf"
-    doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "body text", fontsize=12)
-    doc.save(p)
-    doc.close()
-
+    p.write_bytes(b"%PDF-1.4\n%fake\n")
     decision = resolve_parser(p, provider="mineru-agent-api")
-    assert (decision.provider, decision.supported, decision.fallback_to_local) == ("local", True, True)
+    assert (decision.provider, decision.supported, decision.fallback_to_local) == (
+        "mineru-agent-api", True, False)
 
+
+def test_mineru_falls_back_to_local_for_txt(tmp_path):
+    """非 agent/accurate 支持表的扩展名但本地能读（`.txt`）→ 回退本地。"""
+    p = tmp_path / "a.txt"
+    p.write_text("正文内容", encoding="utf-8")
+    decision = resolve_parser(p, provider="mineru-agent-api")
+    assert (decision.provider, decision.supported, decision.fallback_to_local) == (
+        "local", True, True)
     result = parse_document(p, provider="mineru-agent-api")
-    assert result.format_kind == "pdf"
     assert result.parser_label == "local"
-    assert "body text" in result.markdown
+    assert "正文内容" in result.markdown
+
+
+def test_accurate_supports_html_but_agent_does_not(tmp_path):
+    """`.html` 只在 accurate 表里（fileService.cjs:20-22）。"""
+    p = tmp_path / "a.html"
+    p.write_text("<html></html>", encoding="utf-8")
+    accurate = resolve_parser(p, provider="mineru-accurate-api")
+    assert (accurate.provider, accurate.supported, accurate.fallback_to_local) == (
+        "mineru-accurate-api", True, False)
+
+    agent = resolve_parser(p, provider="mineru-agent-api")
+    assert (agent.provider, agent.supported) == ("mineru-agent-api", False)
+
+
+def test_unsupported_by_both_raises_parser_unsupported(tmp_path):
+    from app.domain.shared.errors import ParsingError
+
+    p = tmp_path / "a.html"
+    p.write_text("<html></html>", encoding="utf-8")
+    with pytest.raises(ParsingError) as info:
+        parse_document(p, provider="mineru-agent-api")
+    assert info.value.code == "parser-unsupported"
+
+
+class _FakeRemote:
+    """假远端解析器（P2c 注入点）：记录调用并回固定 markdown。"""
+
+    def __init__(self, markdown: str = "# 远端正文\n", error: Exception | None = None):
+        self.markdown = markdown
+        self.error = error
+        self.calls: list[str] = []
+        self.closed = False
+
+    def parse_file(self, path):
+        self.calls.append(str(path))
+        if self.error is not None:
+            raise self.error
+        return self.markdown
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_routes_to_remote_parser_when_provider_supports(tmp_path):
+    """请求 MinerU 且格式受支持 → 走远端（本地解析器不参与）。"""
+    p = build_docx(tmp_path / "a.docx", blocks=[("p", "本地正文")])
+    fake = _FakeRemote()
+    result = parse_document(p, provider="mineru-agent-api", remote_parser=fake)
+    assert result.markdown == "# 远端正文\n"
+    assert result.parser_label == "mineru-agent-api"
+    assert result.format_kind == "docx"
+    assert fake.calls == [str(p)]
+
+
+def test_fallback_to_local_does_not_touch_remote_parser(tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_text("本地内容", encoding="utf-8")
+    fake = _FakeRemote()
+    result = parse_document(p, provider="mineru-agent-api", remote_parser=fake)
+    assert fake.calls == []
+    assert result.parser_label == "local"
+    assert "本地内容" in result.markdown
+
+
+def test_remote_failure_is_wrapped_like_reference(tmp_path):
+    """远端失败包成 `parse-failed`，文案前缀与参考 formatImportError 一致。"""
+    from app.domain.shared.errors import ParsingError
+
+    p = build_docx(tmp_path / "a.docx", blocks=[("p", "正文")])
+    fake = _FakeRemote(error=MineruError("申请 MinerU-Agent 上传链接失败：HTTP 400，{}"))
+    with pytest.raises(ParsingError) as info:
+        parse_document(p, provider="mineru-agent-api", remote_parser=fake)
+    assert info.value.code == "parse-failed"
+    assert str(info.value).startswith(
+        "文件解析失败：申请 MinerU-Agent 上传链接失败：HTTP 400，")
+
+
+def test_remote_only_format_gets_extension_kind(tmp_path):
+    """本地识别不了的远端专属格式（`.pptx`）也能走通，kind 兜底为扩展名去点。"""
+    p = tmp_path / "a.pptx"
+    p.write_bytes(b"PK\x03\x04fake")
+    fake = _FakeRemote("# 幻灯片\n")
+    result = parse_document(p, provider="mineru-agent-api", remote_parser=fake)
+    assert result.format_kind == "pptx"
+    assert result.extension == ".pptx"
+    assert result.markdown == "# 幻灯片\n"
+
+
+def test_parser_labels_are_reference_verbatim():
+    assert PARSER_LABELS == {
+        "local": "本地解析",
+        "mineru-accurate-api": "MinerU 精准解析 API",
+        "mineru-agent-api": "MinerU-Agent 轻量解析 API",
+    }
 
 
 def test_unsupported_extension_raises(tmp_path):
