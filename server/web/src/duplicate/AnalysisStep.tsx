@@ -132,7 +132,7 @@ function MetadataPane({
       {!analysis && (
         <div className="analysis-empty">
           <strong>等待启动元数据分析</strong>
-          <p>进入查重结果后，会自动并发执行正文内容提取和投标文件元数据提取。</p>
+          <p>首次进入查重结果后，会自动并发执行正文内容提取和投标文件元数据提取。</p>
         </div>
       )}
 
@@ -206,6 +206,16 @@ function OutlinePane({
   const duplicateGroups = analysis?.duplicateGroups ?? [];
   const { currentPage, pageItems, setPage } = usePaged(duplicateGroups, 50);
   const successfulCount = analysis?.files?.filter((file) => file.status === 'success').length ?? 0;
+
+  // 参考 :293-295：analysis 缺席 = 尚未启动该段，给「等待」态而非「未发现」
+  if (!analysis) {
+    return (
+      <div className="analysis-empty">
+        <strong>等待目录分析</strong>
+        <p>元数据提取完成后会自动开始目录分析。</p>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -292,6 +302,16 @@ function ContentPane({
   const duplicateSentences = analysis?.duplicateSentences ?? [];
   const { currentPage, pageItems, setPage } = usePaged(duplicateSentences, 50);
 
+  // 参考 :371-373
+  if (!analysis) {
+    return (
+      <div className="analysis-empty">
+        <strong>等待正文比对</strong>
+        <p>正文内容提取完成后会自动开始句子级比对。</p>
+      </div>
+    );
+  }
+
   return (
     <div>
       <DuplicateFileCodeBar files={bidFiles} />
@@ -369,6 +389,16 @@ function ImagePane({
   const labelMap = useMemo(() => buildFileLabelMap(bidFiles), [bidFiles]);
   const duplicateImages = analysis?.duplicateImages ?? [];
   const { currentPage, pageItems, setPage } = usePaged(duplicateImages, 24);
+
+  // 参考 :443-445
+  if (!analysis) {
+    return (
+      <div className="analysis-empty">
+        <strong>等待图片比对</strong>
+        <p>正文内容提取完成后会自动按图片 hash 比对。</p>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -525,6 +555,8 @@ export default function AnalysisStep({
               className={`duplicate-analysis-tab${isActive ? ' is-active' : ''} is-${status}`}
               role="tab"
               aria-selected={isActive}
+              id={`duplicate-analysis-tab-${item.id}`}
+              aria-controls={`duplicate-analysis-panel-${item.id}`}
               onClick={() => onTabChange(item.id)}
             >
               <span className="duplicate-analysis-tab-main">
@@ -542,7 +574,8 @@ export default function AnalysisStep({
       <div
         className="duplicate-analysis-content"
         role="tabpanel"
-        aria-label={`${analysisTabs.find((item) => item.id === activeTab)?.label ?? ''}结果`}
+        id={`duplicate-analysis-panel-${activeTab}`}
+        aria-labelledby={`duplicate-analysis-tab-${activeTab}`}
       >
         {activeTab === 'metadata' && (
           <MetadataPane analysis={metadata} bidFiles={serverState?.bidFiles ?? []} />

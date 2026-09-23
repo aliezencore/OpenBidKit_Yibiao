@@ -184,7 +184,9 @@ export interface DuplicateState {
 
 // -------------------------------------------------------------------- tasks
 
-export type TaskStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
+/** 任务状态取值 = 服务端 engine 实际发布的全集（含重启恢复的 interrupted）。 */
+export type TaskStatus =
+  | 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted';
 
 /** GET /projects/{pid}/tasks 的行（tasks 表全列投影）。 */
 export interface TaskRow {

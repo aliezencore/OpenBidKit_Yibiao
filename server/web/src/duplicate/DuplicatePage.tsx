@@ -24,14 +24,13 @@ import type {
   WorkspaceFile,
 } from '../api/types';
 import { shouldAutoStart } from '../lib/autoStart';
+import { terminalStatusOf } from '../lib/taskStatus';
 import { useToast } from '../ui';
 import AnalysisStep from './AnalysisStep';
 import UploadStep, { fileKey } from './UploadStep';
 
 type Step = 'upload' | 'analysis';
 const STEPS: Step[] = ['upload', 'analysis'];
-
-const TERMINAL_TASK_STATUSES: ReadonlyArray<TaskStatus> = ['success', 'failed', 'cancelled'];
 
 export default function DuplicatePage({ projectId }: { projectId: string }) {
   const { showToast } = useToast();
@@ -127,10 +126,12 @@ export default function DuplicatePage({ projectId }: { projectId: string }) {
     setTaskId(null);
     setStarting(false);
     void refreshState().then(() => {
-      if (status === 'failed') {
+      if (status === 'error') {
         showToast(error ? `查重分析任务失败：${error}` : '查重分析任务失败', 'error');
       } else if (status === 'cancelled') {
         showToast('查重分析任务已取消', 'info');
+      } else if (status === 'interrupted') {
+        showToast('查重分析任务已中断，请重新查重', 'info');
       }
     }).catch(() => undefined);
   }, [refreshState, showToast]);
@@ -140,7 +141,7 @@ export default function DuplicatePage({ projectId }: { projectId: string }) {
     if (!taskId) return;
     const unsubscribe = subscribeTaskEvents(taskId, (event) => {
       if (event.type !== 'status') return;
-      const status = TERMINAL_TASK_STATUSES.find((item) => item === event.status);
+      const status = terminalStatusOf(event.status);
       if (status) handleTaskTerminal(status, event.error);
     });
     return unsubscribe;
@@ -154,7 +155,7 @@ export default function DuplicatePage({ projectId }: { projectId: string }) {
       if (taskId) {
         void getTask(taskId)
           .then((task) => {
-            const status = TERMINAL_TASK_STATUSES.find((item) => item === task.status);
+            const status = terminalStatusOf(task.status);
             if (status) handleTaskTerminal(status, task.error);
           })
           .catch(() => undefined);
@@ -224,7 +225,9 @@ export default function DuplicatePage({ projectId }: { projectId: string }) {
       seen.add(key);
       fresh.push(file);
     }
-    if (skipped > 0) showToast('已跳过重复选择的文件', 'info');
+    if (skipped > 0) {
+      showToast(`已跳过重复选择的${group === 'tender' ? '招标' : '投标'}文件`, 'info');
+    }
     if (fresh.length === 0) return;
     void persist(
       group,
@@ -355,7 +358,7 @@ export default function DuplicatePage({ projectId }: { projectId: string }) {
           className="secondary-action"
           onClick={() => setStep('upload')}
           disabled={step === 'upload'}
-          title={step === 'upload' ? '当前已经是第一步' : '回到选择标书'}
+          title={step === 'upload' ? '当前已经是第一步' : '返回选择标书'}
         >
           上一步
         </button>

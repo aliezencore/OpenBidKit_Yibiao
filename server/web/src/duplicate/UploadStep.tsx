@@ -69,11 +69,13 @@ interface UploadRowProps {
   emptyTitle: string;
   emptyHint: string;
   selectLabel: string;
+  emptySelectLabel: string;
 }
 
 function UploadRow({
   index, title, note, hydratedFiles, sessionFiles, collectionLocked,
   busy, running, onSelect, onRemove, emptyTitle, emptyHint, selectLabel,
+  emptySelectLabel,
 }: UploadRowProps) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -117,7 +119,7 @@ function UploadRow({
           onClick={() => inputRef.current?.click()}
           disabled={disabled}
         >
-          {busy ? '上传中…' : sessionFiles.length ? '继续上传' : selectLabel}
+          {busy ? '选择中...' : sessionFiles.length ? '继续上传' : selectLabel}
         </button>
         <input
           ref={inputRef}
@@ -154,6 +156,14 @@ function UploadRow({
         <div className="upload-empty">
           <strong>{emptyTitle}</strong>
           <p>{emptyHint}</p>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => inputRef.current?.click()}
+            disabled={disabled}
+          >
+            {emptySelectLabel}
+          </button>
         </div>
       )}
       {collectionLocked && hydratedFiles.length > 0 && (
@@ -251,6 +261,7 @@ export default function UploadStep({
           emptyTitle="等待招标文件"
           emptyHint="可选。上传后，多份投标文件引用招标文件中的内容不计入重复。"
           selectLabel="上传"
+          emptySelectLabel="选择招标文件"
         />
 
         <UploadRow
@@ -267,6 +278,7 @@ export default function UploadStep({
           emptyTitle="等待投标文件"
           emptyHint="至少上传两份投标文件，用于互相比对重复内容。"
           selectLabel="上传"
+          emptySelectLabel="选择投标文件"
         />
       </section>
 
