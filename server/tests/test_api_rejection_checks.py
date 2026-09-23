@@ -26,6 +26,7 @@ def env(tmp_path):
     settings = Settings(_env_file=None, data_root=tmp_path / "data")
     with TestClient(create_app(settings)) as client:
         project = client.post("/projects", json={"name": "编排"}).json()["id"]
+        _inject_fake_ai(client)
         yield client, project, tmp_path
 
 
@@ -179,3 +180,15 @@ def test_identify_then_confirm_then_subject_check(env):
     assert result["status"] == "success"
     # 占位 runner 写入的印章状态（参考 :1670 的初始值语义）
     assert result["stats"]["visionStatus"] in ("pending", "disabled")
+
+
+def _inject_fake_ai(client):
+    """提取已接真实链（P4b-1）：测试注入 AI 假件（spec §11.3）。
+
+    **必须在 yield 之前调用**（fixture 体内），否则测试期间还是真 AiClient。
+    """
+    from tests.ai_fakes import ScriptedAI
+
+    client.app.state.yibiao.ai = ScriptedAI(
+        ["# 招标文件中明确提到的\n\n## 无效投标\n- 资质不符"])
+    return client

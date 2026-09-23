@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # 回退本地（`resolve_parser`）。Literal 让拼错的 provider 在启动期就失败。
     file_parser_provider: Literal["local", "mineru-agent-api", "mineru-accurate-api"] = "local"
     mineru_token: str = ""
+    # P4b-1：招标解析分段用的上下文长度上限（对齐参考 aiService.getConfig().context_length_limit）
+    ai_context_length_limit: int = 400000
 
     @property
     def db_path(self) -> Path:

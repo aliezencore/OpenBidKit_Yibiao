@@ -52,8 +52,8 @@ from app.domain.rejection.normalize import (
 )
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.service import save_uploaded_document
+from app.infra.tasks.rejection_extraction import RejectionExtractionRunner
 from app.infra.tasks.rejection_stub import (
-    StubExtractionRunner,
     StubRejectionCheckRunner,
     StubSubjectIdentificationRunner,
 )
@@ -560,11 +560,14 @@ async def start_extraction(project_id: str, state: AppState = Depends(get_state)
     if not tender_content.strip() or tender_signature is None:
         raise HTTPException(status_code=400, detail="缺少招标文件内容，无法解析无效与废标项")
     payload = {"projectId": project_id,
+               "tenderContent": tender_content,
                "tenderSignature": stable_hash(tender_content.strip())}
     task_id = await state.engine.submit(
         project_id=project_id, domain=ANALYSIS_DOMAIN, kind=EXTRACTION_KIND,
         payload=payload,
-        runner=StubExtractionRunner(state.rejection),
+        runner=RejectionExtractionRunner(
+            state.rejection, state.ai,
+            config={"context_length_limit": state.settings.ai_context_length_limit}),
     )
     return {"taskId": task_id}
 
