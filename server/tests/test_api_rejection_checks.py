@@ -149,7 +149,7 @@ def test_extract_then_run_completes_with_stub_results(env):
         assert state[key]["status"] == "success"
     assert state["rejectionCheckResult"]["findings"] == []      # 占位：无 findings
     assert state["subjectCheckResult"]["status"] == "idle"      # 未启用
-    assert state["tasks"]["checkTask"]["status"] == "success"
+    assert state["checkTask"]["status"] == "success"
 
 
 def test_identify_then_confirm_then_subject_check(env):

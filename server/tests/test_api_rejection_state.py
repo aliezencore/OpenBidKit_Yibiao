@@ -62,7 +62,7 @@ def test_state_shape_and_defaults(env):
         assert state[key] == {"status": "idle", "findings": []}
     assert state["subjectProfile"] == {
         "status": "idle", "officialName": "", "aliases": [], "candidates": []}
-    assert state["tasks"] == {}
+    assert "checkTask" not in state and "extractionTask" not in state
 
 
 def test_state_exposes_documents_and_rejects_stale_active_tab(env):
@@ -177,7 +177,7 @@ def test_state_includes_rejection_tasks_when_present(env):
     tasks_repo.create(task_id="t-1", project_id=project, domain="rejection",
                       kind="rejection-check-run", payload={}, created_at="2026-09-23T00:00:00Z")
     state = client.get(f"/projects/{project}/rejection/state").json()
-    assert state["tasks"]["checkTask"]["task_id"] == "t-1"
-    assert state["tasks"]["checkTask"]["type"] == "rejection-check-run"
-    assert state["tasks"]["checkTask"]["status"] == "running"  # queued → normalize 到 running
-    assert "extractionTask" not in state["tasks"]
+    assert state["checkTask"]["task_id"] == "t-1"
+    assert state["checkTask"]["type"] == "rejection-check-run"
+    assert state["checkTask"]["status"] == "running"  # queued → normalize 到 running
+    assert "extractionTask" not in state

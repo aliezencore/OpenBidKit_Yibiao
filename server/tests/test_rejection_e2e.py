@@ -86,9 +86,9 @@ def test_full_flow_reaches_four_success_results(env):
         assert state[key]["status"] == "success", key
         assert state[key]["findings"] == []          # 占位算法：无 findings
     # 四类任务的最近一条都在状态里
-    assert state["tasks"]["extractionTask"]["status"] == "success"
-    assert state["tasks"]["subjectIdentificationTask"]["status"] == "success"
-    assert state["tasks"]["checkTask"]["status"] == "success"
+    assert state["extractionTask"]["status"] == "success"
+    assert state["subjectIdentificationTask"]["status"] == "success"
+    assert state["checkTask"]["status"] == "success"
 
 
 def test_rerun_keeps_result_shape_and_does_not_duplicate(env):
@@ -125,6 +125,9 @@ def test_reuploading_bid_clears_check_results_but_keeps_extraction(env):
     for key in ("rejectionCheckResult", "typoCheckResult", "logicCheckResult",
                 "subjectCheckResult"):
         assert repo.get_result_row(project, key) is None, key
+    # 参考 :1076-1080：新增投标文档还要**重置主体档案**（confirmed 失效）并**切页签**
+    assert repo.load_subject_profile(project)["status"] == "idle"
+    assert state["activeDocumentTab"] == state["bidDocuments"][-1]["id"]
 
 
 def test_reuploading_tender_clears_extraction_and_check_results(env):
@@ -143,6 +146,37 @@ def test_reuploading_tender_clears_extraction_and_check_results(env):
         assert repo.get_result_row(project, key) is None, key
     # 主体档案不受文档变更影响（只有主体检查结果被清）
     assert repo.load_subject_profile(project)["status"] == "confirmed"
+
+
+def test_deleting_one_bid_resets_subject_profile_and_switches_tab(env):
+    """参考 :1223-1231：删投标 → 清该文档视觉资产 + 重置主体档案（带 reason）+ 切页签。"""
+    client, project, tmp_path = env
+    _run_full_flow(client, project, tmp_path)
+    repo = client.app.state.yibiao.rejection
+    first_bid = _state(client, project)["bidDocuments"][0]["id"]
+    repo.save_visual_assets(project, first_bid, [{"id": "a-1"}])
+    assert repo.list_visual_assets(project, first_bid)
+
+    client.delete(f"/projects/{project}/rejection/documents",
+                  params={"role": "bid", "documentId": first_bid})
+
+    profile = repo.load_subject_profile(project)
+    assert profile["status"] == "idle"
+    assert profile["error"] == "投标文件已更新，请重新确认投标主体"
+    assert repo.list_visual_assets(project, first_bid) == []
+    assert _state(client, project)["activeDocumentTab"] == "tender"
+
+
+def test_deleting_tender_keeps_subject_profile(env):
+    """删招标不动主体档案（它依赖投标签名），只把页签切回 'tender'。"""
+    client, project, tmp_path = env
+    _run_full_flow(client, project, tmp_path)
+    repo = client.app.state.yibiao.rejection
+
+    client.delete(f"/projects/{project}/rejection/documents", params={"role": "tender"})
+
+    assert repo.load_subject_profile(project)["status"] == "confirmed"
+    assert _state(client, project)["activeDocumentTab"] == "tender"
 
 
 def test_deleting_all_bid_documents_blocks_run(env):

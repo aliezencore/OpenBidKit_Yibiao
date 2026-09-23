@@ -23,7 +23,10 @@ PROGRESS_CAP = 95
 
 # 参考 :1655-1670 的初始文案（逐字）
 INITIAL_RESULT_MESSAGES = {
+    # 参考 :1649-1653 逐字
     "rejection": "第一轮：正在分析检查范围。",
+    "typo": "正在识别错别字候选。",
+    "logic": "正在检查逻辑谬误。",
     "subject": "正在检查投标主体一致性。",
 }
 CHECK_LABELS = {

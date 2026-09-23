@@ -167,6 +167,7 @@ async def upload_documents(
 
     if document_role == "bid":
         sort_order = len(existing)
+        added_bid_ids: list[str] = []
         for item in parsed:
             key = _dedupe_key(item["file_name"], item["markdown"])
             if key in seen:
@@ -180,7 +181,15 @@ async def upload_documents(
                 file_name=item["file_name"], markdown=item["markdown"],
                 parser_label=item["parser_label"], sort_order=sort_order,
                 imported_at=imported_at, relative_path=relative_path))
+            added_bid_ids.append(document_id)
             sort_order += 1
+        if added_bid_ids:
+            # 参考 :1076-1080：新增投标文档 → 作废四项检查结果 + 重置主体档案（无 reason）
+            # + 把页签切到第一份新文档。**不重置 extraction**（它吃招标内容）。
+            state.rejection.clear_check_results(project_id)
+            state.rejection.reset_subject_profile(project_id)
+            state.rejection.update_meta(project_id,
+                                        {"active_document_tab": added_bid_ids[0]})
     else:
         # 招标：读现有**源文档**（排除主文档）→ 合并新增 → 整体重写
         source_rows = [row for row in existing
@@ -243,6 +252,20 @@ def delete_documents(project_id: str, role: str, documentId: str | None = None,
                      state: AppState = Depends(get_state)) -> dict:
     """删文档（`role=tender` 删全部招标并作废解析；`role=bid` 可只删一份）。"""
     removed = state.rejection.clear_document_rows(project_id, role, documentId)
+    document_role = normalize_document_role(role)
+    if document_role == "bid":
+        # 参考 :1223-1231：删投标 → 清该文档（或全部）视觉资产 + 重置主体档案（带 reason）
+        if documentId:
+            state.rejection.clear_visual_assets(project_id, str(documentId))
+        else:
+            state.rejection.clear_visual_assets(project_id)
+        state.rejection.reset_subject_profile(project_id, "投标文件已更新，请重新确认投标主体")
+        remaining = state.rejection.list_documents(project_id, role="bid")
+        state.rejection.update_meta(project_id, {
+            "active_document_tab": remaining[0]["document_id"] if remaining else "tender"})
+    else:
+        # 参考 :1210：删招标 → 页签回 'tender'（**不**重置主体档案：它依赖投标签名）
+        state.rejection.update_meta(project_id, {"active_document_tab": "tender"})
     data_root = Path(state.settings.data_root)
     for row in removed:
         target = _markdown_target(data_root, project_id, str(row.get("markdown_path") or ""))
@@ -335,7 +358,9 @@ def _build_state(data_root: Path, project_id: str, state: AppState) -> dict[str,
         "logicCheckResult": repo.load_result(project_id, "logic"),
         "subjectCheckResult": repo.load_result(project_id, "subject"),
         "subjectProfile": repo.load_subject_profile(project_id),
-        "tasks": _tasks_payload(project_id, state),
+        # 参考 :897 把三类任务**平铺**在状态顶层（extractionTask/checkTask/
+        # subjectIdentificationTask），不是嵌在 "tasks" 键下。
+        **_tasks_payload(project_id, state),
     }
 
 
