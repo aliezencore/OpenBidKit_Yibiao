@@ -10,6 +10,7 @@ from app.infra.db.engine import Database
 from app.infra.db.migrate import apply_schema
 from app.infra.repositories.duplicate import DuplicateRepository
 from app.infra.repositories.projects import ProjectRepository
+from app.infra.repositories.rejection import RejectionRepository
 from app.infra.repositories.task_logs import TaskLogRepository
 from app.infra.repositories.tasks import TaskRepository
 from app.infra.tasks.cpu import CpuExecutor
@@ -29,6 +30,7 @@ class AppState:
     cpu: CpuExecutor
     ai: AiClient
     duplicate: DuplicateRepository
+    rejection: RejectionRepository
 
     async def aclose(self) -> None:
         # 任意一个资源的释放失败都不能阻止其余资源被释放。
@@ -59,6 +61,7 @@ def build_state(settings: Settings) -> AppState:
         tasks = TaskRepository(db)
         logs = TaskLogRepository(db)
         duplicate = DuplicateRepository(db)
+        rejection = RejectionRepository(db)
         bus = EventBus()
         engine = TaskEngine(tasks, logs, settings, publisher=bus)
         # 上次进程被强杀时遗留的 running 任务标为 interrupted（spec §6.4）
@@ -76,7 +79,7 @@ def build_state(settings: Settings) -> AppState:
         raise
     return AppState(settings=settings, db=db, projects=projects, tasks=tasks,
                     logs=logs, bus=bus, engine=engine, cpu=cpu, ai=ai,
-                    duplicate=duplicate)
+                    duplicate=duplicate, rejection=rejection)
 
 
 def get_state(request: Request) -> AppState:

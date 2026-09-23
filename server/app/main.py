@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import duplicate, health, projects, tasks
+from app.api import duplicate, health, projects, rejection, tasks
 from app.api.deps import build_state
 from app.config import Settings, get_settings
 
@@ -39,6 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(projects.router)
     app.include_router(tasks.router)
     app.include_router(duplicate.router)
+    app.include_router(rejection.router)
     # 静态挂载**必须**在全部 API 路由之后：mount("/") 只承接未被 API 命中的
     # 路径，注册顺序即优先级（R-P3d3-9，tests/test_static_frontend.py 钉住）。
     web_dist = _resolve_web_dist(resolved)

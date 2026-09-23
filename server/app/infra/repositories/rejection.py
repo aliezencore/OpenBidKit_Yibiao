@@ -28,6 +28,7 @@ from app.domain.rejection.findings import (
 from app.domain.rejection.normalize import (
     DEFAULT_CHECK_OPTIONS,
     SECTION_STATUSES,
+    normalize_document_role,
     normalize_status,
     strip_triple_quote_wrapper,
 )
@@ -154,8 +155,12 @@ class RejectionRepository:
         return str(payload["document_id"])
 
     def clear_documents(self, project_id: str, *, role: str | None = None) -> list[str]:
-        """删行并返回被删行的 `markdown_path`（对齐 `clearDocumentRows` :422-443：
-        调用方据此清磁盘上的 markdown 副本）。"""
+        """删行并返回被删行的 `markdown_path`（调用方据此清磁盘上的 markdown 副本）。
+
+        **不连带清理结果**——「导入/删除文档要作废哪些结果」是 `clear_document_rows`
+        的职责（参考把两件事分开：`removeMarkdownRows` 只管文件，`clearDocumentRows`
+        管行 + 结果）。本方法是 T2a 的簿记原语。
+        """
         if role is None:
             rows = self.list_documents(project_id)
         else:
@@ -170,6 +175,60 @@ class RejectionRepository:
                 "DELETE FROM rejection_check_documents WHERE project_id = ? AND role = ?",
                 (project_id, role))
         return [str(row["markdown_path"]) for row in rows if row.get("markdown_path")]
+
+    def resequence_bid_documents(self, project_id: str) -> None:
+        """把投标文档的 `sort_order` 重排成 0..n-1（对齐 `resequenceBidDocuments` :381-387：
+        按 `sort_order, imported_at` 取序，再逐行回写序号与 `updated_at`）。"""
+        rows = self._db.query(
+            "SELECT document_id FROM rejection_check_documents"
+            " WHERE project_id = ? AND role = 'bid'"
+            " ORDER BY sort_order ASC, imported_at ASC", (project_id,))
+        timestamp = _now()
+        for index, row in enumerate(rows):
+            self._db.execute(
+                "UPDATE rejection_check_documents SET sort_order = ?, updated_at = ?"
+                " WHERE project_id = ? AND document_id = ?",
+                (index, timestamp, project_id, row["document_id"]))
+
+    def clear_document_rows(self, project_id: str, role: str,
+                            document_id: str | None = None) -> list[dict]:
+        """删文档行**并作废相应结果**（对齐 `clearDocumentRows` :422-443），返回被删的行。
+
+        两条不对称（最易写错的地方）：
+
+        - **tender**：删**所有** tender 行（忽略 `document_id`）→ 同时清
+          `extraction` 与四项检查结果（招标内容变了，解析结果整段作废）；
+        - **bid**：删指定行（或全部）→ 重排序号 → **只清四项检查结果**
+          （不动 extraction：它吃的是招标内容）。
+        """
+        document_role = normalize_document_role(role)
+        if document_role == "tender":
+            rows = self.list_documents(project_id, role="tender")
+            if not rows:
+                return []
+            self._db.execute(
+                "DELETE FROM rejection_check_documents WHERE project_id = ? AND role = 'tender'",
+                (project_id,))
+            self.save_extraction(project_id, None)
+            self.clear_check_results(project_id)
+            return rows
+        rows = (self.list_documents(project_id, role="bid") if not document_id
+                else [row for row in self.list_documents(project_id, role="bid")
+                      if row["document_id"] == str(document_id)])
+        if not rows:
+            return []
+        if document_id:
+            self._db.execute(
+                "DELETE FROM rejection_check_documents"
+                " WHERE project_id = ? AND role = 'bid' AND document_id = ?",
+                (project_id, str(document_id)))
+        else:
+            self._db.execute(
+                "DELETE FROM rejection_check_documents WHERE project_id = ? AND role = 'bid'",
+                (project_id,))
+        self.resequence_bid_documents(project_id)
+        self.clear_check_results(project_id)
+        return rows
 
     # ------------------------------------------------------------ extraction
 
