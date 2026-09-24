@@ -26,8 +26,11 @@ import logging
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.api.deps import AppState, get_state
@@ -653,12 +656,9 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
     data_root = Path(state.settings.data_root)
     repo = state.rejection
     meta = repo.ensure_meta(project_id)
-
-    documents = _bid_documents_with_content(data_root, project_id, state)
-    bid_signature = create_bid_signature([
-        {"id": d["document_id"], "role": "bid", "source": d["source"],
-         "fileName": d["file_name"], "content": d["content"]} for d in documents])
-    if not documents or not bid_signature:
+    context = _build_check_context(project_id, state, meta)
+    documents = context["documents"]
+    if not documents or not context["bidSignature"]:
         raise HTTPException(status_code=400, detail="缺少投标文件内容，无法开始检查")
 
     options = (body.checkOptions if body and body.checkOptions is not None
@@ -667,30 +667,17 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
     if not enabled:
         raise HTTPException(status_code=400, detail="请至少启用一种检查")
 
-    extraction = repo.load_extraction(project_id)
-    custom_items = meta["custom_check_items"] or ""
-    rejection_input_signature = create_rejection_check_input_signature(
-        [{"document_id": d["document_id"], "role": "bid", "source": d["source"],
-          "file_name": d["file_name"], "content": d["content"]} for d in documents],
-        extraction.get("content") or "", custom_items)
+    extraction = context["extraction"]
     if "rejection" in enabled and (not (extraction.get("content") or "").strip()
-                                   or not rejection_input_signature):
+                                   or not context["signatures"]["rejectionInputSignature"]):
         raise HTTPException(status_code=400, detail="请先完成无效与废标项解析")
 
-    profile = repo.load_subject_profile(project_id)
-    # 参考 :1653-1662：**仅在档案已 confirmed** 时才算得出签名（未确认 → 空串 → 前置报错）
-    subject_input_signature = (
-        create_subject_check_input_signature(
-            bid_signature=bid_signature,
-            official_name=profile.get("officialName"),
-            aliases=profile.get("aliases"),
-            subject_seal_check=normalize_check_options(options).get("subjectSealCheck", False))
-        if profile.get("status") == "confirmed" else "")
-    if "subject" in enabled and (not profile.get("officialName") or not subject_input_signature):
+    profile = context["profile"]
+    if "subject" in enabled and (not profile.get("officialName")
+                                 or not context["signatures"]["subjectInputSignature"]):
         raise HTTPException(status_code=400,
                             detail="请先确认投标主体后再开始主体一致性检查")
 
-    extraction = repo.load_extraction(project_id)
     payload = {
         "projectId": project_id,
         "enabledChecks": enabled,
@@ -698,11 +685,12 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
         "bidDocuments": [{"id": d["document_id"], "fileName": d["file_name"]}
                          for d in documents],
         "subjectSealCheck": normalize_check_options(options).get("subjectSealCheck", False),
+        # runner 消费 kind 键；export 消费输入签名键——同一组签名两种投影
         "signatures": {
-            "rejection": rejection_input_signature,
-            "typo": bid_signature,
-            "logic": bid_signature,
-            "subject": subject_input_signature,
+            "rejection": context["signatures"]["rejectionInputSignature"],
+            "typo": context["signatures"]["bidSignature"],
+            "logic": context["signatures"]["bidSignature"],
+            "subject": context["signatures"]["subjectInputSignature"],
         },
     }
     task_id = await state.engine.submit(
@@ -717,4 +705,94 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
             config={"context_length_limit": state.settings.ai_context_length_limit}),
     )
     return {"taskId": task_id}
+
+
+def _build_check_context(project_id: str, state: AppState,
+                         meta: Mapping[str, Any] | None = None,
+                         options_override: Mapping[str, Any] | None = None,
+                         ) -> dict[str, Any]:
+    """run 与 export 共用的「当前输入上下文」：投标文档（带内容）、三签名、
+    提取结果、主体档案、检查开关。**签名口径必须与 run 时一致**，否则导出的
+    「结果已失效」判定会把刚跑完的结果误判为失效。"""
+    data_root = Path(state.settings.data_root)
+    repo = state.rejection
+    meta = meta or repo.ensure_meta(project_id)
+    documents = _bid_documents_with_content(data_root, project_id, state)
+    bid_signature = create_bid_signature([
+        {"id": d["document_id"], "role": "bid", "source": d["source"],
+         "fileName": d["file_name"], "content": d["content"]} for d in documents])
+    options = (dict(options_override) if options_override is not None
+               else json.loads(meta.get("check_options_json") or "{}"))
+    extraction = repo.load_extraction(project_id)
+    custom_items = meta.get("custom_check_items") or ""
+    rejection_input_signature = create_rejection_check_input_signature(
+        [{"document_id": d["document_id"], "role": "bid", "source": d["source"],
+          "file_name": d["file_name"], "content": d["content"]} for d in documents],
+        extraction.get("content") or "", custom_items)
+    profile = repo.load_subject_profile(project_id)
+    subject_input_signature = (
+        create_subject_check_input_signature(
+            bid_signature=bid_signature,
+            official_name=profile.get("officialName"),
+            aliases=profile.get("aliases"),
+            subject_seal_check=normalize_check_options(options).get("subjectSealCheck", False))
+        if profile.get("status") == "confirmed" else "")
+    return {
+        "documents": documents,
+        "extraction": extraction,
+        "profile": profile,
+        "options": options,
+        "customItems": custom_items,
+        "bidSignature": bid_signature,
+        "signatures": {
+            "rejectionInputSignature": rejection_input_signature,
+            "bidSignature": bid_signature,
+            "subjectInputSignature": subject_input_signature,
+        },
+    }
+
+
+@router.get("/projects/{project_id}/rejection/export")
+def export_rejection_excel(project_id: str, state: AppState = Depends(get_state)) -> Response:
+    """废标检查结果 Excel 导出（参考 exportRejectionExcel :506-517）。
+
+    签名自持（同 R-P3d2-1）：三签名按**当前输入**重算（与 run 同一套
+    `_build_check_context`），invalid 结果按「结果已失效」处理（findings 清空）；
+    不可导出 → 400「没有可导出的当前废标检查结果」（:511 逐字）。
+    HTTP 下载替代 dialog.showSaveDialog（文件名形态照搬参考）。
+    """
+    from app.domain.rejection.export_workbook import (
+        build_rejection_workbook_plan,
+        select_current_rejection_results,
+    )
+    from app.infra.exporting.duplicate_xlsx import write_duplicate_xlsx
+
+    repo = state.rejection
+    meta = repo.ensure_meta(project_id)
+    context = _build_check_context(project_id, state, meta)
+    export_state = {
+        "bidDocuments": [{"id": d["document_id"], "fileName": d["file_name"]}
+                         for d in context["documents"]],
+        "rejectionCheckResult": repo.load_result(project_id, "rejection"),
+        "typoCheckResult": repo.load_result(project_id, "typo"),
+        "logicCheckResult": repo.load_result(project_id, "logic"),
+        "subjectCheckResult": repo.load_result(project_id, "subject"),
+        "subjectOfficialName": context["profile"].get("officialName") or "",
+        "subjectAliases": context["profile"].get("aliases") or [],
+    }
+    selected = select_current_rejection_results(export_state, context["signatures"])
+    if not selected["exportable"]:
+        raise HTTPException(status_code=400, detail="没有可导出的当前废标检查结果")
+    exported_at = datetime.now()
+    plan = build_rejection_workbook_plan(export_state, context["signatures"],
+                                         exported_at)
+    payload = write_duplicate_xlsx(plan)
+    return Response(
+        content=payload,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition":
+                "attachment; filename=\"rejection-check-export.xlsx\"; "
+                f"filename*=UTF-8''{quote(plan.file_name)}",
+        })
 
