@@ -3,6 +3,8 @@ import type {
   DuplicateFilesResponse,
   DuplicateState,
   ProjectRow,
+  RejectionRole,
+  RejectionState,
   TaskRow,
   TaskStatusEvent,
 } from './types';
@@ -150,4 +152,86 @@ export function downloadBlob(blob: Blob, fileName: string): void {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+// ---------------------------------------------------------------- rejection
+
+// 追加到 api/client.ts 末尾（rejection 数据获取层）。
+
+export function getRejectionState(projectId: string): Promise<RejectionState> {
+  return request<RejectionState>(
+    `/projects/${encodeURIComponent(projectId)}/rejection/state`);
+}
+
+export function uploadRejectionDocuments(
+  projectId: string, role: RejectionRole, files: File[],
+): Promise<{ tender: unknown[]; bid: unknown[] }> {
+  const form = new FormData();
+  form.append('role', role);
+  for (const file of files) form.append('files', file);
+  if (files.length === 0) {
+    form.append('files', new File([], '', { type: 'text/plain' }));
+  }
+  return request(`/projects/${encodeURIComponent(projectId)}/rejection/documents`, {
+    method: 'POST',
+    body: form,
+  });
+}
+
+export function deleteRejectionDocument(
+  projectId: string, role: RejectionRole, documentId?: string,
+): Promise<unknown> {
+  const params = new URLSearchParams({ role });
+  if (documentId) params.set('documentId', documentId);
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/rejection/documents?${params.toString()}`,
+    { method: 'DELETE' });
+}
+
+/** 返回 taskId；失败抛错（错误文案即端点 detail）。 */
+export function startRejectionExtraction(projectId: string): Promise<{ taskId: string }> {
+  return request(`/projects/${encodeURIComponent(projectId)}/rejection/extract`,
+    { method: 'POST' });
+}
+
+export function startSubjectIdentification(
+  projectId: string,
+): Promise<{ taskId: string }> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/rejection/subject/identify`,
+    { method: 'POST' });
+}
+
+export function confirmRejectionSubject(
+  projectId: string, officialName: string, aliases: string[],
+): Promise<{ success: boolean; message: string; profile: unknown }> {
+  return request(
+    `/projects/${encodeURIComponent(projectId)}/rejection/subject/confirm`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ officialName, aliases }) });
+}
+
+export function startRejectionCheck(
+  projectId: string, checkOptions?: Record<string, boolean>,
+): Promise<{ taskId: string }> {
+  return request(`/projects/${encodeURIComponent(projectId)}/rejection/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(checkOptions ? { checkOptions } : {}),
+  });
+}
+
+export function saveRejectionUiState(
+  projectId: string, patch: Record<string, unknown>,
+): Promise<RejectionState> {
+  return request(`/projects/${encodeURIComponent(projectId)}/rejection/ui`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function exportRejectionExcel(projectId: string): Promise<Blob> {
+  const response = await fetch(
+    `/projects/${encodeURIComponent(projectId)}/rejection/export`);
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.blob();
 }

@@ -806,3 +806,113 @@ button:disabled {
   color: var(--text-secondary);
   font-size: 13px;
 }
+
+/* ------------------------------------------------------------ rejection */
+
+.rejection-page,
+.rejection-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.rejection-steps {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rejection-step {
+  border: 1px solid var(--border, #d0d0d0);
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: 16px;
+  cursor: pointer;
+}
+
+.rejection-step.is-active {
+  background: #2f6fed;
+  border-color: #2f6fed;
+  color: #fff;
+}
+
+.rejection-upload-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.rejection-upload-row > div {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.rejection-doc-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rejection-doc-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.rejection-doc-list li span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rejection-extract-preview {
+  white-space: pre-wrap;
+  max-height: 280px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.04);
+  padding: 10px;
+  border-radius: 6px;
+}
+
+.rejection-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rejection-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 420px;
+}
+
+.rejection-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rejection-result-row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  padding-top: 8px;
+}
+
+.error-text {
+  color: #c0392b;
+}
+
+.muted {
+  color: rgba(0, 0, 0, 0.55);
+}

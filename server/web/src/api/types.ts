@@ -217,3 +217,84 @@ export interface ProjectRow {
   name: string;
   created_at: string;
 }
+
+// ---------------------------------------------------------------- rejection
+
+export type RejectionRole = 'tender' | 'bid';
+export type RejectionStep = 'documents' | 'extract' | 'subject' | 'check';
+
+export interface RejectionDocumentView {
+  id: string;
+  role: RejectionRole;
+  fileName: string;
+  source: string;
+  parserLabel: string | null;
+  contentHash: string;
+  contentChars: number;
+  markdownPath: string;
+  sortOrder: number;
+  importedAt: string;
+  updatedAt: string;
+}
+
+export interface RejectionResultView {
+  status: string;
+  findings: Array<Record<string, unknown>>;
+  inputSignature?: string | null;
+  activeFindingId?: string | null;
+  progressMessage?: string | null;
+  error?: string | null;
+  stats?: Record<string, unknown> | null;
+  updatedAt?: string | null;
+}
+
+export interface RejectionTaskView {
+  task_id: string;
+  type: string;
+  status: string;
+  progress: number;
+  started_at?: string | null;
+  updated_at?: string | null;
+  error?: string | null;
+}
+
+export interface RejectionSubjectProfile {
+  status: string;
+  officialName: string;
+  aliases: string[];
+  candidates: Array<Record<string, unknown>>;
+  preselectIndex?: number | null;
+  bidSignature?: string | null;
+  confirmedAt?: string | null;
+  error?: string | null;
+  identificationTarget?: Record<string, unknown> | null;
+}
+
+export interface RejectionExtractionView {
+  status: string;
+  content: string;
+  tenderSignature?: string | null;
+  error?: string | null;
+}
+
+/** GET /rejection/state 的响应（loadRejectionCheck 同构；任务三类平铺顶层）。 */
+export interface RejectionState {
+  tenderDocument: RejectionDocumentView | null;
+  tenderDocuments: RejectionDocumentView[];
+  bidDocuments: RejectionDocumentView[];
+  activeDocumentTab: string;
+  step: RejectionStep;
+  activeResultTab: string;
+  activeCheckResultTab: string;
+  invalidBidAndRejectionItems: RejectionExtractionView;
+  customCheckItems: string;
+  checkOptions: Record<string, boolean>;
+  rejectionCheckResult: RejectionResultView;
+  typoCheckResult: RejectionResultView;
+  logicCheckResult: RejectionResultView;
+  subjectCheckResult: RejectionResultView;
+  subjectProfile: RejectionSubjectProfile;
+  extractionTask?: RejectionTaskView;
+  checkTask?: RejectionTaskView;
+  subjectIdentificationTask?: RejectionTaskView;
+}

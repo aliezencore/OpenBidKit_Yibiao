@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { createProject, listProjects } from './api/client';
 import type { ProjectRow } from './api/types';
 import DuplicatePage from './duplicate/DuplicatePage';
+import RejectionPage from './rejection/RejectionPage';
 import { ToastProvider, useToast } from './ui';
 
 const PROJECT_STORAGE_KEY = 'yibiao.projectId';
@@ -24,6 +25,7 @@ function AppShell() {
   const [projectId, setProjectId] = useState<string>(readStoredProjectId);
   const [loaded, setLoaded] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [page, setPage] = useState<'duplicate' | 'rejection'>('duplicate');
 
   useEffect(() => {
     let cancelled = false;
@@ -82,8 +84,16 @@ function AppShell() {
       <header className="app-topbar">
         <strong className="app-brand">标书检查工具箱</strong>
         <nav className="app-nav" aria-label="功能导航">
-          <span className="app-nav-item is-active">标书查重</span>
-          <span className="app-nav-item is-disabled" title="即将推出">废标项检查</span>
+          <button type="button"
+            className={`app-nav-item${page === 'duplicate' ? ' is-active' : ''}`}
+            onClick={() => setPage('duplicate')}>
+            标书查重
+          </button>
+          <button type="button"
+            className={`app-nav-item${page === 'rejection' ? ' is-active' : ''}`}
+            onClick={() => setPage('rejection')}>
+            废标项检查
+          </button>
         </nav>
         <div className="app-project-picker">
           <label htmlFor="project-select">项目</label>
@@ -108,7 +118,9 @@ function AppShell() {
         </div>
       </header>
       <main className="app-main">
-        {projectId ? (
+        {projectId && page === 'rejection' ? (
+          <RejectionPage key={projectId} projectId={projectId} />
+        ) : projectId ? (
           <DuplicatePage key={projectId} projectId={projectId} />
         ) : (
           <div className="app-empty">
