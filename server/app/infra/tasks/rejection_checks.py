@@ -13,6 +13,22 @@ from typing import Any, Mapping, Sequence
 
 from app.domain.rejection.normalize import normalize_subject_name
 from app.infra.tasks.rejection_stub import INITIAL_RESULT_MESSAGES
+from app.domain.rejection.rolling_rejection import (
+    FINAL_CANDIDATE_BATCH_SIZE,
+    ROLLING_SEGMENT_LIMIT_RATIO,
+    apply_rolling_rejection_patch,
+    build_rejection_final_batch_messages,
+    build_rejection_global_merge_messages,
+    build_rolling_rejection_segment_messages,
+    create_bid_package_segments,
+    create_empty_rolling_rejection_state,
+    create_final_rejection_state_summary,
+    create_rejection_final_candidates,
+    create_rolling_rejection_state_summary,
+    dedupe_rejection_findings,
+    normalize_rolling_rejection_patch,
+    should_use_segmented_rejection_flow,
+)
 from app.domain.rejection.rejection_check import (
     build_rejection_check_analysis_messages,
     build_rejection_check_final_messages,
@@ -59,7 +75,8 @@ def compute_progress(completed: int, enabled: int) -> int:
 class RejectionCheckRunner:
     def __init__(self, repo: RejectionRepository, ai: Any, data_root: Path | str,
                  invalid_items: str = "", custom_items: str = "",
-                 official_name: str = "", aliases: list[str] | None = None) -> None:
+                 official_name: str = "", aliases: list[str] | None = None,
+                 config: Mapping[str, Any] | None = None) -> None:
         self._repo = repo
         self._ai = ai
         self._data_root = Path(data_root)
@@ -67,6 +84,7 @@ class RejectionCheckRunner:
         self._custom_items = custom_items
         self._official_name = official_name
         self._aliases = list(aliases or [])
+        self._config = dict(config or {})
 
     async def __call__(self, ctx: Any, payload: Mapping[str, Any],
                        previous_state: dict | None) -> None:
@@ -153,7 +171,19 @@ class RejectionCheckRunner:
             "invalidBidAndRejectionItems": self._invalid_items or "",
             "customCheckItems": self._custom_items or "",
         }
-        # 直连三轮（rolling 变体未搬，登记：超长投标包行为与参考不同）
+        # 参考 :1443-1445：超长投标包走 rolling，否则直连三轮
+        if should_use_segmented_rejection_flow(input_params, self._config):
+            findings = await self._run_rejection_rolling(input_params, bid_documents,
+                                                         ctx)
+        else:
+            findings = await self._run_rejection_direct(input_params, bid_documents,
+                                                        ctx)
+        self._save_rejection_findings(project_id, findings)
+        return findings
+
+    async def _run_rejection_direct(self, input_params: Mapping[str, Any],
+                                    bid_documents: list[dict[str, Any]],
+                                    ctx: Any) -> list[dict[str, Any]]:
         ctx.log("废标项检查：第一轮：正在分析检查范围。")
         analysis = await self._ai.chat(
             build_rejection_check_analysis_messages(input_params))
@@ -163,11 +193,58 @@ class RejectionCheckRunner:
         ctx.log("废标项检查：第三轮：正在补充、去重并生成结果。")
         payload_result = await self._ai.collect_json_response(
             build_rejection_check_final_messages(input_params, analysis, draft_findings))
-        findings = normalize_rejection_check_findings(payload_result, bid_documents)
+        return normalize_rejection_check_findings(payload_result, bid_documents)
+
+    async def _run_rejection_rolling(self, input_params: Mapping[str, Any],
+                                     bid_documents: list[dict[str, Any]],
+                                     ctx: Any) -> list[dict[str, Any]]:
+        """逐段滚动审阅 → 定稿分批 → 全局合稿（参考 :1323-1400 逐字）。"""
+        segments = create_bid_package_segments(
+            bid_documents, self._config, ROLLING_SEGMENT_LIMIT_RATIO)
+        state = create_empty_rolling_rejection_state()
+        ctx.log("正在按上下文长度滚动审阅投标包。")
+        for segment in segments:
+            ctx.log(f"{segment['documentLabel']}：正在滚动审阅投标包第 "
+                    f"{segment['segmentIndex']}/{segment['totalSegments']} 段。")
+            state_summary = create_rolling_rejection_state_summary(state)
+            patch_payload = await self._ai.collect_json_response(
+                build_rolling_rejection_segment_messages(input_params, segment,
+                                                         state_summary))
+            state = apply_rolling_rejection_patch(
+                state, normalize_rolling_rejection_patch(
+                    patch_payload, bid_documents, segment["documentId"]))
+
+        ctx.log("正在基于全投标包状态定稿废标项风险。")
+        candidates = create_rejection_final_candidates(state)
+        if not candidates:
+            return []
+        findings: list[dict[str, Any]] = []
+        final_summary = create_final_rejection_state_summary(state)
+        batches = [candidates[i:i + FINAL_CANDIDATE_BATCH_SIZE]
+                   for i in range(0, len(candidates), FINAL_CANDIDATE_BATCH_SIZE)]
+        for batch_index, batch in enumerate(batches):
+            ctx.log(f"正在定稿废标项风险第 {batch_index + 1}/{len(batches)} 批。")
+            final_payload = await self._ai.collect_json_response(
+                build_rejection_final_batch_messages(
+                    input_params, batch, final_summary,
+                    batch_index + 1, len(batches)))
+            findings.extend(normalize_rejection_check_findings(
+                final_payload, bid_documents))
+        merged_findings = dedupe_rejection_findings(findings)
+        if not merged_findings:
+            return []
+        ctx.log("正在全局合并废标项风险。")
+        merged_payload = await self._ai.collect_json_response(
+            build_rejection_global_merge_messages(input_params, merged_findings,
+                                                  final_summary))
+        return dedupe_rejection_findings(
+            normalize_rejection_check_findings(merged_payload, bid_documents))
+
+    def _save_rejection_findings(self, project_id: str,
+                                 findings: list[dict[str, Any]]) -> None:
         self._repo.clear_findings(project_id, "rejection")
         if findings:
             self._repo.save_findings(project_id, "rejection", findings)
-        return findings
 
     # ------------------------------------------------------------------ 逻辑谬误
 

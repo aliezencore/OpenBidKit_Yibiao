@@ -667,7 +667,8 @@ async def start_rejection_check(project_id: str, body: RunChecksRequest | None =
             invalid_items=extraction.get("content") or "",
             custom_items=meta["custom_check_items"] or "",
             official_name=profile.get("officialName") or "",
-            aliases=profile.get("aliases") or []),
+            aliases=profile.get("aliases") or [],
+            config={"context_length_limit": state.settings.ai_context_length_limit}),
     )
     return {"taskId": task_id}
 
