@@ -229,9 +229,26 @@ export function saveRejectionUiState(
   });
 }
 
-export async function exportRejectionExcel(projectId: string): Promise<Blob> {
+export interface ExportDownload {
+  blob: Blob;
+  /** 服务端建议文件名（Content-Disposition filename*，缺省 null）。 */
+  fileName: string | null;
+}
+
+export async function exportRejectionExcel(projectId: string): Promise<ExportDownload> {
   const response = await fetch(
     `/projects/${encodeURIComponent(projectId)}/rejection/export`);
   if (!response.ok) throw new Error(await errorMessage(response));
-  return response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const utf8Name = /filename\*=UTF-8''([^;]+)/.exec(disposition);
+  const fileName = utf8Name ? decodeURIComponent(utf8Name[1]) : null;
+  return { blob: await response.blob(), fileName };
+}
+
+/** 服务端命名形态：废标检查结果_<YYYYMMDD_HHMMSS>.xlsx（无响应头时的兜底）。 */
+export function exportTimestamp(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
+    `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }

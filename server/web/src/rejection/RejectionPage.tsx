@@ -9,6 +9,7 @@ import {
   deleteRejectionDocument,
   downloadBlob,
   exportRejectionExcel,
+  exportTimestamp,
   getRejectionState,
   getTask,
   saveRejectionUiState,
@@ -188,8 +189,9 @@ export default function RejectionPage({ projectId }: { projectId: string }) {
   const handleExport = useCallback(async () => {
     setBusy(true);
     try {
-      const blob = await exportRejectionExcel(projectId);
-      downloadBlob(blob, `废标检查结果_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      const download = await exportRejectionExcel(projectId);
+      downloadBlob(download.blob,
+        download.fileName ?? `废标检查结果_${exportTimestamp()}.xlsx`);
     } catch (error) {
       showToast(error instanceof Error ? error.message : '导出失败', 'error');
     } finally {

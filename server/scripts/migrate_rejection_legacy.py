@@ -114,7 +114,12 @@ def migrate(legacy_db: Path, legacy_workspace: Path, data_root: Path,
                                "meta": False, "profile": False}
 
     def _rows(table: str) -> list[sqlite3.Row]:
-        return legacy.execute(f"SELECT * FROM {table}").fetchall()
+        """读 legacy 表；表不存在（旧版本库）时容错跳过并告警（评审 B P2）。"""
+        try:
+            return legacy.execute(f"SELECT * FROM {table}").fetchall()
+        except sqlite3.OperationalError as error:
+            print(f"警告：legacy 表 {table} 不可读，已跳过（{error}）", file=sys.stderr)
+            return []
 
     # ① 文档（含 markdown 复制；非 docx/markdown 缺文件时保留行、跳过文件）
     document_rows = _rows("rejection_check_documents")
