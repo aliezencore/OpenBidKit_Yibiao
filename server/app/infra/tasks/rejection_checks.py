@@ -50,8 +50,16 @@ from app.domain.rejection.logic_check import (
     build_logic_check_messages,
     normalize_logic_check_findings,
 )
+from app.domain.rejection.rolling_rejection import (
+    TYPO_SEGMENT_LIMIT_RATIO,
+    create_bid_document_segments,
+    should_use_segmented_prompt,
+)
 from app.domain.rejection.typo_check import (
     build_typo_check_messages,
+    create_segment_prompt_document,
+    dedupe_typo_findings,
+    format_bid_documents_for_prompt,
     normalize_typo_check_findings,
 )
 from app.infra.repositories.rejection import RejectionRepository
@@ -165,14 +173,45 @@ class RejectionCheckRunner:
 
     async def _run_typo(self, project_id: str, bid_documents: list[dict[str, Any]],
                         ctx: Any) -> list[dict[str, Any]]:
-        payload_result = await self._ai.collect_json_response(
-            build_typo_check_messages(bid_documents))
+        """错别字检查：短文档直连；超长走分段（参考 runSegmentedTypoCheck :1404-1430）。"""
+        prompt_text = format_bid_documents_for_prompt({"bidDocuments": bid_documents})
+        if should_use_segmented_prompt(prompt_text, self._config,
+                                       TYPO_SEGMENT_LIMIT_RATIO):
+            findings = await self._run_typo_segmented(bid_documents, ctx)
+        else:
+            payload_result = await self._ai.collect_json_response(
+                build_typo_check_messages(bid_documents))
+            findings = normalize_typo_check_findings(payload_result, bid_documents)
         ctx.log(f"{TYPO_LABEL}：正在校验错别字原文位置。")
-        findings = normalize_typo_check_findings(payload_result, bid_documents)
         self._repo.clear_findings(project_id, "typo")
         if findings:
             self._repo.save_findings(project_id, "typo", findings)
         return findings
+
+    async def _run_typo_segmented(self, bid_documents: list[dict[str, Any]],
+                                  ctx: Any) -> list[dict[str, Any]]:
+        """参考 runSegmentedTypoCheck（:1404-1430）：逐文档分段（limitRatio 0.7），
+        每段以「该段为唯一投标文件」发请求，normalize 带 segmentStart/EndOffset
+        做原文位置校验，最后跨段五元组去重。"""
+        collected: list[dict[str, Any]] = []
+        for document_index, document in enumerate(bid_documents):
+            document_label = (f"投标文件{document_index + 1}"
+                              + (f"（{document.get('fileName')}）"
+                                 if document.get("fileName") else ""))
+            segments = create_bid_document_segments(
+                document, self._config, TYPO_SEGMENT_LIMIT_RATIO)
+            for segment in segments:
+                ctx.log(f"{document_label}：正在识别第 "
+                        f"{segment['segmentIndex']}/{segment['totalSegments']} 段错别字。")
+                segment_document = create_segment_prompt_document(document, segment)
+                payload_result = await self._ai.collect_json_response(
+                    build_typo_check_messages([segment_document]))
+                collected.extend(normalize_typo_check_findings(
+                    payload_result, [document], {
+                        "segmentStartOffset": segment["startOffset"],
+                        "segmentEndOffset": segment["endOffset"],
+                    }))
+        return dedupe_typo_findings(collected)
 
     # ------------------------------------------------- 废标项（三轮，P4b-2）
 

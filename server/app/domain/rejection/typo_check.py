@@ -215,3 +215,42 @@ def _first_of(item: Mapping[str, Any], keys: Sequence[str]) -> Any:
         if value:
             return value
     return None
+
+
+# ------------------------------------------------- 分段检查辅助（P4b 收尾）
+
+def create_segment_prompt_document(document: Mapping[str, Any],
+                                   segment: Mapping[str, Any]) -> dict[str, Any]:
+    """参考 `createSegmentPromptDocument`（rejectionCheckTask.cjs :440-442）：
+    单文件分段后以「该段内容作为唯一投标文件」构造消息输入。"""
+    return {**document, "content": segment["content"]}
+
+
+def dedupe_typo_findings(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """参考 `dedupeTypoFindings`（rejectionCheckTask.cjs :847-853）：分段合并后的
+    五元组去重——position 缺失（分段外的行）时以 locationHint+originalExcerpt 兜底。"""
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for item in findings or []:
+        if not item:
+            continue
+        position = _to_number(item.get("position"))
+        position_key = (str(int(position)) if position == position and position is not None
+                        else f"{item.get('locationHint') or ''}\u0000"
+                             f"{item.get('originalExcerpt') or ''}")
+        key = "\u0000".join([
+            str(item.get("bidDocumentId") or ""), str(item.get("wrongText") or ""),
+            str(item.get("correctText") or ""), position_key])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(dict(item))
+    return result
+
+
+def _to_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None
