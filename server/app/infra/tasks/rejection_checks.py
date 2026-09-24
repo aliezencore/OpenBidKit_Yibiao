@@ -76,7 +76,8 @@ class RejectionCheckRunner:
     def __init__(self, repo: RejectionRepository, ai: Any, data_root: Path | str,
                  invalid_items: str = "", custom_items: str = "",
                  official_name: str = "", aliases: list[str] | None = None,
-                 config: Mapping[str, Any] | None = None) -> None:
+                 config: Mapping[str, Any] | None = None,
+                 multimodal_enabled: bool = True) -> None:
         self._repo = repo
         self._ai = ai
         self._data_root = Path(data_root)
@@ -85,6 +86,7 @@ class RejectionCheckRunner:
         self._official_name = official_name
         self._aliases = list(aliases or [])
         self._config = dict(config or {})
+        self._multimodal_enabled = multimodal_enabled
 
     async def __call__(self, ctx: Any, payload: Mapping[str, Any],
                        previous_state: dict | None) -> None:
@@ -110,6 +112,7 @@ class RejectionCheckRunner:
                 **({"stats": {"visionStatus": "pending" if payload.get("subjectSealCheck")
                               else "disabled"}} if kind == "subject" else {})})
             findings: list[dict[str, Any]] = []
+            subject_stats_extra: dict[str, Any] | None = None
             try:
                 if kind == "rejection":
                     findings = await self._run_rejection(project_id, bid_documents, ctx)
@@ -119,7 +122,10 @@ class RejectionCheckRunner:
                 elif kind == "logic":
                     findings = await self._run_logic(project_id, bid_documents, ctx)
                 elif kind == "subject":
-                    findings = await self._run_subject_body(project_id, bid_documents, ctx)
+                    text_findings = await self._run_subject_body(project_id, bid_documents,
+                                                                 ctx)
+                    findings, subject_stats_extra = await self._run_subject_seal(
+                        project_id, text_findings, payload)
                 else:
                     # 占位（rolling 变体在 P4b 后续；印章视觉属 P4c）
                     ctx.log(f"{label}（占位）")
@@ -130,7 +136,10 @@ class RejectionCheckRunner:
                     completed += 1
                     progress = compute_progress(completed, len(checks))
                     self._repo.save_result(project_id, kind, {
-                        "status": "error", "findings": [], "error": str(error)})
+                        "status": "error", "findings": [], "error": str(error),
+                        **({"stats": subject_stats_extra}
+                           if kind == "subject" and subject_stats_extra is not None
+                           else {})})
                 ctx.progress(progress, f"{label}失败")
                 ctx.log(f"{label}失败：{error}")
                 return
@@ -143,6 +152,9 @@ class RejectionCheckRunner:
                     # 参考 :1708：有发现→「{label}发现 N 项」，无→「{label}未发现问题」
                     "progressMessage": (f"{label}发现 {len(findings)} 项" if findings
                                         else f"{label}未发现问题"),
+                    **({"stats": subject_stats_extra}
+                       if kind == "subject" and subject_stats_extra is not None
+                       else {}),
                 })
             ctx.progress(progress, f"{label}完成。")
 
@@ -320,6 +332,121 @@ class RejectionCheckRunner:
         if deduped:
             self._repo.save_findings(project_id, "subject", deduped)
         return deduped
+
+    # ------------------------------------- 主体印章（P4c-2，正文+印章合并）
+
+    async def _run_subject_seal(self, project_id: str,
+                                text_findings: list[dict[str, Any]],
+                                payload: Mapping[str, Any]
+                                ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """参考 runSubjectSealCheck（subjectCheckTask.cjs :491-642）。
+
+        印章关闭 → disabled；无资产 → success 空结果；多模态未开 → unavailable；
+        其余走 provider.inspect → classify → 合并正文 findings 并带 vision stats。
+        """
+        from app.domain.rejection.seal_check import (
+            classify_seal_finding,
+            compute_vision_status,
+            create_empty_vision_stats,
+            create_unrecognized_entry,
+        )
+        from app.infra.ai.vision_provider import OnlineVlmProvider
+
+        stats = create_empty_vision_stats()
+        if not payload.get("subjectSealCheck"):
+            return text_findings, {"visionStatus": "disabled", "visionStats": stats}
+
+        assets = await asyncio.to_thread(self._repo.list_visual_assets, project_id)
+        stats["totalAssets"] = len(assets)
+        if not assets:
+            return text_findings, {"visionStatus": "success", "visionStats": stats}
+
+        if not self._multimodal_enabled:
+            return text_findings, {"visionStatus": "unavailable", "visionStats": stats}
+
+        provider = OnlineVlmProvider(self._ai, multimodal_enabled=self._multimodal_enabled)
+        stats["candidateAssets"] = len(assets)
+        media_root = self._media_root(project_id)
+        provider_assets = []
+        for asset in assets:
+            provider_assets.append({
+                "assetId": asset["id"],
+                "bidDocumentId": asset["bidDocumentId"],
+                "absolutePath": str(media_root / asset["bidDocumentId"]
+                                    / Path(*str(asset["relativePath"]).split("/"))),
+                "contentHash": asset["contentHash"],
+                "assetKind": asset["assetKind"],
+                "mimeType": asset["mimeType"],
+                "sectionTitle": asset.get("sectionTitle", ""),
+                "nearbyText": asset["nearbyText"],
+            })
+        try:
+            response = await provider.inspect({
+                "protocolVersion": 1,
+                "officialName": self._official_name,
+                "aliases": self._aliases,
+                "assets": provider_assets,
+            })
+        except Exception as error:
+            return text_findings, {"visionStatus": "error", "visionStats": stats,
+                                   "error": str(error)}
+        if response.get("providerStatus") == "unavailable":
+            return text_findings, {"visionStatus": "unavailable",
+                                   "visionStats": stats,
+                                   "error": response.get("message")}
+
+        by_asset_id = {item["assetId"]: item for item in response.get("assets") or []}
+        seal_findings: list[dict[str, Any]] = []
+        unrecognized: list[dict[str, Any]] = []
+        ordinal_by_document: dict[str, int] = {}
+        for asset in assets:
+            ordinal = ordinal_by_document.get(asset["bidDocumentId"], 0) + 1
+            ordinal_by_document[asset["bidDocumentId"]] = ordinal
+            provider_asset = by_asset_id.get(asset["id"])
+            if provider_asset is None:
+                stats["failedAssets"] += 1
+                unrecognized.append(create_unrecognized_entry(
+                    asset, ordinal, kind="failed", reason="未返回识别结果"))
+                continue
+            if provider_asset.get("status") == "skipped":
+                stats["skippedAssets"] += 1
+                # 清单只收「格式不支持」（「非盖章区域」不进清单但仍计 skipped）
+                if provider_asset.get("skipKind") == "unsupported-format":
+                    unrecognized.append(create_unrecognized_entry(
+                        asset, ordinal, kind="skipped",
+                        reason=provider_asset.get("skipReason"),
+                        fmt=provider_asset.get("format"),
+                        label=provider_asset.get("label")))
+                continue
+            if provider_asset.get("status") == "failed":
+                stats["failedAssets"] += 1
+                unrecognized.append(create_unrecognized_entry(
+                    asset, ordinal, kind="failed",
+                    reason=provider_asset.get("skipReason"),
+                    fmt=provider_asset.get("format"),
+                    label=provider_asset.get("label")))
+                continue
+            stats["inspectedAssets"] += 1
+            if provider_asset.get("hasSeal"):
+                stats["sealAssets"] += 1
+            finding = classify_seal_finding(asset, provider_asset,
+                                            official_name=self._official_name,
+                                            aliases=self._aliases)
+            if finding:
+                if finding["level"] == "needs-review":
+                    stats["reviewAssets"] += 1
+                seal_findings.append(finding)
+
+        vision_status = compute_vision_status(
+            provider_status=response.get("providerStatus"), stats=stats)
+        stats["unrecognized"] = unrecognized
+        return [*text_findings, *seal_findings], {
+            "visionStatus": vision_status, "visionStats": stats,
+        }
+
+    def _media_root(self, project_id: str) -> Path:
+        return (self._data_root / "projects" / project_id
+                / "rejection-check" / "subject-media")
 
     # ------------------------------------------------------------------ 读盘
 

@@ -178,8 +178,8 @@ def test_identify_then_confirm_then_subject_check(env):
     assert _wait_task(client, run.json()["taskId"])["status"] == "success"
     result = client.get(f"/projects/{project}/rejection/state").json()["subjectCheckResult"]
     assert result["status"] == "success"
-    # 占位 runner 写入的印章状态（参考 :1670 的初始值语义）
-    assert result["stats"]["visionStatus"] in ("pending", "disabled")
+    # 无 visual assets（导入未提取图片）→ 印章分支 success 空结果
+    assert result["stats"]["visionStatus"] == "success"
 
 
 def _inject_fake_ai(client):
