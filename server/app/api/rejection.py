@@ -50,6 +50,11 @@ from app.domain.rejection.normalize import (
     normalize_step,
     stable_hash,
 )
+from app.domain.rejection.docx_visual_assets import (
+    extract_docx_visual_assets,
+    is_docx_file_path,
+    write_visual_media_files,
+)
 from app.domain.shared.errors import ParsingError
 from app.infra.parsing.service import save_uploaded_document
 from app.infra.tasks.rejection_extraction import RejectionExtractionRunner
@@ -92,16 +97,19 @@ async def _parse_uploads(uploads: list[UploadFile], *, project_id: str, data_roo
         tmp_dir = tempfile.mkdtemp(prefix="yibiao-rejection-")
         tmp_path = Path(tmp_dir) / file_name
         try:
-            tmp_path.write_bytes(payload)
+            await asyncio.to_thread(tmp_path.write_bytes, payload)
             saved = await asyncio.to_thread(
                 save_uploaded_document,
                 data_root=data_root, project_id=project_id,
                 source_path=tmp_path, role="rejection", provider=provider,
                 mineru_token=mineru_token)
+            markdown = await asyncio.to_thread(
+                Path(saved.markdown_path).read_text, encoding="utf-8")
             parsed.append({
                 "file_name": file_name,
-                "markdown": Path(saved.markdown_path).read_text(encoding="utf-8").strip(),
+                "markdown": markdown.strip(),
                 "parser_label": saved.parser_label,
+                "source_path": saved.source_path,
             })
         except ParsingError as error:
             _logger.warning("废标项文档解析失败：name=%s code=%s message=%s",
@@ -182,6 +190,44 @@ async def upload_documents(
                 parser_label=item["parser_label"], sort_order=sort_order,
                 imported_at=imported_at, relative_path=relative_path))
             added_bid_ids.append(document_id)
+            # 主体检查视觉材料：DOCX 提取图片 → subject-media/<docId>/<hash>/<hash>.<ext>
+            # → visual_assets 行（id={docId}-asset-{N}）。单份 DOCX 媒体损坏不阻塞导入（spec §13）。
+            if is_docx_file_path(item.get("source_path")):
+                try:
+                    extracted = extract_docx_visual_assets(item["source_path"])
+                    media_dir = (data_root / "projects" / project_id
+                                 / "rejection-check" / "subject-media" / document_id)
+                    relative_by_name = write_visual_media_files(
+                        media_dir, extracted["mediaFiles"])
+                    hash_by_name = {media["mediaName"]: media
+                                    for media in extracted["mediaFiles"]}
+                    rows = []
+                    for index, occurrence in enumerate(extracted["occurrences"]):
+                        media = hash_by_name.get(occurrence["mediaName"]) or {}
+                        rows.append({
+                            "id": f"{document_id}-asset-{index + 1}",
+                            "mediaName": occurrence["mediaName"],
+                            "contentHash": media.get("contentHash", ""),
+                            "relativePath": relative_by_name.get(
+                                occurrence["mediaName"], ""),
+                            "mimeType": media.get("mimeType",
+                                                  "application/octet-stream"),
+                            "width": occurrence["width"],
+                            "height": occurrence["height"],
+                            "placement": occurrence["placement"],
+                            "assetKind": occurrence["assetKind"],
+                            "locationHint": occurrence["locationHint"],
+                            "nearbyText": occurrence["nearbyText"],
+                            "sectionTitle": occurrence.get("sectionTitle"),
+                        })
+                    rows = [row for row in rows
+                            if row["relativePath"] and row["contentHash"]]
+                    if rows:
+                        state.rejection.save_visual_assets(project_id, document_id,
+                                                           rows)
+                except Exception as asset_error:
+                    _logger.warning("废标项视觉资产提取失败：%s（%s）",
+                                    item["file_name"], asset_error)
             sort_order += 1
         if added_bid_ids:
             # 参考 :1076-1080：新增投标文档 → 作废四项检查结果 + 重置主体档案（无 reason）
