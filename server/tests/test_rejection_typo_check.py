@@ -129,7 +129,7 @@ def test_runner_typo_branch_persists_findings(tmp_path):
     from app.infra.db.migrate import apply_schema
     from app.infra.repositories.projects import ProjectRepository
     from app.infra.repositories.rejection import RejectionRepository
-    from app.infra.tasks.rejection_checks import RejectionCheckRunner
+    from app.infra.tasks.rejection_checks import TYPO_LABEL, RejectionCheckRunner
     from tests.ai_fakes import ScriptedAI
 
     db = Database(tmp_path / "rejection.sqlite")
@@ -164,6 +164,9 @@ def test_runner_typo_branch_persists_findings(tmp_path):
     result = repo.load_result(project, "typo")
     assert result["status"] == "success"
     assert result["findings"][0]["wrongText"] == "伍万元"
+    # 参考 :1707-1708：完成文案「发现 N 项」+ activeFindingId 置首条
+    assert result["progressMessage"] == f"{TYPO_LABEL}发现 1 项"
+    assert result["activeFindingId"] == findings[0]["id"]
     assert ctx.progress_values[-1] == 100              # 任务收尾 100
     assert 95 in ctx.progress_values                    # 过程中封顶 95
     db.close()

@@ -97,6 +97,21 @@ class RejectionExtractionRunner:
             self._read_tender, project_id, str(payload.get("tenderPath") or ""))
         if not tender_content:
             tender_content = str(payload.get("tenderContent") or "")
+        try:
+            await self._run(ctx, payload, project_id, tender_content)
+        except Exception as error:
+            # 参考 :1547-1565：解析失败要把 extraction 落成 error 行（content 清空、
+            # source='ai'、带 tenderSignature 与 error 文案），再让任务失败。
+            message = str(error) or "无效与废标项解析失败"
+            self._repo.save_extraction(project_id, {
+                "status": "error", "content": "", "source": "ai",
+                "tenderSignature": payload.get("tenderSignature"),
+                "error": message,
+            })
+            raise
+
+    async def _run(self, ctx: Any, payload: Mapping[str, Any], project_id: str,
+                   tender_content: str) -> None:
         section_hint = payload.get("sectionHint")
 
         ctx.progress(5, "开始解析无效与废标项。")

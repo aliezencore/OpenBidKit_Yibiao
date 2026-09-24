@@ -141,9 +141,15 @@ async def test_runner_saves_extraction_success_with_ai_source():
 async def test_runner_raises_on_empty_content():
     ai = ScriptedAI(["   "])
     runner = RejectionExtractionRunner(_Repo(), ai, {})
+    repo = runner._repo
     with pytest.raises(ValueError, match="解析结果为空"):
         _run(runner(_Ctx(), {"projectId": "p1", "tenderContent": "招标内容",
                             "tenderSignature": "s"}, None))
+    # 参考 :1552-1565：解析失败要把 extraction 落成 error 行
+    assert repo.saved == {
+        "status": "error", "content": "", "source": "ai",
+        "tenderSignature": "s", "error": "无效标与废标项解析结果为空，请重新解析",
+    }
 
 
 class _Repo:

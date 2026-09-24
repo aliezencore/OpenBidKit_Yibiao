@@ -121,9 +121,12 @@ class RejectionCheckRunner:
                 progress = compute_progress(completed, len(checks))
                 self._repo.save_result(project_id, kind, {
                     "status": "success", "findings": findings,
-                    "progressMessage": f"{label}完成",
+                    "activeFindingId": findings[0]["id"] if findings else None,
+                    # 参考 :1708：有发现→「{label}发现 N 项」，无→「{label}未发现问题」
+                    "progressMessage": (f"{label}发现 {len(findings)} 项" if findings
+                                        else f"{label}未发现问题"),
                 })
-            ctx.progress(progress, f"{label}完成")
+            ctx.progress(progress, f"{label}完成。")
 
         await asyncio.gather(*(run_one(kind) for kind in checks))
         ctx.progress(100, "检查完成")
