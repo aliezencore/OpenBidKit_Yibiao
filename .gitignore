@@ -286,3 +286,6 @@ logs/
 
 # 企业微信群聊导出工具本地环境和敏感产物
 scripts/wecom_chat_export/
+
+# 本地 Python 虚拟环境（myenv 等）
+myenv/
