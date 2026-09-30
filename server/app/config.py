@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="YIBIAO_",
         env_nested_delimiter="__",
+        # 固定配置文件：server/.env（绝对定位，不依赖启动目录）。
+        # 优先级：真实环境变量 > .env 文件 > 代码默认值。
+        env_file=Path(__file__).resolve().parent.parent / ".env",
+        env_file_encoding="utf-8",
         extra="ignore",
     )
 

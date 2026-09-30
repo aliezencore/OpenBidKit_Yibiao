@@ -46,7 +46,13 @@ set YIBIAO_TEXT_MODEL__MODEL_NAME=你的模型名
 cd web && npm install && npm run dev    # http://localhost:5173，API 代理到 8000
 ```
 
-### 配置（环境变量，前缀 `YIBIAO_`）
+### 配置
+
+配置项集中在 **`server/.env`** 文件（模板见 [`server/.env.example`](./server/.env.example)，
+复制改名后取消注释填写；该文件已被 gitignore，Key 不会进仓库）。优先级：
+**真实环境变量 > `.env` 文件 > 代码默认值**。也可不用文件、直接设同名的环境变量。
+
+| 变量 | 说明 | 默认
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
